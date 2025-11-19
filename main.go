@@ -15,7 +15,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 || len(os.Args) > 3 {
-		fmt.Fprint(os.Stderr, "Encode: babe <input-image> [quality 0–29]\nDecode: babe <input.babe>\n")
+		fmt.Fprint(os.Stderr, "Encode: babe <input-image> [quality 0–60]\nDecode: babe <input.babe>\n")
 		os.Exit(1)
 	}
 
@@ -38,11 +38,11 @@ func main() {
 	if len(os.Args) == 3 {
 		q, err := strconv.Atoi(os.Args[2])
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "quality must be an integer between 0 and 29")
+			fmt.Fprintln(os.Stderr, "quality must be an integer between 0 and 60")
 			os.Exit(1)
 		}
-		if q < 0 || q > 29 {
-			fmt.Fprintln(os.Stderr, "quality must be between 0 and 29")
+		if q < 0 || q > 60 {
+			fmt.Fprintln(os.Stderr, "quality must be between 0 and 60")
 			os.Exit(1)
 		}
 		quality = q

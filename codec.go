@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	hackMagic = "BABE\n"
+	codec = "BABE\n"
 )
 
 // Default block sizes; these are overridden by compression presets via setBlocksForQuality.
@@ -82,6 +82,46 @@ var CompressionTable = map[int]CompressionPreset{
 	27: {SmallBlock: 10, MacroBlock: 10},
 	28: {SmallBlock: 10, MacroBlock: 20},
 	29: {SmallBlock: 10, MacroBlock: 30},
+
+	30: {SmallBlock: 11, MacroBlock: 11},
+	31: {SmallBlock: 11, MacroBlock: 22},
+	32: {SmallBlock: 11, MacroBlock: 33},
+
+	33: {SmallBlock: 12, MacroBlock: 12},
+	34: {SmallBlock: 12, MacroBlock: 24},
+	35: {SmallBlock: 12, MacroBlock: 36},
+
+	36: {SmallBlock: 13, MacroBlock: 12},
+	37: {SmallBlock: 13, MacroBlock: 24},
+	38: {SmallBlock: 13, MacroBlock: 36},
+
+	39: {SmallBlock: 14, MacroBlock: 14},
+	40: {SmallBlock: 14, MacroBlock: 28},
+	41: {SmallBlock: 14, MacroBlock: 42},
+
+	42: {SmallBlock: 15, MacroBlock: 15},
+	43: {SmallBlock: 15, MacroBlock: 30},
+	44: {SmallBlock: 15, MacroBlock: 45},
+
+	45: {SmallBlock: 16, MacroBlock: 16},
+	46: {SmallBlock: 16, MacroBlock: 32},
+	47: {SmallBlock: 16, MacroBlock: 48},
+
+	48: {SmallBlock: 17, MacroBlock: 17},
+	49: {SmallBlock: 17, MacroBlock: 34},
+	50: {SmallBlock: 17, MacroBlock: 51},
+
+	51: {SmallBlock: 18, MacroBlock: 18},
+	52: {SmallBlock: 18, MacroBlock: 36},
+	53: {SmallBlock: 18, MacroBlock: 54},
+
+	54: {SmallBlock: 19, MacroBlock: 19},
+	55: {SmallBlock: 19, MacroBlock: 38},
+	56: {SmallBlock: 19, MacroBlock: 57},
+
+	58: {SmallBlock: 20, MacroBlock: 20},
+	59: {SmallBlock: 20, MacroBlock: 40},
+	60: {SmallBlock: 20, MacroBlock: 60},
 }
 
 // setBlocksForQuality configures global smallBlock/macroBlock based on a quality key.
@@ -309,6 +349,7 @@ func Encode(img image.Image, quality int) ([]byte, error) {
 	b := img.Bounds()
 	w := b.Dx()
 	h := b.Dy()
+	// log.Printf("[BABE] Encode image %dx%d (quality=%d, smallBlock=%d, macroBlock=%d)", w, h, quality, smallBlock, macroBlock)
 
 	var raw bytes.Buffer
 	bw := bufio.NewWriter(&raw)
@@ -441,7 +482,7 @@ func Encode(img image.Image, quality int) ([]byte, error) {
 
 	// --- Write raw payload ---
 	// header
-	if _, err := bw.WriteString(hackMagic); err != nil {
+	if _, err := bw.WriteString(codec); err != nil {
 		return nil, err
 	}
 	// store block sizes used for this stream: smallBlock and macroBlock
@@ -580,7 +621,6 @@ func drawBlockBits(dst *image.RGBA, x0, y0, bw, bh int, br *BitReader, fgID, bgI
 
 // Decode reads a BABE-compressed stream (Zstd + YUV palette + index deltas + adaptive blocks) and returns an image.Image.
 func Decode(compData []byte) (image.Image, error) {
-
 	payload, err := decompressZstd(compData)
 	if err != nil {
 		return nil, fmt.Errorf("zstd decode: %w", err)
@@ -589,11 +629,11 @@ func Decode(compData []byte) (image.Image, error) {
 	br := bufio.NewReader(bytes.NewReader(payload))
 
 	// magic
-	header := make([]byte, len(hackMagic))
+	header := make([]byte, len(codec))
 	if _, err := io.ReadFull(br, header); err != nil {
 		return nil, fmt.Errorf("read header: %w", err)
 	}
-	if string(header) != hackMagic {
+	if string(header) != codec {
 		return nil, fmt.Errorf("bad magic: %q", string(header))
 	}
 
@@ -625,6 +665,7 @@ func Decode(compData []byte) (image.Image, error) {
 	if macroBlock < smallBlock || macroBlock%smallBlock != 0 {
 		return nil, fmt.Errorf("macroBlock (%d) must be >= smallBlock (%d) and a multiple of it", macroBlock, smallBlock)
 	}
+	// log.Printf("[BABE] Decode image %dx%d (smallBlock=%d, macroBlock=%d)", imgW, imgH, smallBlock, macroBlock)
 	useMacro := macroBlock > smallBlock
 
 	w4 := (imgW / smallBlock) * smallBlock
