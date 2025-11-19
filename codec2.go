@@ -8,6 +8,9 @@ import (
 	"image/color"
 	"image/draw"
 	"io"
+	"math"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 // Simple experimental recursive block codec.
@@ -48,7 +51,9 @@ func Encode(img image.Image, quality int) ([]byte, error) {
 		return nil, err
 	}
 
-	bw := NewBitWriter(b)
+	// Собираем «сырой» битстрим в отдельный буфер.
+	var raw bytes.Buffer
+	bw := NewBitWriter(&raw)
 	params := paramsForQuality(quality)
 
 	// Кодируем один прямоугольник целиком, дальше рекурсивно.
@@ -56,6 +61,19 @@ func Encode(img image.Image, quality int) ([]byte, error) {
 		return nil, err
 	}
 	if err := bw.Flush(); err != nil {
+		return nil, err
+	}
+
+	// Сжимаем сырой битстрим через zstd в основной буфер.
+	enc, err := zstd.NewWriter(b)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := enc.Write(raw.Bytes()); err != nil {
+		enc.Close()
+		return nil, err
+	}
+	if err := enc.Close(); err != nil {
 		return nil, err
 	}
 
@@ -98,7 +116,20 @@ func Decode(data []byte) (image.Image, error) {
 	w, h := int(w16), int(h16)
 
 	dst := image.NewRGBA(image.Rect(0, 0, w, h))
-	br := NewBitReaderFromReader(r)
+
+	// Оставшиеся данные — zstd-кадр с битстримом.
+	dec, err := zstd.NewReader(r)
+	if err != nil {
+		return nil, err
+	}
+	defer dec.Close()
+
+	plain, err := io.ReadAll(dec)
+	if err != nil {
+		return nil, err
+	}
+
+	br := NewBitReaderFromBytes(plain)
 
 	if err := decodeRegion(dst, 0, 0, w, h, params, br); err != nil {
 		return nil, err
@@ -119,22 +150,9 @@ type codec2Params struct {
 // простая мапа quality -> параметры.
 func paramsForQuality(q int) codec2Params {
 	// minBlock: от 4 (высокое качество) до 16 (низкое).
-	minB := 4 + (100-q)/10 // q=100 -> 4, q=1 -> ~13
-	if minB < 4 {
-		minB = 4
-	}
-	if minB > 16 {
-		minB = 16
-	}
-
-	// maxSpread: от 16 (высокое качество) до 64 (низкое).
-	maxSp := int32(16 + (100-q)/2) // q=100 -> ~16, q=1 -> ~65
-	if maxSp < 8 {
-		maxSp = 8
-	}
-	if maxSp > 64 {
-		maxSp = 64
-	}
+	qi := float64(100.0 - q)
+	minB := int(math.Ceil(1.0 + qi/33.0)) // q=100 -> 1, q=0 -> 4
+	maxSp := int32(12 + qi/2)             // q=100 -> 12, q=0 -> 62
 
 	return codec2Params{
 		minBlock:  minB,
@@ -528,6 +546,11 @@ type BitReader struct {
 func NewBitReaderFromReader(r *bytes.Reader) *BitReader {
 	rest, _ := io.ReadAll(r)
 	return &BitReader{data: rest}
+}
+
+// NewBitReaderFromBytes создаёт BitReader из уже прочитанных данных.
+func NewBitReaderFromBytes(b []byte) *BitReader {
+	return &BitReader{data: b}
 }
 
 // ReadBit читает один бит.
