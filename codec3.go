@@ -36,12 +36,6 @@ func paramsForQuality(q int) codec2Params {
 		colorTol:           ExpMap(qi, 99, 0, 7, 1, -3.0),
 		patternGainPercent: ExpMap(q, 1, 100, 0, 100, 3.0), // по умолчанию: паттерн должен быть лучше на 50%
 	}
-	fmt.Printf("QUALITY: minBlock=%d, maxGrad=%d, colorTol=%d, patternFactor=%d\n",
-		params.minBlock,
-		params.maxGrad,
-		params.colorTol,
-		params.patternGainPercent,
-	)
 	return params
 }
 
@@ -74,15 +68,9 @@ func Encode(img image.Image, quality int) ([]byte, error) {
 	}
 
 	// 1) Первый проход: параллельно собираем цвета для всех листьев и форму дерева по вертикальным полосам.
-	leaves, pattLeaves, leafModes, pattern, stats, err := collectRegionColorsStriped(yimg, luma, params, stripesHint)
+	leaves, pattLeaves, leafModes, pattern, _, err := collectRegionColorsStriped(yimg, luma, params, stripesHint)
 	if err != nil {
 		return nil, err
-	}
-
-	if stats.total > 0 {
-		frac := float64(stats.patternBetter) * 100.0 / float64(stats.total)
-		fmt.Printf("leaf stats: total=%d, pattern-better=%d (%.1f%%)\n",
-			stats.total, stats.patternBetter, frac)
 	}
 
 	// 2) Строим набор локальных палитр и локальные индексы листьев.
@@ -108,7 +96,7 @@ func Encode(img image.Image, quality int) ([]byte, error) {
 
 	// Сначала пишем все палитры:
 	// uint16 numPalettes, затем для каждой:
-	// uint16 leafCount, uint16 palSize, затем palSize * RGB.
+	// uint16 leafCount, uint16 palSize, затем palSize * .
 	if err := binary.Write(&raw, binary.BigEndian, uint16(len(pals))); err != nil {
 		return nil, err
 	}
@@ -231,22 +219,6 @@ func Encode(img image.Image, quality int) ([]byte, error) {
 		}
 	}
 
-	// Debug: размеры секций (до zstd)
-	var palettesBytes int
-	for _, p := range pals {
-		palettesBytes += 2 // leafCount
-		palettesBytes += 2 // palSize
-		palettesBytes += len(p.colors) * 3
-	}
-	palettesBytes += 2 // numPalettes
-
-	fmt.Printf("STREAM SIZES (raw, bytes): palettes=%d, leafIndices=%d, patternBits=%d, treeBits=%d\n",
-		palettesBytes,
-		len(leafBytes),
-		len(patBytes),
-		len(treeBytes),
-	)
-
 	if err := binary.Write(&raw, binary.BigEndian, uint32(len(treeBytes))); err != nil {
 		return nil, err
 	}
@@ -295,7 +267,8 @@ func Decode(data []byte) (image.Image, error) {
 		stripesHint = 255
 	}
 
-	dst := image.NewRGBA(image.Rect(0, 0, w, h))
+	rect := image.Rect(0, 0, w, h)
+	dst := image.NewYCbCr(rect, image.YCbCrSubsampleRatio444)
 
 	// Оставшиеся данные — zstd-кадр с битстримом.
 	plain, err := DecodeZstd(r)
@@ -309,7 +282,7 @@ func Decode(data []byte) (image.Image, error) {
 	if err := binary.Read(reader, binary.BigEndian, &numPalettes); err != nil {
 		return nil, err
 	}
-	palettes := make([][]color.RGBA, numPalettes)
+	palettes := make([][]color.YCbCr, numPalettes)
 	leafCounts := make([]uint32, numPalettes)
 	for i := 0; i < int(numPalettes); i++ {
 		if err := binary.Read(reader, binary.BigEndian, &leafCounts[i]); err != nil {
@@ -323,14 +296,14 @@ func Decode(data []byte) (image.Image, error) {
 		if sz < 0 {
 			return nil, fmt.Errorf("codec2: negative palette size")
 		}
-		p := make([]color.RGBA, sz)
+		p := make([]color.YCbCr, sz)
 		// Дельта-декодирование палитры по ПРЕДЫДУЩЕМУ цвету
 		if sz > 0 {
 			var ycc [3]byte
 			if _, err := io.ReadFull(reader, ycc[:]); err != nil {
 				return nil, err
 			}
-			p[0] = unpackYCoCg(ycc[0], ycc[1], ycc[2])
+			p[0] = color.YCbCr{Y: ycc[0], Cb: ycc[1], Cr: ycc[2]}
 
 			prevY := int(ycc[0])
 			prevCo := int(ycc[1])
@@ -366,7 +339,7 @@ func Decode(data []byte) (image.Image, error) {
 					cg = 255
 				}
 
-				p[j] = unpackYCoCg(byte(y), byte(co), byte(cg))
+				p[j] = color.YCbCr{Y: byte(y), Cb: byte(co), Cr: byte(cg)}
 
 				prevY = y
 				prevCo = co
@@ -459,9 +432,9 @@ func Decode(data []byte) (image.Image, error) {
 	// Второй этап: параллельно заливаем блоки цветом.
 	paintLeafJobsParallel(dst, palettes, jobs)
 
-	// Постпроцессинг блоков: мягкое сглаживание границ и стыков.
-	// Привязываем шаг сетки сглаживания к params.minBlock,
-	// чтобы не лезть внутрь блоков мельче минимального.
+	// Лёгкий постпроцессинг для сглаживания границ блоков в YCbCr-пространстве.
+	// Используем минимальный размер блока из параметров кодека, чтобы совпадало
+	// с сеткой квад-дерева.
 	smoothed := smoothBlocks(dst, params.minBlock)
 	return smoothed, nil
 }
@@ -479,7 +452,7 @@ type codec2Params struct {
 }
 
 type leafColor struct {
-	c color.RGBA
+	c color.YCbCr
 }
 
 type leafStats struct {
@@ -491,8 +464,8 @@ type leafStats struct {
 // (foreground/background), без привязки к конкретной палитре. Палитра по-прежнему
 // общая — оба цвета потом так же попадают в общий buildPalettes().
 type patternLeaf struct {
-	fg  color.RGBA
-	bg  color.RGBA
+	fg  color.YCbCr
+	bg  color.YCbCr
 	thr int32
 }
 
@@ -529,29 +502,20 @@ type leafRef struct {
 
 // palette описывает одну локальную палитру (до 256 цветов).
 type palette struct {
-	colors  []color.RGBA
+	colors  []color.YCbCr
 	buckets map[int][]int // bucketKey -> indices in colors, used only during buildPalettes
 }
 
 const (
-	bucketStepY     = 16 // ~256/16 = 16 buckets by luma
-	bucketStepCo    = 32 // coarser for chroma
-	bucketStepCg    = 32
-	bucketOffsetYCo = 512 // shift Co/Cg to positive range with margin
+	bucketStepY  = 16 // ~256/16 = 16 buckets by luma
+	bucketStepCo = 32 // coarser for chroma
+	bucketStepCg = 32
 )
 
-func paletteBucketCoords(c color.RGBA) (by, bco, bcg int) {
-	y, co, cg := RgbToYCoCg(c)
-
-	if y < 0 {
-		y = 0
-	} else if y > 255 {
-		y = 255
-	}
-
-	by = int(y) / bucketStepY
-	bco = int((co + bucketOffsetYCo) / bucketStepCo)
-	bcg = int((cg + bucketOffsetYCo) / bucketStepCg)
+func paletteBucketCoords(c color.YCbCr) (by, bcb, bcr int) {
+	by = int(c.Y) / bucketStepY
+	bcb = int(c.Cb) / bucketStepCo
+	bcr = int(c.Cr) / bucketStepCg
 	return
 }
 
@@ -559,18 +523,18 @@ func paletteBucketKey(by, bco, bcg int) int {
 	return (by << 16) | (bco << 8) | bcg
 }
 
-func (p *palette) addColor(c color.RGBA) int {
+func (p *palette) addColor(c color.YCbCr) int {
 	idx := len(p.colors)
 	p.colors = append(p.colors, c)
 	if p.buckets != nil {
-		by, bco, bcg := paletteBucketCoords(c)
-		k := paletteBucketKey(by, bco, bcg)
+		by, bcb, bcr := paletteBucketCoords(c)
+		k := paletteBucketKey(by, bcb, bcr)
 		p.buckets[k] = append(p.buckets[k], idx)
 	}
 	return idx
 }
 
-func (p *palette) findCloseIndex(c color.RGBA, tol int) int {
+func (p *palette) findCloseIndex(c color.YCbCr, tol int) int {
 	if len(p.colors) == 0 {
 		return -1
 	}
@@ -584,16 +548,16 @@ func (p *palette) findCloseIndex(c color.RGBA, tol int) int {
 		return -1
 	}
 
-	by, bco, bcg := paletteBucketCoords(c)
+	by, bcb, bcr := paletteBucketCoords(c)
 
 	for dy := -1; dy <= 1; dy++ {
 		for dc := -1; dc <= 1; dc++ {
 			for dg := -1; dg <= 1; dg++ {
 				// Check this bucket and its 26 neighbors (3x3x3 cube).
 				ny := by + dy
-				nco := bco + dc
-				ncg := bcg + dg
-				k := paletteBucketKey(ny, nco, ncg)
+				nb := bcb + dc
+				nr := bcr + dg
+				k := paletteBucketKey(ny, nb, nr)
 				indices := p.buckets[k]
 				for _, idx := range indices {
 					if CloseColor(c, p.colors[idx], tol) {
@@ -747,7 +711,7 @@ func ExpMap(x, inMin, inMax, outMin, outMax int, k float64) int {
 }
 
 // analyzeBlock computes the total, border, and inner energy (luma spread) and average color in a single scan.
-func analyzeBlock(img *image.YCbCr, luma []int16, x, y, w, h int) (totalEnergy int32, borderEnergy int32, innerEnergy int32, avg color.RGBA) {
+func analyzeBlock(img *image.YCbCr, luma []int16, x, y, w, h int) (totalEnergy int32, borderEnergy int32, innerEnergy int32, avg color.YCbCr) {
 	b := img.Bounds()
 	wImg := b.Dx()
 
@@ -815,7 +779,7 @@ func analyzeBlock(img *image.YCbCr, luma []int16, x, y, w, h int) (totalEnergy i
 	}
 
 	if count == 0 {
-		return 0, 0, 0, color.RGBA{0, 0, 0, 255}
+		return 0, 0, 0, color.YCbCr{Y: 0, Cb: 0, Cr: 0}
 	}
 
 	totalEnergy = maxL - minL
@@ -829,9 +793,7 @@ func analyzeBlock(img *image.YCbCr, luma []int16, x, y, w, h int) (totalEnergy i
 	avgY := uint8(sumY / count)
 	avgCb := uint8(sumCb / count)
 	avgCr := uint8(sumCr / count)
-	avgYC := color.YCbCr{Y: avgY, Cb: avgCb, Cr: avgCr}
-	avg = color.RGBAModel.Convert(avgYC).(color.RGBA)
-	avg.A = 255
+	avg = color.YCbCr{Y: avgY, Cb: avgCb, Cr: avgCr}
 	return totalEnergy, borderEnergy, innerEnergy, avg
 }
 
@@ -955,7 +917,7 @@ func collectRegionColorsStriped(
 
 // computeFG_BG вычисляет два усреднённых цвета (fg/bg) для блока,
 // разделяя пиксели по порогу яркости thr.
-func computeFG_BG(img *image.YCbCr, luma []int16, x, y, w, h int) (fg, bg color.RGBA, thr int32, ok bool) {
+func computeFG_BG(img *image.YCbCr, luma []int16, x, y, w, h int) (fg, bg color.YCbCr, thr int32, ok bool) {
 	b := img.Bounds()
 	wImg := b.Dx()
 
@@ -980,7 +942,7 @@ func computeFG_BG(img *image.YCbCr, luma []int16, x, y, w, h int) (fg, bg color.
 		}
 	}
 	if count == 0 {
-		return color.RGBA{0, 0, 0, 255}, color.RGBA{0, 0, 0, 255}, 0, false
+		return color.YCbCr{Y: 0, Cb: 0, Cr: 0}, color.YCbCr{Y: 0, Cb: 0, Cr: 0}, 0, false
 	}
 	thr = int32(sumL / count)
 
@@ -1026,20 +988,16 @@ func computeFG_BG(img *image.YCbCr, luma []int16, x, y, w, h int) (fg, bg color.
 		bgCount = 1
 	}
 
-	fgYC := color.YCbCr{
+	fg = color.YCbCr{
 		Y:  uint8(fgY / fgCount),
 		Cb: uint8(fgCb / fgCount),
 		Cr: uint8(fgCr / fgCount),
 	}
-	bgYC := color.YCbCr{
+	bg = color.YCbCr{
 		Y:  uint8(bgY / bgCount),
 		Cb: uint8(bgCb / bgCount),
 		Cr: uint8(bgCr / bgCount),
 	}
-	fg = color.RGBAModel.Convert(fgYC).(color.RGBA)
-	bg = color.RGBAModel.Convert(bgYC).(color.RGBA)
-	fg.A = 255
-	bg.A = 255
 	return fg, bg, thr, true
 }
 
@@ -1047,17 +1005,17 @@ func pickLeafModel(
 	img *image.YCbCr,
 	luma []int16,
 	x, y, w, h int,
-	avg color.RGBA,
+	avg color.YCbCr,
 	params codec2Params,
 	stats *leafStats,
-) (leafType, color.RGBA, patternLeaf) {
+) (leafType, color.YCbCr, patternLeaf) {
 	b := img.Bounds()
 	wImg := b.Dx()
 
 	minX := b.Min.X
 	minY := b.Min.Y
 
-	avgL := lumaFromRGB(avg.R, avg.G, avg.B)
+	avgL := int32(avg.Y)
 
 	// Ошибка одноцветной модели по яркости.
 	var errSolid int64
@@ -1089,9 +1047,9 @@ func pickLeafModel(
 		return leafTypeSolid, avg, patternLeaf{}
 	}
 
-	// Precompute luma for fg and bg.
-	fgL := lumaFromRGB(fg.R, fg.G, fg.B)
-	bgL := lumaFromRGB(bg.R, bg.G, bg.B)
+	// Precompute luma for fg and bg from Y channel directly.
+	fgL := int32(fg.Y)
+	bgL := int32(bg.Y)
 
 	// Ошибка двухцветной модели по яркости.
 	var errPattern int64
@@ -1301,7 +1259,7 @@ func buildPalettes(leaves []leafColor, pattLeaves []patternLeaf, modes []leafTyp
 
 	var pals []palette
 	pals = append(pals, palette{
-		colors:  make([]color.RGBA, 0, 256),
+		colors:  make([]color.YCbCr, 0, 256),
 		buckets: make(map[int][]int),
 	})
 
@@ -1324,7 +1282,7 @@ func buildPalettes(leaves []leafColor, pattLeaves []patternLeaf, modes []leafTyp
 				// заводим новую палитру и переключаемся на неё.
 				if len(p.colors) >= 256 {
 					pals = append(pals, palette{
-						colors:  make([]color.RGBA, 0, 256),
+						colors:  make([]color.YCbCr, 0, 256),
 						buckets: make(map[int][]int),
 					})
 					curPalID++
@@ -1353,7 +1311,7 @@ func buildPalettes(leaves []leafColor, pattLeaves []patternLeaf, modes []leafTyp
 			// гарантированно поместились в одну палитру.
 			if len(p.colors) > 254 {
 				pals = append(pals, palette{
-					colors:  make([]color.RGBA, 0, 256),
+					colors:  make([]color.YCbCr, 0, 256),
 					buckets: make(map[int][]int),
 				})
 				curPalID++
@@ -1361,7 +1319,7 @@ func buildPalettes(leaves []leafColor, pattLeaves []patternLeaf, modes []leafTyp
 			}
 
 			// Функция поиска/добавления цвета в текущую палитру.
-			findOrAdd := func(c color.RGBA) int {
+			findOrAdd := func(c color.YCbCr) int {
 				if idx := p.findCloseIndex(c, params.colorTol); idx >= 0 {
 					return idx
 				}
@@ -1397,7 +1355,7 @@ func buildPalettes(leaves []leafColor, pattLeaves []patternLeaf, modes []leafTyp
 		return nil, nil, fmt.Errorf("buildPalettes: used %d pattern leaves, but pattLeaves has %d", pattIdx, len(pattLeaves))
 	}
 
-	// Дополнительный шаг: внутри каждой палитры сортируем цвета по YCoCg,
+	// Дополнительный шаг: внутри каждой палитры сортируем цвета по YCbCr,
 	// а индексы во всех ссылках leafRef перенумеровываем согласно новой перестановке.
 	for pid := range pals {
 		colors := pals[pid].colors
@@ -1405,32 +1363,37 @@ func buildPalettes(leaves []leafColor, pattLeaves []patternLeaf, modes []leafTyp
 			continue
 		}
 
-		// Подготовим структуру с исходным индексом и координатами YCoCg.
+		// Подготовим структуру с исходным индексом и координатами YCbCr.
 		type ycColor struct {
 			oldIdx    int
-			c         color.RGBA
-			y, co, cg int32
+			c         color.YCbCr
+			y, cb, cr int32
 		}
 		ycs := make([]ycColor, len(colors))
 		for i, c := range colors {
-			y, co, cg := RgbToYCoCg(c)
-			ycs[i] = ycColor{oldIdx: i, c: c, y: y, co: co, cg: cg}
+			ycs[i] = ycColor{
+				oldIdx: i,
+				c:      c,
+				y:      int32(c.Y),
+				cb:     int32(c.Cb),
+				cr:     int32(c.Cr),
+			}
 		}
 
-		// Сортируем по яркости, затем по цветовым компонентам в YCoCg.
+		// Сортируем по яркости, затем по Cb/Cr.
 		sort.Slice(ycs, func(i, j int) bool {
 			if ycs[i].y != ycs[j].y {
 				return ycs[i].y < ycs[j].y
 			}
-			if ycs[i].co != ycs[j].co {
-				return ycs[i].co < ycs[j].co
+			if ycs[i].cb != ycs[j].cb {
+				return ycs[i].cb < ycs[j].cb
 			}
-			return ycs[i].cg < ycs[j].cg
+			return ycs[i].cr < ycs[j].cr
 		})
 
 		// Строим отображение oldIdx -> newIdx и новую палитру цветов.
 		inv := make([]int, len(colors))
-		newColors := make([]color.RGBA, len(colors))
+		newColors := make([]color.YCbCr, len(colors))
 		for newIdx, yc := range ycs {
 			newColors[newIdx] = yc.c
 			inv[yc.oldIdx] = newIdx
@@ -1603,8 +1566,8 @@ func decodeRegionJobs(
 	params codec2Params,
 	br *BitReader,
 	patBr *BitReader,
-	dst *image.RGBA,
-	palettes [][]color.RGBA,
+	dst *image.YCbCr,
+	palettes [][]color.YCbCr,
 	leafCounts []uint32,
 	curPal *int,
 	usedInPal *int,
@@ -1684,9 +1647,9 @@ func decodeRegionJobs(
 					continue
 				}
 				if bit {
-					dst.SetRGBA(px, py, fg)
+					setYCbCr(dst, px, py, fg)
 				} else {
-					dst.SetRGBA(px, py, bg)
+					setYCbCr(dst, px, py, bg)
 				}
 			}
 		}
@@ -1710,7 +1673,7 @@ func decodeRegionJobs(
 	return nil
 }
 
-func paintLeafJobsParallel(dst *image.RGBA, palettes [][]color.RGBA, jobs []leafJob) {
+func paintLeafJobsParallel(dst *image.YCbCr, palettes [][]color.YCbCr, jobs []leafJob) {
 	if len(jobs) == 0 {
 		return
 	}
@@ -1750,7 +1713,7 @@ func paintLeafJobsParallel(dst *image.RGBA, palettes [][]color.RGBA, jobs []leaf
 						if px < bounds.Min.X || py < bounds.Min.Y || px >= bounds.Max.X || py >= bounds.Max.Y {
 							continue
 						}
-						dst.SetRGBA(px, py, c)
+						setYCbCr(dst, px, py, c)
 					}
 				}
 			}
@@ -1813,7 +1776,7 @@ func ImageToYCbCr(src image.Image) *image.YCbCr {
 	return dst
 }
 
-// buildLumaBuffer computes luma (0..255) for each pixel of an RGBA image
+// buildLumaBuffer computes luma (0..255) for each pixel of YCB
 // and returns a flat slice indexed as (y - minY)*width + (x - minX).
 func buildLumaBuffer(img *image.YCbCr) []int16 {
 	b := img.Bounds()
@@ -1900,22 +1863,19 @@ func ReadHeader(r *bytes.Reader) (quality, w, h, stripes int, err error) {
 }
 
 // CloseColor returns true if colors a and b are "close enough" (approximate match),
-// но сравнение делается в пространстве YCoCg, а не в исходном RGB.
-// tol интерпретируется как допуск по цветовым каналам (Co/Cg), а по яркости
+// но сравнение делается в пространстве YCbCr.
+// tol интерпретируется как допуск по цветовым каналам (Cb/Cr), а по яркости
 // допускаем немного больший разброс.
-func CloseColor(a, b color.RGBA, tol int) bool {
-	ya, coa, cga := RgbToYCoCg(a)
-	yb, cob, cgb := RgbToYCoCg(b)
-
-	dY := Abs32(ya - yb)
-	dCo := Abs32(coa - cob)
-	dCg := Abs32(cga - cgb)
+func CloseColor(a, b color.YCbCr, tol int) bool {
+	dY := Abs32(int32(a.Y) - int32(b.Y))
+	dCb := Abs32(int32(a.Cb) - int32(b.Cb))
+	dCr := Abs32(int32(a.Cr) - int32(b.Cr))
 
 	// Яркость можно допускать чуть сильнее, чем цветовой сдвиг.
 	yTol := int32(tol * 2)
 	cTol := int32(tol)
 
-	return dY <= yTol && dCo <= cTol && dCg <= cTol
+	return dY <= yTol && dCb <= cTol && dCr <= cTol
 }
 
 // WriteBit writes a single bit.
@@ -2004,140 +1964,10 @@ func (br *BitReader) ReadByte() (byte, error) {
 	return b, nil
 }
 
-func SmoothEdges(src *image.RGBA, tol int) *image.RGBA {
-	b := src.Bounds()
-	dst := image.NewRGBA(b)
-	w := b.Dx()
-	h := b.Dy()
-	if w <= 0 || h <= 0 {
-		return dst
-	}
-
-	pix := src.Pix
-	stride := src.Stride
-	minX := b.Min.X
-	minY := b.Min.Y
-
-	for y := b.Min.Y; y < b.Max.Y; y++ {
-		for x := b.Min.X; x < b.Max.X; x++ {
-			rowOff := (y - minY) * stride
-			off := rowOff + (x-minX)*4
-			cr := pix[off+0]
-			cg := pix[off+1]
-			cb := pix[off+2]
-			ca := pix[off+3]
-			lc := lumaFromRGB(cr, cg, cb)
-
-			type pt struct{ x, y int }
-			neigh := [...]pt{
-				{x - 1, y},
-				{x + 1, y},
-				{x, y - 1},
-				{x, y + 1},
-				{x - 1, y - 1},
-				{x + 1, y - 1},
-				{x - 1, y + 1},
-				{x + 1, y + 1},
-			}
-
-			// Проверяем, есть ли сильный перепад яркости с соседями
-			// и одновременно измеряем максимальный перепад.
-			edge := false
-			maxDl := 0
-			for _, p := range neigh {
-				if p.x < b.Min.X || p.x >= b.Max.X || p.y < b.Min.Y || p.y >= b.Max.Y {
-					continue
-				}
-				nRowOff := (p.y - minY) * stride
-				nOff := nRowOff + (p.x-minX)*4
-				nr := pix[nOff+0]
-				ng := pix[nOff+1]
-				nb := pix[nOff+2]
-				ln := lumaFromRGB(nr, ng, nb)
-				dl := int(ln - lc)
-				if dl < 0 {
-					dl = -dl
-				}
-				if dl > maxDl {
-					maxDl = dl
-				}
-				if dl > tol*2 {
-					edge = true
-				}
-			}
-
-			if !edge {
-				// Нет сильного перепада — оставляем как есть.
-				dst.SetRGBA(x, y, color.RGBA{cr, cg, cb, ca})
-				continue
-			}
-
-			// На границе: сила сглаживания зависит от того,
-			// насколько сильно отличаются цвета.
-			// - если maxDl небольшой (цвета близки) — сглаживаем сильнее
-			// - если maxDl большой (резкая граница) — сглаживаем слабее
-
-			// Считаем средний цвет соседей.
-			var sumNR, sumNG, sumNB, nCount int
-			for _, p := range neigh {
-				if p.x < b.Min.X || p.x >= b.Max.X || p.y < b.Min.Y || p.y >= b.Max.Y {
-					continue
-				}
-				nRowOff := (p.y - minY) * stride
-				nOff := nRowOff + (p.x-minX)*4
-				sumNR += int(pix[nOff+0])
-				sumNG += int(pix[nOff+1])
-				sumNB += int(pix[nOff+2])
-				nCount++
-			}
-
-			if nCount == 0 {
-				// На краю изображения — просто оставляем исходный.
-				dst.SetRGBA(x, y, color.RGBA{cr, cg, cb, ca})
-				continue
-			}
-
-			avgNR := float64(sumNR) / float64(nCount)
-			avgNG := float64(sumNG) / float64(nCount)
-			avgNB := float64(sumNB) / float64(nCount)
-
-			// Вычисляем коэффициент сглаживания alpha в [0..1].
-			// Базируемся на maxDl:
-			// - небольшие перепады -> среднее сглаживание
-			// - средние/большие перепады -> более сильное сглаживание, чтобы убрать "зубья"
-			var alpha float64
-			switch {
-			case maxDl < tol*3:
-				// слабая граница — лёгкое сглаживание
-				alpha = 0.4
-			case maxDl < tol*5:
-				// нормальная граница — заметное сглаживание
-				alpha = 0.3
-			default:
-				// очень контрастная граница — тоже сглаживаем ощутимо, но не до мыла
-				alpha = 0.1
-			}
-
-			// Итоговый цвет: смесь исходного и среднего по соседям.
-			outR := float64(cr)*(1-alpha) + avgNR*alpha
-			outG := float64(cg)*(1-alpha) + avgNG*alpha
-			outB := float64(cb)*(1-alpha) + avgNB*alpha
-
-			dst.SetRGBA(x, y, color.RGBA{
-				R: uint8(outR + 0.5),
-				G: uint8(outG + 0.5),
-				B: uint8(outB + 0.5),
-				A: ca,
-			})
-		}
-	}
-
-	return dst
-}
-
 // smoothJunctions performs gradient-based smoothing at intersections of blocks
-// with a given nominal blockSize (usually params.minBlock from the codec).
-func smoothJunctions(img *image.RGBA, blockSize int) *image.RGBA {
+// with a given nominal blockSize (usually params.minBlock from the codec),
+// работая напрямую в пространстве YCbCr 4:4:4.
+func smoothJunctions(img *image.YCbCr, blockSize int) *image.YCbCr {
 	b := img.Bounds()
 	w, h := b.Dx(), b.Dy()
 
@@ -2150,8 +1980,7 @@ func smoothJunctions(img *image.RGBA, blockSize int) *image.RGBA {
 		return img
 	}
 
-	pix := img.Pix
-	stride := img.Stride
+	stride := img.YStride
 	minX := b.Min.X
 	minY := b.Min.Y
 
@@ -2162,34 +1991,30 @@ func smoothJunctions(img *image.RGBA, blockSize int) *image.RGBA {
 	const junctionLumaSpread int32 = 32
 	const lumaSimThreshold int32 = 8
 
-	similar := func(a, b color.RGBA) bool {
-		da := lumaFromRGB(a.R, a.G, a.B) - lumaFromRGB(b.R, b.G, b.B)
+	similar := func(a, b color.YCbCr) bool {
+		da := int32(a.Y) - int32(b.Y)
 		if da < 0 {
 			da = -da
 		}
 		return da <= lumaSimThreshold
 	}
 
-	lerp8 := func(a, b uint8, t float64) uint8 {
-		return uint8(float64(a)*(1-t) + float64(b)*t + 0.5)
-	}
-
 	for y := b.Min.Y + blockSize; y < b.Max.Y; y += blockSize {
 		for x := b.Min.X + blockSize; x < b.Max.X; x += blockSize {
-			off00 := (y-1-minY)*stride + (x-1-minX)*4
-			off10 := (y-1-minY)*stride + (x-minX)*4
-			off01 := (y-minY)*stride + (x-1-minX)*4
-			off11 := (y-minY)*stride + (x-minX)*4
+			off00 := (y-1-minY)*stride + (x - 1 - minX)
+			off10 := (y-1-minY)*stride + (x - minX)
+			off01 := (y-minY)*stride + (x - 1 - minX)
+			off11 := (y-minY)*stride + (x - minX)
 
-			c00 := color.RGBA{pix[off00+0], pix[off00+1], pix[off00+2], pix[off00+3]}
-			c10 := color.RGBA{pix[off10+0], pix[off10+1], pix[off10+2], pix[off10+3]}
-			c01 := color.RGBA{pix[off01+0], pix[off01+1], pix[off01+2], pix[off01+3]}
-			c11 := color.RGBA{pix[off11+0], pix[off11+1], pix[off11+2], pix[off11+3]}
+			c00 := color.YCbCr{Y: img.Y[off00], Cb: img.Cb[off00], Cr: img.Cr[off00]}
+			c10 := color.YCbCr{Y: img.Y[off10], Cb: img.Cb[off10], Cr: img.Cr[off10]}
+			c01 := color.YCbCr{Y: img.Y[off01], Cb: img.Cb[off01], Cr: img.Cr[off01]}
+			c11 := color.YCbCr{Y: img.Y[off11], Cb: img.Cb[off11], Cr: img.Cr[off11]}
 
-			l00 := lumaFromRGB(c00.R, c00.G, c00.B)
-			l10 := lumaFromRGB(c10.R, c10.G, c10.B)
-			l01 := lumaFromRGB(c01.R, c01.G, c01.B)
-			l11 := lumaFromRGB(c11.R, c11.G, c11.B)
+			l00 := int32(c00.Y)
+			l10 := int32(c10.Y)
+			l01 := int32(c01.Y)
+			l11 := int32(c11.Y)
 
 			minL, maxL := l00, l00
 			for _, v := range []int32{l10, l01, l11} {
@@ -2206,10 +2031,10 @@ func smoothJunctions(img *image.RGBA, blockSize int) *image.RGBA {
 
 			L := 0
 			for i := 1; i <= maxRadius && x-i >= b.Min.X; i++ {
-				upOff := (y-1-minY)*stride + (x-i-minX)*4
-				downOff := (y-minY)*stride + (x-i-minX)*4
-				up := color.RGBA{pix[upOff+0], pix[upOff+1], pix[upOff+2], pix[upOff+3]}
-				down := color.RGBA{pix[downOff+0], pix[downOff+1], pix[downOff+2], pix[downOff+3]}
+				upOff := (y-1-minY)*stride + (x-i-minX)*stride/stride
+				downOff := (y-minY)*stride + (x-i-minX)*stride/stride
+				up := color.YCbCr{Y: img.Y[upOff], Cb: img.Cb[upOff], Cr: img.Cr[upOff]}
+				down := color.YCbCr{Y: img.Y[downOff], Cb: img.Cb[downOff], Cr: img.Cr[downOff]}
 				if !similar(up, c00) || !similar(down, c01) {
 					break
 				}
@@ -2218,10 +2043,10 @@ func smoothJunctions(img *image.RGBA, blockSize int) *image.RGBA {
 
 			R := 0
 			for i := 1; i <= maxRadius && x-1+i < b.Max.X; i++ {
-				upOff := (y-1-minY)*stride + (x-1+i-minX)*4
-				downOff := (y-minY)*stride + (x-1+i-minX)*4
-				up := color.RGBA{pix[upOff+0], pix[upOff+1], pix[upOff+2], pix[upOff+3]}
-				down := color.RGBA{pix[downOff+0], pix[downOff+1], pix[downOff+2], pix[downOff+3]}
+				upOff := (y-1-minY)*stride + (x - 1 + i - minX)
+				downOff := (y-minY)*stride + (x - 1 + i - minX)
+				up := color.YCbCr{Y: img.Y[upOff], Cb: img.Cb[upOff], Cr: img.Cr[upOff]}
+				down := color.YCbCr{Y: img.Y[downOff], Cb: img.Cb[downOff], Cr: img.Cr[downOff]}
 				if !similar(up, c10) || !similar(down, c11) {
 					break
 				}
@@ -2230,10 +2055,10 @@ func smoothJunctions(img *image.RGBA, blockSize int) *image.RGBA {
 
 			U := 0
 			for i := 1; i <= maxRadius && y-i >= b.Min.Y; i++ {
-				leftOff := (y-i-minY)*stride + (x-1-minX)*4
-				rightOff := (y-i-minY)*stride + (x-minX)*4
-				left := color.RGBA{pix[leftOff+0], pix[leftOff+1], pix[leftOff+2], pix[leftOff+3]}
-				right := color.RGBA{pix[rightOff+0], pix[rightOff+1], pix[rightOff+2], pix[rightOff+3]}
+				leftOff := (y-i-minY)*stride + (x - 1 - minX)
+				rightOff := (y-i-minY)*stride + (x - minX)
+				left := color.YCbCr{Y: img.Y[leftOff], Cb: img.Cb[leftOff], Cr: img.Cr[leftOff]}
+				right := color.YCbCr{Y: img.Y[rightOff], Cb: img.Cb[rightOff], Cr: img.Cr[rightOff]}
 				if !similar(left, c00) || !similar(right, c10) {
 					break
 				}
@@ -2242,10 +2067,10 @@ func smoothJunctions(img *image.RGBA, blockSize int) *image.RGBA {
 
 			D := 0
 			for i := 1; i <= maxRadius && y-1+i < b.Max.Y; i++ {
-				leftOff := (y-1+i-minY)*stride + (x-1-minX)*4
-				rightOff := (y-1+i-minY)*stride + (x-minX)*4
-				left := color.RGBA{pix[leftOff+0], pix[leftOff+1], pix[leftOff+2], pix[leftOff+3]}
-				right := color.RGBA{pix[rightOff+0], pix[rightOff+1], pix[rightOff+2], pix[rightOff+3]}
+				leftOff := (y-1+i-minY)*stride + (x - 1 - minX)
+				rightOff := (y-1+i-minY)*stride + (x - minX)
+				left := color.YCbCr{Y: img.Y[leftOff], Cb: img.Cb[leftOff], Cr: img.Cr[leftOff]}
+				right := color.YCbCr{Y: img.Y[rightOff], Cb: img.Cb[rightOff], Cr: img.Cr[rightOff]}
 				if !similar(left, c01) || !similar(right, c11) {
 					break
 				}
@@ -2261,35 +2086,36 @@ func smoothJunctions(img *image.RGBA, blockSize int) *image.RGBA {
 			rectMinY := y - U
 			rectMaxY := y - 1 + D
 
-			r00, g00, b00, a00 := c00.R, c00.G, c00.B, c00.A
-			r10, g10, b10, a10 := c10.R, c10.G, c10.B, c10.A
-			r01, g01, b01, a01 := c01.R, c01.G, c01.B, c01.A
-			r11, g11, b11, a11 := c11.R, c11.G, c11.B, c11.A
+			y00, cb00, cr00 := c00.Y, c00.Cb, c00.Cr
+			y10, cb10, cr10 := c10.Y, c10.Cb, c10.Cr
+			y01, cb01, cr01 := c01.Y, c01.Cb, c01.Cr
+			y11, cb11, cr11 := c11.Y, c11.Cb, c11.Cr
 
 			width := rectMaxX - rectMinX
 			height := rectMaxY - rectMinY
+
+			lerp8 := func(a, b uint8, t float64) uint8 {
+				return uint8(float64(a)*(1-t) + float64(b)*t + 0.5)
+			}
 
 			for py := rectMinY; py <= rectMaxY; py++ {
 				v := float64(py-rectMinY) / float64(height)
 				for px := rectMinX; px <= rectMaxX; px++ {
 					u := float64(px-rectMinX) / float64(width)
 
-					rTop := lerp8(r00, r10, u)
-					gTop := lerp8(g00, g10, u)
-					bTop := lerp8(b00, b10, u)
-					aTop := lerp8(a00, a10, u)
+					yTop := lerp8(y00, y10, u)
+					cbTop := lerp8(cb00, cb10, u)
+					crTop := lerp8(cr00, cr10, u)
 
-					rBot := lerp8(r01, r11, u)
-					gBot := lerp8(g01, g11, u)
-					bBot := lerp8(b01, b11, u)
-					aBot := lerp8(a01, a11, u)
+					yBot := lerp8(y01, y11, u)
+					cbBot := lerp8(cb01, cb11, u)
+					crBot := lerp8(cr01, cr11, u)
 
-					r := lerp8(rTop, rBot, v)
-					g := lerp8(gTop, gBot, v)
-					bc := lerp8(bTop, bBot, v)
-					a := lerp8(aTop, aBot, v)
+					yv := lerp8(yTop, yBot, v)
+					cbv := lerp8(cbTop, cbBot, v)
+					crv := lerp8(crTop, crBot, v)
 
-					img.SetRGBA(px, py, color.RGBA{r, g, bc, a})
+					setYCbCr(img, px, py, color.YCbCr{Y: yv, Cb: cbv, Cr: crv})
 				}
 			}
 		}
@@ -2297,7 +2123,11 @@ func smoothJunctions(img *image.RGBA, blockSize int) *image.RGBA {
 	return img
 }
 
-func smoothFlatAreas(src *image.RGBA, blockSize int) *image.RGBA {
+func smoothBlocks(src *image.YCbCr, blockSize int) *image.YCbCr {
+	return smoothJunctions(smoothFlatAreas(src, blockSize), blockSize)
+}
+
+func smoothFlatAreas(src *image.YCbCr, blockSize int) *image.YCbCr {
 	b := src.Bounds()
 	w, h := b.Dx(), b.Dy()
 
@@ -2308,67 +2138,67 @@ func smoothFlatAreas(src *image.RGBA, blockSize int) *image.RGBA {
 		return src
 	}
 
-	dst := image.NewRGBA(b)
-	copy(dst.Pix, src.Pix)
+	dst := image.NewYCbCr(b, image.YCbCrSubsampleRatio444)
+	// Копируем исходные данные.
+	copy(dst.Y, src.Y)
+	copy(dst.Cb, src.Cb)
+	copy(dst.Cr, src.Cr)
 
-	pix := src.Pix
-	stride := src.Stride
+	stride := src.YStride
 	minX := b.Min.X
 	minY := b.Min.Y
 
 	const boundaryLumaThreshold int32 = 10
 
+	// Вертикальные границы блоков.
 	for x := b.Min.X + blockSize; x < b.Max.X; x += blockSize {
 		for y := b.Min.Y; y < b.Max.Y; y++ {
 			rowOff := (y - minY) * stride
-			offL := rowOff + (x-1-minX)*4
-			offR := rowOff + (x-minX)*4
-			clR, clG, clB, clA := pix[offL+0], pix[offL+1], pix[offL+2], pix[offL+3]
-			crR, crG, crB, crA := pix[offR+0], pix[offR+1], pix[offR+2], pix[offR+3]
-			d := lumaFromRGB(clR, clG, clB) - lumaFromRGB(crR, crG, crB)
+			iL := rowOff + (x - 1 - minX)
+			iR := rowOff + (x - minX)
+
+			lL := int32(src.Y[iL])
+			lR := int32(src.Y[iR])
+			d := lL - lR
 			if d < 0 {
 				d = -d
 			}
 			if d <= boundaryLumaThreshold {
-				r := uint8((uint16(clR) + uint16(crR)) / 2)
-				g := uint8((uint16(clG) + uint16(crG)) / 2)
-				bc := uint8((uint16(clB) + uint16(crB)) / 2)
-				a := uint8((uint16(clA) + uint16(crA)) / 2)
-				cAvg := color.RGBA{r, g, bc, a}
-				dst.SetRGBA(x-1, y, cAvg)
-				dst.SetRGBA(x, y, cAvg)
+				yAvg := uint8((uint16(src.Y[iL]) + uint16(src.Y[iR])) / 2)
+				cbAvg := uint8((uint16(src.Cb[iL]) + uint16(src.Cb[iR])) / 2)
+				crAvg := uint8((uint16(src.Cr[iL]) + uint16(src.Cr[iR])) / 2)
+				cAvg := color.YCbCr{Y: yAvg, Cb: cbAvg, Cr: crAvg}
+				setYCbCr(dst, x-1, y, cAvg)
+				setYCbCr(dst, x, y, cAvg)
 			}
 		}
 	}
 
+	// Горизонтальные границы блоков.
 	for y := b.Min.Y + blockSize; y < b.Max.Y; y += blockSize {
 		for x := b.Min.X; x < b.Max.X; x++ {
 			rowOffT := (y - 1 - minY) * stride
 			rowOffB := (y - minY) * stride
-			offT := rowOffT + (x-minX)*4
-			offB := rowOffB + (x-minX)*4
-			ctR, ctG, ctB, ctA := pix[offT+0], pix[offT+1], pix[offT+2], pix[offT+3]
-			cbR, cbG, cbB, cbA := pix[offB+0], pix[offB+1], pix[offB+2], pix[offB+3]
-			d := lumaFromRGB(ctR, ctG, ctB) - lumaFromRGB(cbR, cbG, cbB)
+			iT := rowOffT + (x - minX)
+			iB := rowOffB + (x - minX)
+
+			lT := int32(src.Y[iT])
+			lB := int32(src.Y[iB])
+			d := lT - lB
 			if d < 0 {
 				d = -d
 			}
 			if d <= boundaryLumaThreshold {
-				r := uint8((uint16(ctR) + uint16(cbR)) / 2)
-				g := uint8((uint16(ctG) + uint16(cbG)) / 2)
-				bc := uint8((uint16(ctB) + uint16(cbB)) / 2)
-				a := uint8((uint16(ctA) + uint16(cbA)) / 2)
-				cAvg := color.RGBA{r, g, bc, a}
-				dst.SetRGBA(x, y-1, cAvg)
-				dst.SetRGBA(x, y, cAvg)
+				yAvg := uint8((uint16(src.Y[iT]) + uint16(src.Y[iB])) / 2)
+				cbAvg := uint8((uint16(src.Cb[iT]) + uint16(src.Cb[iB])) / 2)
+				crAvg := uint8((uint16(src.Cr[iT]) + uint16(src.Cr[iB])) / 2)
+				cAvg := color.YCbCr{Y: yAvg, Cb: cbAvg, Cr: crAvg}
+				setYCbCr(dst, x, y-1, cAvg)
+				setYCbCr(dst, x, y, cAvg)
 			}
 		}
 	}
 	return dst
-}
-
-func smoothBlocks(src *image.RGBA, blockSize int) *image.RGBA {
-	return smoothJunctions(smoothFlatAreas(src, blockSize), blockSize)
 }
 
 func NewBitWriter(buf *bytes.Buffer) *BitWriter {
@@ -2420,24 +2250,6 @@ func DecodeZstd(r io.Reader) ([]byte, error) {
 	return plain, nil
 }
 
-// lumaFromRGB returns integer luma (0..255) from raw RGB channels.
-func lumaFromRGB(r, g, b uint8) int32 {
-	// Rec. 601-type weights.
-	return (299*int32(r) + 587*int32(g) + 114*int32(b) + 500) / 1000
-}
-
-// RgbToYCoCg теперь использует стандартное YCbCr из стандартной библиотеки.
-// Y: 0..255, Co/Cg здесь храним как отклонение Cb/Cr от 128.
-func RgbToYCoCg(c color.RGBA) (y, co, cg int32) {
-	// Интерпретируем как стандартное YCbCr из стандартной библиотеки.
-	// Y: 0..255, Co/Cg здесь храним как отклонение Cb/Cr от 128.
-	yc := color.YCbCrModel.Convert(c).(color.YCbCr)
-	y = int32(yc.Y)
-	co = int32(int8(yc.Cb - 128)) // signed chroma (Cb)
-	cg = int32(int8(yc.Cr - 128)) // signed chroma (Cr)
-	return
-}
-
 func Abs32(v int32) int32 {
 	if v < 0 {
 		return -v
@@ -2445,19 +2257,20 @@ func Abs32(v int32) int32 {
 	return v
 }
 
-// packYCoCg now фактически упаковывает цвет в стандартное YCbCr:
+// packYCoCg now просто упаковывает цвет в стандартное YCbCr:
 //   - Y (0..255)
-//   - Cb/Cb (0..255)
-//
-// Дальше палитра дельта-кодируется по тем же правилам, что и раньше.
-func packYCoCg(c color.RGBA) (byte, byte, byte) {
-	yc := color.YCbCrModel.Convert(c).(color.YCbCr)
-	return yc.Y, yc.Cb, yc.Cr
+//   - Cb/Cr (0..255)
+func packYCoCg(c color.YCbCr) (byte, byte, byte) {
+	return c.Y, c.Cb, c.Cr
 }
 
-// unpackYCoCg выполняет обратное преобразование из YCbCr в RGBA
-// с использованием стандартных преобразований из пакета image/color.
-func unpackYCoCg(yb, cb, crb byte) color.RGBA {
-	yc := color.YCbCr{Y: yb, Cb: cb, Cr: crb}
-	return color.RGBAModel.Convert(yc).(color.RGBA)
+func setYCbCr(dst *image.YCbCr, x, y int, c color.YCbCr) {
+	b := dst.Bounds()
+	if x < b.Min.X || x >= b.Max.X || y < b.Min.Y || y >= b.Max.Y {
+		return
+	}
+	i := (y-b.Min.Y)*dst.YStride + (x - b.Min.X)
+	dst.Y[i] = c.Y
+	dst.Cb[i] = c.Cb
+	dst.Cr[i] = c.Cr
 }
