@@ -732,14 +732,8 @@ func analyzeBlock(img *image.RGBA, luma []int16, x, y, w, h int) (totalEnergy in
 			g := pix[off+1]
 			bc := pix[off+2]
 			a := pix[off+3]
-
-			idx := (py-minY)*wImg + (px - minX)
-			var l int32
-			if idx >= 0 && idx < len(luma) {
-				l = int32(luma[idx])
-			} else {
-				l = lumaFromRGB(r, g, bc)
-			}
+			idx := (py-minY)*wImg + (px-minX)
+			l := int32(luma[idx])
 
 			// Общая энергия по блоку.
 			if l < minL {
@@ -935,22 +929,13 @@ func computeFG_BG(img *image.RGBA, luma []int16, x, y, w, h int) (fg, bg color.R
 		if py < b.Min.Y || py >= b.Max.Y {
 			continue
 		}
-		rowOff := (py - minY) * stride
 		for xx := 0; xx < w; xx++ {
 			px := x + xx
 			if px < b.Min.X || px >= b.Max.X {
 				continue
 			}
-			off := rowOff + (px-minX)*4
-			r := pix[off+0]
-			g := pix[off+1]
-			bc := pix[off+2]
-			idx := (py-minY)*wImg + (px - minX)
-			if idx >= 0 && idx < len(luma) {
-				sumL += int64(luma[idx])
-			} else {
-				sumL += int64(lumaFromRGB(r, g, bc))
-			}
+			idx := (py-minY)*wImg + (px-minX)
+			sumL += int64(luma[idx])
 			count++
 		}
 	}
@@ -977,13 +962,8 @@ func computeFG_BG(img *image.RGBA, luma []int16, x, y, w, h int) (fg, bg color.R
 			r := pix[off+0]
 			g := pix[off+1]
 			bc := pix[off+2]
-			idx := (py-minY)*wImg + (px - minX)
-			var l int32
-			if idx >= 0 && idx < len(luma) {
-				l = int32(luma[idx])
-			} else {
-				l = lumaFromRGB(r, g, bc)
-			}
+			idx := (py-minY)*wImg + (px-minX)
+			l := int32(luma[idx])
 			if l >= thr {
 				fgR += int64(r)
 				fgG += int64(g)
@@ -1031,8 +1011,6 @@ func pickLeafModel(
 	b := img.Bounds()
 	wImg := b.Dx()
 
-	pix := img.Pix
-	stride := img.Stride
 	minX := b.Min.X
 	minY := b.Min.Y
 
@@ -1045,23 +1023,13 @@ func pickLeafModel(
 		if py < b.Min.Y || py >= b.Max.Y {
 			continue
 		}
-		rowOff := (py - minY) * stride
 		for xx := 0; xx < w; xx++ {
 			px := x + xx
 			if px < b.Min.X || px >= b.Max.X {
 				continue
 			}
-			off := rowOff + (px-minX)*4
-			r := pix[off+0]
-			g := pix[off+1]
-			bc := pix[off+2]
-			idx := (py-minY)*wImg + (px - minX)
-			var l int32
-			if idx >= 0 && idx < len(luma) {
-				l = int32(luma[idx])
-			} else {
-				l = lumaFromRGB(r, g, bc)
-			}
+			idx := (py-minY)*wImg + (px-minX)
+			l := int32(luma[idx])
 			dl := l - avgL
 			if dl < 0 {
 				dl = -dl
@@ -1089,24 +1057,13 @@ func pickLeafModel(
 		if py < b.Min.Y || py >= b.Max.Y {
 			continue
 		}
-		rowOff := (py - minY) * stride
 		for xx := 0; xx < w; xx++ {
 			px := x + xx
 			if px < b.Min.X || px >= b.Max.X {
 				continue
 			}
-			// Используем буфер лумы, если он доступен.
-			idx := (py-minY)*wImg + (px - minX)
-			var l int32
-			if idx >= 0 && idx < len(luma) {
-				l = int32(luma[idx])
-			} else {
-				off := rowOff + (px-minX)*4
-				r := pix[off+0]
-				g := pix[off+1]
-				bc := pix[off+2]
-				l = lumaFromRGB(r, g, bc)
-			}
+			idx := (py-minY)*wImg + (px-minX)
+			l := int32(luma[idx])
 			var aproxL int32
 			if l >= thr {
 				aproxL = fgL
@@ -1549,8 +1506,6 @@ func encodeRegion(
 			// Cached geometry and pixel pointers for the pattern generation loop.
 			b := img.Bounds()
 			wImg := b.Dx()
-			pix := img.Pix
-			stride := img.Stride
 			minX := b.Min.X
 			minY := b.Min.Y
 
@@ -1565,19 +1520,8 @@ func encodeRegion(
 						}
 						continue
 					}
-					// Берём луму из буфера, если есть, иначе считаем из RGB.
-					idx := (py-minY)*wImg + (px - minX)
-					var l int32
-					if idx >= 0 && idx < len(luma) {
-						l = int32(luma[idx])
-					} else {
-						rowOff := (py - minY) * stride
-						off := rowOff + (px-minX)*4
-						r := pix[off+0]
-						g := pix[off+1]
-						bc := pix[off+2]
-						l = lumaFromRGB(r, g, bc)
-					}
+					idx := (py-minY)*wImg + (px-minX)
+					l := int32(luma[idx])
 					if l >= thr {
 						if err := patBW.WriteBit(true); err != nil {
 							return err
