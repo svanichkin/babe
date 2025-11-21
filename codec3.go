@@ -37,7 +37,7 @@ func paramsForQuality(q int) codec2Params {
 		colorTol:           ExpMap(qi, 99, 0, 7, 1, -3.0),
 		patternGainPercent: ExpMap(q, 1, 100, 0, 100, 3.0), // по умолчанию: паттерн должен быть лучше на 50%
 	}
-	fmt.Printf("minBlock=%d, maxGrad=%d, colorTol=%d, patternFactor=%d\n",
+	fmt.Printf("QUALITY: minBlock=%d, maxGrad=%d, colorTol=%d, patternFactor=%d\n",
 		params.minBlock,
 		params.maxGrad,
 		params.colorTol,
@@ -80,8 +80,6 @@ func Encode(img image.Image, quality int) ([]byte, error) {
 		return nil, err
 	}
 
-	_ = pattLeaves
-	_ = leafModes
 	if stats.total > 0 {
 		frac := float64(stats.patternBetter) * 100.0 / float64(stats.total)
 		fmt.Printf("leaf stats: total=%d, pattern-better=%d (%.1f%%)\n",
@@ -218,8 +216,6 @@ func Encode(img image.Image, quality int) ([]byte, error) {
 	treeBytes := treeBuf.Bytes()
 	rawLeafBytes := leafBuf.Bytes()
 	patBytes := patBuf.Bytes()
-
-	// leafBytes := rawLeafBytes
 
 	// Delta-encode leaf index stream losslessly (mod 256).
 	// Первый байт пишем как есть, далее храним разность по модулю 256.
@@ -409,8 +405,6 @@ func Decode(data []byte) (image.Image, error) {
 		return nil, err
 	}
 
-	// leafBytes := encLeafBytes
-
 	// Delta-decode leaf index stream back to original indices (mod 256).
 	leafBytes := make([]byte, leafLen)
 	if leafLen > 0 {
@@ -498,8 +492,9 @@ type leafStats struct {
 // (foreground/background), без привязки к конкретной палитре. Палитра по-прежнему
 // общая — оба цвета потом так же попадают в общий buildPalettes().
 type patternLeaf struct {
-	fg color.RGBA
-	bg color.RGBA
+	fg  color.RGBA
+	bg  color.RGBA
+	thr int32
 }
 
 type leafJob struct {
@@ -529,6 +524,8 @@ type leafRef struct {
 
 	fg uint8 // локальный индекс fg для pattern-листа
 	bg uint8 // локальный индекс bg для pattern-листа
+
+	thr int32 // порог яркости для паттерн-листа (используется только энкодером)
 }
 
 // palette описывает одну локальную палитру (до 256 цветов).
@@ -1023,7 +1020,6 @@ func computeFG_BG(img *image.RGBA, luma []int16, x, y, w, h int) (fg, bg color.R
 	return fg, bg, thr, true
 }
 
-// pickLeafModel выбирает для блока модель листа (solid или pattern), возвращает тип, основной цвет и patternLeaf.
 func pickLeafModel(
 	img *image.RGBA,
 	luma []int16,
@@ -1126,7 +1122,7 @@ func pickLeafModel(
 	}
 
 	// Требуемое относительное улучшение ошибки в процентах.
-	// patternGainPercent = 30 => errPattern &lt; 0.7 * errSolid.
+	// patternGainPercent = 30 => errPattern < 0.7 * errSolid.
 	gain := params.patternGainPercent
 	if gain < 0 {
 		gain = 0
@@ -1135,7 +1131,7 @@ func pickLeafModel(
 		gain = 99
 	}
 
-	// errPattern &lt; (1 - gain/100) * errSolid
+	// errPattern < (1 - gain/100) * errSolid
 	if stats != nil {
 		stats.total++
 		if errPattern*100 < errSolid*int64(100-gain) {
@@ -1144,7 +1140,7 @@ func pickLeafModel(
 	}
 
 	if errPattern*100 < errSolid*int64(100-gain) {
-		return leafTypePattern, avg, patternLeaf{fg: fg, bg: bg}
+		return leafTypePattern, avg, patternLeaf{fg: fg, bg: bg, thr: thr}
 	}
 	return leafTypeSolid, avg, patternLeaf{}
 }
@@ -1397,6 +1393,7 @@ func buildPalettes(leaves []leafColor, pattLeaves []patternLeaf, modes []leafTyp
 				idx: uint8(fgIdx),
 				fg:  uint8(fgIdx),
 				bg:  uint8(bgIdx),
+				thr: pl.thr,
 			}
 
 		default:
@@ -1546,16 +1543,8 @@ func encodeRegion(
 				return err
 			}
 
-			// Генерируем паттерн на основе порога яркости, как раньше.
-			_, _, thr, ok := computeFG_BG(img, luma, x, y, w, h)
-			if !ok {
-				for i := 0; i < w*h; i++ {
-					if err := patBW.WriteBit(false); err != nil {
-						return err
-					}
-				}
-				return nil
-			}
+			// Используем заранее сохранённый порог яркости для этого листа.
+			thr := r.thr
 
 			// Cached geometry and pixel pointers for the pattern generation loop.
 			b := img.Bounds()
@@ -2067,11 +2056,26 @@ func (br *BitReader) ReadByte() (byte, error) {
 func SmoothEdges(src *image.RGBA, tol int) *image.RGBA {
 	b := src.Bounds()
 	dst := image.NewRGBA(b)
+	w := b.Dx()
+	h := b.Dy()
+	if w <= 0 || h <= 0 {
+		return dst
+	}
+
+	pix := src.Pix
+	stride := src.Stride
+	minX := b.Min.X
+	minY := b.Min.Y
 
 	for y := b.Min.Y; y < b.Max.Y; y++ {
 		for x := b.Min.X; x < b.Max.X; x++ {
-			c := src.RGBAAt(x, y)
-			lc := Luma(c)
+			rowOff := (y - minY) * stride
+			off := rowOff + (x-minX)*4
+			cr := pix[off+0]
+			cg := pix[off+1]
+			cb := pix[off+2]
+			ca := pix[off+3]
+			lc := lumaFromRGB(cr, cg, cb)
 
 			type pt struct{ x, y int }
 			neigh := [...]pt{
@@ -2093,8 +2097,12 @@ func SmoothEdges(src *image.RGBA, tol int) *image.RGBA {
 				if p.x < b.Min.X || p.x >= b.Max.X || p.y < b.Min.Y || p.y >= b.Max.Y {
 					continue
 				}
-				nc := src.RGBAAt(p.x, p.y)
-				ln := Luma(nc)
+				nRowOff := (p.y - minY) * stride
+				nOff := nRowOff + (p.x-minX)*4
+				nr := pix[nOff+0]
+				ng := pix[nOff+1]
+				nb := pix[nOff+2]
+				ln := lumaFromRGB(nr, ng, nb)
 				dl := int(ln - lc)
 				if dl < 0 {
 					dl = -dl
@@ -2109,7 +2117,7 @@ func SmoothEdges(src *image.RGBA, tol int) *image.RGBA {
 
 			if !edge {
 				// Нет сильного перепада — оставляем как есть.
-				dst.SetRGBA(x, y, c)
+				dst.SetRGBA(x, y, color.RGBA{cr, cg, cb, ca})
 				continue
 			}
 
@@ -2124,16 +2132,17 @@ func SmoothEdges(src *image.RGBA, tol int) *image.RGBA {
 				if p.x < b.Min.X || p.x >= b.Max.X || p.y < b.Min.Y || p.y >= b.Max.Y {
 					continue
 				}
-				nc := src.RGBAAt(p.x, p.y)
-				sumNR += int(nc.R)
-				sumNG += int(nc.G)
-				sumNB += int(nc.B)
+				nRowOff := (p.y - minY) * stride
+				nOff := nRowOff + (p.x-minX)*4
+				sumNR += int(pix[nOff+0])
+				sumNG += int(pix[nOff+1])
+				sumNB += int(pix[nOff+2])
 				nCount++
 			}
 
 			if nCount == 0 {
 				// На краю изображения — просто оставляем исходный.
-				dst.SetRGBA(x, y, c)
+				dst.SetRGBA(x, y, color.RGBA{cr, cg, cb, ca})
 				continue
 			}
 
@@ -2146,17 +2155,6 @@ func SmoothEdges(src *image.RGBA, tol int) *image.RGBA {
 			// - небольшие перепады -> среднее сглаживание
 			// - средние/большие перепады -> более сильное сглаживание, чтобы убрать "зубья"
 			var alpha float64
-			// switch {
-			// case maxDl < tol*2:
-			// 	// слабая граница — лёгкое сглаживание
-			// 	alpha = 0.4
-			// case maxDl < tol*4:
-			// 	// нормальная граница — заметное сглаживание
-			// 	alpha = 0.6
-			// default:
-			// 	// очень контрастная граница — тоже сглаживаем ощутимо, но не до мыла
-			// 	alpha = 0.5
-			// }
 			switch {
 			case maxDl < tol*3:
 				// слабая граница — лёгкое сглаживание
@@ -2170,25 +2168,20 @@ func SmoothEdges(src *image.RGBA, tol int) *image.RGBA {
 			}
 
 			// Итоговый цвет: смесь исходного и среднего по соседям.
-			outR := float64(c.R)*(1-alpha) + avgNR*alpha
-			outG := float64(c.G)*(1-alpha) + avgNG*alpha
-			outB := float64(c.B)*(1-alpha) + avgNB*alpha
+			outR := float64(cr)*(1-alpha) + avgNR*alpha
+			outG := float64(cg)*(1-alpha) + avgNG*alpha
+			outB := float64(cb)*(1-alpha) + avgNB*alpha
 
-			avg := color.RGBA{
+			dst.SetRGBA(x, y, color.RGBA{
 				R: uint8(outR + 0.5),
 				G: uint8(outG + 0.5),
 				B: uint8(outB + 0.5),
-				A: 255,
-			}
-			dst.SetRGBA(x, y, avg)
+				A: ca,
+			})
 		}
 	}
 
 	return dst
-}
-
-func luma(c color.RGBA) int32 {
-	return lumaFromRGB(c.R, c.G, c.B)
 }
 
 // smoothJunctions performs gradient-based smoothing at intersections of blocks
@@ -2206,6 +2199,11 @@ func smoothJunctions(img *image.RGBA, blockSize int) *image.RGBA {
 		return img
 	}
 
+	pix := img.Pix
+	stride := img.Stride
+	minX := b.Min.X
+	minY := b.Min.Y
+
 	maxRadius := blockSize
 	if maxRadius > 3 {
 		maxRadius = 3
@@ -2214,7 +2212,7 @@ func smoothJunctions(img *image.RGBA, blockSize int) *image.RGBA {
 	const lumaSimThreshold int32 = 8
 
 	similar := func(a, b color.RGBA) bool {
-		da := luma(a) - luma(b)
+		da := lumaFromRGB(a.R, a.G, a.B) - lumaFromRGB(b.R, b.G, b.B)
 		if da < 0 {
 			da = -da
 		}
@@ -2227,15 +2225,20 @@ func smoothJunctions(img *image.RGBA, blockSize int) *image.RGBA {
 
 	for y := b.Min.Y + blockSize; y < b.Max.Y; y += blockSize {
 		for x := b.Min.X + blockSize; x < b.Max.X; x += blockSize {
-			c00 := img.RGBAAt(x-1, y-1)
-			c10 := img.RGBAAt(x, y-1)
-			c01 := img.RGBAAt(x-1, y)
-			c11 := img.RGBAAt(x, y)
+			off00 := (y-1-minY)*stride + (x-1-minX)*4
+			off10 := (y-1-minY)*stride + (x-minX)*4
+			off01 := (y-minY)*stride + (x-1-minX)*4
+			off11 := (y-minY)*stride + (x-minX)*4
 
-			l00 := luma(c00)
-			l10 := luma(c10)
-			l01 := luma(c01)
-			l11 := luma(c11)
+			c00 := color.RGBA{pix[off00+0], pix[off00+1], pix[off00+2], pix[off00+3]}
+			c10 := color.RGBA{pix[off10+0], pix[off10+1], pix[off10+2], pix[off10+3]}
+			c01 := color.RGBA{pix[off01+0], pix[off01+1], pix[off01+2], pix[off01+3]}
+			c11 := color.RGBA{pix[off11+0], pix[off11+1], pix[off11+2], pix[off11+3]}
+
+			l00 := lumaFromRGB(c00.R, c00.G, c00.B)
+			l10 := lumaFromRGB(c10.R, c10.G, c10.B)
+			l01 := lumaFromRGB(c01.R, c01.G, c01.B)
+			l11 := lumaFromRGB(c11.R, c11.G, c11.B)
 
 			minL, maxL := l00, l00
 			for _, v := range []int32{l10, l01, l11} {
@@ -2252,8 +2255,10 @@ func smoothJunctions(img *image.RGBA, blockSize int) *image.RGBA {
 
 			L := 0
 			for i := 1; i <= maxRadius && x-i >= b.Min.X; i++ {
-				up := img.RGBAAt(x-i, y-1)
-				down := img.RGBAAt(x-i, y)
+				upOff := (y-1-minY)*stride + (x-i-minX)*4
+				downOff := (y-minY)*stride + (x-i-minX)*4
+				up := color.RGBA{pix[upOff+0], pix[upOff+1], pix[upOff+2], pix[upOff+3]}
+				down := color.RGBA{pix[downOff+0], pix[downOff+1], pix[downOff+2], pix[downOff+3]}
 				if !similar(up, c00) || !similar(down, c01) {
 					break
 				}
@@ -2262,8 +2267,10 @@ func smoothJunctions(img *image.RGBA, blockSize int) *image.RGBA {
 
 			R := 0
 			for i := 1; i <= maxRadius && x-1+i < b.Max.X; i++ {
-				up := img.RGBAAt(x-1+i, y-1)
-				down := img.RGBAAt(x-1+i, y)
+				upOff := (y-1-minY)*stride + (x-1+i-minX)*4
+				downOff := (y-minY)*stride + (x-1+i-minX)*4
+				up := color.RGBA{pix[upOff+0], pix[upOff+1], pix[upOff+2], pix[upOff+3]}
+				down := color.RGBA{pix[downOff+0], pix[downOff+1], pix[downOff+2], pix[downOff+3]}
 				if !similar(up, c10) || !similar(down, c11) {
 					break
 				}
@@ -2272,8 +2279,10 @@ func smoothJunctions(img *image.RGBA, blockSize int) *image.RGBA {
 
 			U := 0
 			for i := 1; i <= maxRadius && y-i >= b.Min.Y; i++ {
-				left := img.RGBAAt(x-1, y-i)
-				right := img.RGBAAt(x, y-i)
+				leftOff := (y-i-minY)*stride + (x-1-minX)*4
+				rightOff := (y-i-minY)*stride + (x-minX)*4
+				left := color.RGBA{pix[leftOff+0], pix[leftOff+1], pix[leftOff+2], pix[leftOff+3]}
+				right := color.RGBA{pix[rightOff+0], pix[rightOff+1], pix[rightOff+2], pix[rightOff+3]}
 				if !similar(left, c00) || !similar(right, c10) {
 					break
 				}
@@ -2282,8 +2291,10 @@ func smoothJunctions(img *image.RGBA, blockSize int) *image.RGBA {
 
 			D := 0
 			for i := 1; i <= maxRadius && y-1+i < b.Max.Y; i++ {
-				left := img.RGBAAt(x-1, y-1+i)
-				right := img.RGBAAt(x, y-1+i)
+				leftOff := (y-1+i-minY)*stride + (x-1-minX)*4
+				rightOff := (y-1+i-minY)*stride + (x-minX)*4
+				left := color.RGBA{pix[leftOff+0], pix[leftOff+1], pix[leftOff+2], pix[leftOff+3]}
+				right := color.RGBA{pix[rightOff+0], pix[rightOff+1], pix[rightOff+2], pix[rightOff+3]}
 				if !similar(left, c01) || !similar(right, c11) {
 					break
 				}
@@ -2349,21 +2360,29 @@ func smoothFlatAreas(src *image.RGBA, blockSize int) *image.RGBA {
 	dst := image.NewRGBA(b)
 	copy(dst.Pix, src.Pix)
 
+	pix := src.Pix
+	stride := src.Stride
+	minX := b.Min.X
+	minY := b.Min.Y
+
 	const boundaryLumaThreshold int32 = 10
 
 	for x := b.Min.X + blockSize; x < b.Max.X; x += blockSize {
 		for y := b.Min.Y; y < b.Max.Y; y++ {
-			cl := src.RGBAAt(x-1, y)
-			cr := src.RGBAAt(x, y)
-			d := luma(cl) - luma(cr)
+			rowOff := (y - minY) * stride
+			offL := rowOff + (x-1-minX)*4
+			offR := rowOff + (x-minX)*4
+			clR, clG, clB, clA := pix[offL+0], pix[offL+1], pix[offL+2], pix[offL+3]
+			crR, crG, crB, crA := pix[offR+0], pix[offR+1], pix[offR+2], pix[offR+3]
+			d := lumaFromRGB(clR, clG, clB) - lumaFromRGB(crR, crG, crB)
 			if d < 0 {
 				d = -d
 			}
 			if d <= boundaryLumaThreshold {
-				r := uint8((uint16(cl.R) + uint16(cr.R)) / 2)
-				g := uint8((uint16(cl.G) + uint16(cr.G)) / 2)
-				bc := uint8((uint16(cl.B) + uint16(cr.B)) / 2)
-				a := uint8((uint16(cl.A) + uint16(cr.A)) / 2)
+				r := uint8((uint16(clR) + uint16(crR)) / 2)
+				g := uint8((uint16(clG) + uint16(crG)) / 2)
+				bc := uint8((uint16(clB) + uint16(crB)) / 2)
+				a := uint8((uint16(clA) + uint16(crA)) / 2)
 				cAvg := color.RGBA{r, g, bc, a}
 				dst.SetRGBA(x-1, y, cAvg)
 				dst.SetRGBA(x, y, cAvg)
@@ -2373,17 +2392,21 @@ func smoothFlatAreas(src *image.RGBA, blockSize int) *image.RGBA {
 
 	for y := b.Min.Y + blockSize; y < b.Max.Y; y += blockSize {
 		for x := b.Min.X; x < b.Max.X; x++ {
-			ct := src.RGBAAt(x, y-1)
-			cb := src.RGBAAt(x, y)
-			d := luma(ct) - luma(cb)
+			rowOffT := (y - 1 - minY) * stride
+			rowOffB := (y - minY) * stride
+			offT := rowOffT + (x-minX)*4
+			offB := rowOffB + (x-minX)*4
+			ctR, ctG, ctB, ctA := pix[offT+0], pix[offT+1], pix[offT+2], pix[offT+3]
+			cbR, cbG, cbB, cbA := pix[offB+0], pix[offB+1], pix[offB+2], pix[offB+3]
+			d := lumaFromRGB(ctR, ctG, ctB) - lumaFromRGB(cbR, cbG, cbB)
 			if d < 0 {
 				d = -d
 			}
 			if d <= boundaryLumaThreshold {
-				r := uint8((uint16(ct.R) + uint16(cb.R)) / 2)
-				g := uint8((uint16(ct.G) + uint16(cb.G)) / 2)
-				bc := uint8((uint16(ct.B) + uint16(cb.B)) / 2)
-				a := uint8((uint16(ct.A) + uint16(cb.A)) / 2)
+				r := uint8((uint16(ctR) + uint16(cbR)) / 2)
+				g := uint8((uint16(ctG) + uint16(cbG)) / 2)
+				bc := uint8((uint16(ctB) + uint16(cbB)) / 2)
+				a := uint8((uint16(ctA) + uint16(cbA)) / 2)
 				cAvg := color.RGBA{r, g, bc, a}
 				dst.SetRGBA(x, y-1, cAvg)
 				dst.SetRGBA(x, y, cAvg)
@@ -2450,11 +2473,6 @@ func DecodeZstd(r io.Reader) ([]byte, error) {
 func lumaFromRGB(r, g, b uint8) int32 {
 	// Rec. 601-type weights.
 	return (299*int32(r) + 587*int32(g) + 114*int32(b) + 500) / 1000
-}
-
-// Luma returns integer Luma (0..255) for an RGBA pixel.
-func Luma(c color.RGBA) int32 {
-	return lumaFromRGB(c.R, c.G, c.B)
 }
 
 // RgbToYCoCg converts an RGBA color into integer YCoCg components.
