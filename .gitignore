@@ -13,6 +13,7 @@
 *.jpeg
 *._
 *.rsls
+*.rslsi
 
 # Test binary, built with `go test -c`
 *.test

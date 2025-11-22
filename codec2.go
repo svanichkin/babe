@@ -24,8 +24,8 @@ const (
 // Encode encodes the given image with the given quality (1–100).
 // Higher quality => smaller allowed luma spread => больше блоков, но лучше детализация.
 func Encode(img image.Image, quality int) ([]byte, error) {
-	if quality < 1 {
-		quality = 1
+	if quality < 0 {
+		quality = 0
 	}
 	if quality > 100 {
 		quality = 100
@@ -136,8 +136,8 @@ func Decode(data []byte) (image.Image, error) {
 		return nil, err
 	}
 	quality := int(qByte)
-	if quality < 1 {
-		quality = 1
+	if quality < 0 {
+		quality = 0
 	}
 	if quality > 100 {
 		quality = 100
@@ -266,20 +266,126 @@ func rgbKey(c color.RGBA) uint32 {
 // }
 
 func paramsForQuality(q int) codec2Params {
-	if q < 1 {
-		q = 1
+	if q < 0 {
+		q = 0
 	}
 	if q > 100 {
 		q = 100
 	}
 
-	qi := 100 - q
+	// Подберём диапазон качества так же, как в codec1:
+	//   [0–19]  → самый грубый (minBlock=4)
+	//   [20–39] → грубый       (minBlock=3)
+	//   [40–59] → средний      (minBlock=2)
+	//   [60–79] → детальный    (minBlock=1)
+	//   [80–100]→ самый детальный (minBlock=1)
+	var bandStart, bandEnd, bandIdx int
+	switch {
+	case q < 20:
+		bandStart, bandEnd, bandIdx = 0, 19, 0
+	case q < 40:
+		bandStart, bandEnd, bandIdx = 20, 39, 1
+	case q < 60:
+		bandStart, bandEnd, bandIdx = 40, 59, 2
+	case q < 80:
+		bandStart, bandEnd, bandIdx = 60, 79, 3
+	default:
+		bandStart, bandEnd, bandIdx = 80, 100, 4
+	}
+
+	span := bandEnd - bandStart
+	if span <= 0 {
+		span = 1
+	}
+	offset := q - bandStart
+
+	// maxGrad: делаем кусочно‑линейным по диапазонам, чтобы
+	// каждый переход minBlock сопровождался более сильным
+	// "спредом", но без резких скачков на стыках.
+	//
+	// Границы по качеству (q растёт → качество выше → maxGrad меньше):
+	//   band 0: q=0..19   → 64..52
+	//   band 1: q=20..39  → 52..40
+	//   band 2: q=40..59  → 40..24  (более широкий спред — компенсация за minBlock=2)
+	//   band 3: q=60..79  → 24..16
+	//   band 4: q=80..100 → 16..8
+	bandGradLow := []int32{64, 52, 40, 24, 16} // нижний край диапазона (низшее q в бэнде)
+	bandGradHigh := []int32{52, 40, 24, 16, 8} // верхний край диапазона (высшее q в бэнде)
+
+	gLow := bandGradLow[bandIdx]
+	gHigh := bandGradHigh[bandIdx]
+
+	maxGrad := gLow
+	if span > 0 {
+		maxGrad = gLow + int32(offset)*(gHigh-gLow)/int32(span)
+	}
+
+	// colorTol: кусочно-линейно по диапазонам, чтобы
+	// нижние качества сильнее сливались в палитре и
+	// давали заметно меньший размер, без жёстких скачков.
+	//   band 0 (0..19)   → 10..8
+	//   band 1 (20..39)  → 8..6
+	//   band 2 (40..59)  → 6..4
+	//   band 3 (60..79)  → 4..2
+	//   band 4 (80..100) → 2..1
+	bandTolLow := []int{10, 8, 6, 4, 2}
+	bandTolHigh := []int{8, 6, 4, 2, 1}
+
+	tLow := bandTolLow[bandIdx]
+	tHigh := bandTolHigh[bandIdx]
+
+	colorTol := tLow
+	if span > 0 {
+		colorTol = tLow + int(offset)*(tHigh-tLow)/span
+	}
+	if colorTol < 1 {
+		colorTol = 1
+	}
+
+	// minBlock согласуем по диапазонам с codec1 (smallBlock):
+	//   80–100 → 1
+	//   60–79  → 1
+	//   40–59  → 2
+	//   20–39  → 3
+	//    0–19  → 4
+	var minBlock int
+	switch {
+	case q >= 80:
+		minBlock = 1
+	case q >= 60:
+		minBlock = 1
+	case q >= 40:
+		minBlock = 2
+	case q >= 20:
+		minBlock = 3
+	default:
+		minBlock = 4
+	}
 
 	params := codec2Params{
-		minBlock: 1 + int(float64(qi)*(4.0/100.0)),
-		maxGrad:  int32(ExpMap(qi, 99, 0, 150, 1, -4.0)),
-		colorTol: ExpMap(qi, 99, 0, 7, 1, -3.0),
+		minBlock: minBlock,
+		maxGrad:  maxGrad,
+		colorTol: colorTol,
 	}
+
+	// Для самого верха (95–100) делаем ещё более строгий режим:
+	// больше делений по градиенту и минимальный допуск по цвету,
+	// чтобы визуально 100% был максимально близок к исходнику.
+	if q >= 95 {
+		// линейно сжимаем maxGrad в диапазон ~6..4 при q=95..100
+		hiSpan := 100 - 95
+		offsetHi := q - 95
+		gHi := int32(6 - (offsetHi*(6-4))/hiSpan) // q=95 → 6, q=100 → 4
+		if gHi < 4 {
+			gHi = 4
+		}
+		if gHi < params.maxGrad {
+			params.maxGrad = gHi
+		}
+		// палитра максимально аккуратная
+		params.colorTol = 1
+	}
+
 	fmt.Printf("minBlock=%d, maxGrad=%d, colorTol=%d\n",
 		params.minBlock,
 		params.maxGrad,
