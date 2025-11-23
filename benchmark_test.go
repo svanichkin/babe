@@ -6,6 +6,7 @@ import (
 	"image/jpeg"
 	"image/png"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 	"github.com/xfmoulet/qoi"
@@ -27,6 +28,10 @@ func loadTestImage(b *testing.B) image.Image {
 
 func BenchmarkJPEG(b *testing.B) {
 	img := loadTestImage(b)
+	cpus := runtime.NumCPU()
+	procs := runtime.GOMAXPROCS(0)
+	gor := runtime.NumGoroutine()
+	b.Logf("cpus=%d gomaxprocs=%d goroutines=%d", cpus, procs, gor)
 
 	buf := &bytes.Buffer{}
 	b.ResetTimer()
@@ -62,6 +67,10 @@ func BenchmarkJPEG(b *testing.B) {
 
 func BenchmarkBABE(b *testing.B) {
     img := loadTestImage(b)
+    cpus := runtime.NumCPU()
+    procs := runtime.GOMAXPROCS(0)
+    gor := runtime.NumGoroutine()
+    b.Logf("cpus=%d gomaxprocs=%d goroutines=%d", cpus, procs, gor)
 
     b.ResetTimer()
 
@@ -96,6 +105,10 @@ func BenchmarkBABE(b *testing.B) {
 
 func BenchmarkQOI(b *testing.B) {
     img := loadTestImage(b)
+    cpus := runtime.NumCPU()
+    procs := runtime.GOMAXPROCS(0)
+    gor := runtime.NumGoroutine()
+    b.Logf("cpus=%d gomaxprocs=%d goroutines=%d", cpus, procs, gor)
 
     b.ResetTimer()
 
