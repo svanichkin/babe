@@ -1458,7 +1458,13 @@ func smoothJunctions(img *image.RGBA) *image.RGBA {
 	minX := b.Min.X
 	minY := b.Min.Y
 	stride := img.Stride
-	pix := img.Pix
+	srcPix := img.Pix
+
+	// Work on a copy so that all reads come from the original image
+	// and only writes go to the destination buffer.
+	dst := image.NewRGBA(b)
+	copy(dst.Pix, img.Pix)
+	dstPix := dst.Pix
 
 	// helper to compute luma from 8-bit RGB directly
 	luma8 := func(r, g, b uint8) int32 {
@@ -1482,138 +1488,185 @@ func smoothJunctions(img *image.RGBA) *image.RGBA {
 		return uint8(float64(a)*(1-t) + float64(b)*t + 0.5)
 	}
 
-	for y := b.Min.Y + smallBlock; y < b.Max.Y; y += smallBlock {
-		for x := b.Min.X + smallBlock; x < b.Max.X; x += smallBlock {
-			// four corners around the junction
-			idx00 := (y-1-minY)*stride + (x-1-minX)*4 // top-left
-			idx10 := (y-1-minY)*stride + (x-minX)*4   // top-right
-			idx01 := (y-minY)*stride + (x-1-minX)*4   // bottom-left
-			idx11 := (y-minY)*stride + (x-minX)*4     // bottom-right
-
-			r00, g00, b00, a00 := pix[idx00+0], pix[idx00+1], pix[idx00+2], pix[idx00+3]
-			r10, g10, b10, a10 := pix[idx10+0], pix[idx10+1], pix[idx10+2], pix[idx10+3]
-			r01, g01, b01, a01 := pix[idx01+0], pix[idx01+1], pix[idx01+2], pix[idx01+3]
-			r11, g11, b11, a11 := pix[idx11+0], pix[idx11+1], pix[idx11+2], pix[idx11+3]
-
-			l00 := luma8(r00, g00, b00)
-			l10 := luma8(r10, g10, b10)
-			l01 := luma8(r01, g01, b01)
-			l11 := luma8(r11, g11, b11)
-
-			minL, maxL := l00, l00
-			for _, v := range []int32{l10, l01, l11} {
-				if v < minL {
-					minL = v
-				}
-				if v > maxL {
-					maxL = v
-				}
-			}
-			// if the corner luminance differs too much, treat it as a hard edge and skip
-			if maxL-minL > junctionLumaSpread {
-				continue
-			}
-
-			// grow small rectangle around the junction while colors remain similar
-			L := 0
-			for i := 1; i <= maxRadius && x-i >= b.Min.X; i++ {
-				idxUp := (y-1-minY)*stride + (x-i-minX)*4
-				idxDown := (y-minY)*stride + (x-i-minX)*4
-				rUp, gUp, bUp, aUp := pix[idxUp+0], pix[idxUp+1], pix[idxUp+2], pix[idxUp+3]
-				rDown, gDown, bDown, aDown := pix[idxDown+0], pix[idxDown+1], pix[idxDown+2], pix[idxDown+3]
-				if !similar(rUp, gUp, bUp, aUp, r00, g00, b00, a00) || !similar(rDown, gDown, bDown, aDown, r01, g01, b01, a01) {
-					break
-				}
-				L = i
-			}
-
-			R := 0
-			for i := 1; i <= maxRadius && x-1+i < b.Max.X; i++ {
-				idxUp := (y-1-minY)*stride + (x-1+i-minX)*4
-				idxDown := (y-minY)*stride + (x-1+i-minX)*4
-				rUp, gUp, bUp, aUp := pix[idxUp+0], pix[idxUp+1], pix[idxUp+2], pix[idxUp+3]
-				rDown, gDown, bDown, aDown := pix[idxDown+0], pix[idxDown+1], pix[idxDown+2], pix[idxDown+3]
-				if !similar(rUp, gUp, bUp, aUp, r10, g10, b10, a10) || !similar(rDown, gDown, bDown, aDown, r11, g11, b11, a11) {
-					break
-				}
-				R = i
-			}
-
-			U := 0
-			for i := 1; i <= maxRadius && y-i >= b.Min.Y; i++ {
-				idxLeft := (y-i-minY)*stride + (x-1-minX)*4
-				idxRight := (y-i-minY)*stride + (x-minX)*4
-				rLeft, gLeft, bLeft, aLeft := pix[idxLeft+0], pix[idxLeft+1], pix[idxLeft+2], pix[idxLeft+3]
-				rRight, gRight, bRight, aRight := pix[idxRight+0], pix[idxRight+1], pix[idxRight+2], pix[idxRight+3]
-				if !similar(rLeft, gLeft, bLeft, aLeft, r00, g00, b00, a00) || !similar(rRight, gRight, bRight, aRight, r10, g10, b10, a10) {
-					break
-				}
-				U = i
-			}
-
-			D := 0
-			for i := 1; i <= maxRadius && y-1+i < b.Max.Y; i++ {
-				idxLeft := (y-1+i-minY)*stride + (x-1-minX)*4
-				idxRight := (y-1+i-minY)*stride + (x-minX)*4
-				rLeft, gLeft, bLeft, aLeft := pix[idxLeft+0], pix[idxLeft+1], pix[idxLeft+2], pix[idxLeft+3]
-				rRight, gRight, bRight, aRight := pix[idxRight+0], pix[idxRight+1], pix[idxRight+2], pix[idxRight+3]
-				if !similar(rLeft, gLeft, bLeft, aLeft, r01, g01, b01, a01) || !similar(rRight, gRight, bRight, aRight, r11, g11, b11, a11) {
-					break
-				}
-				D = i
-			}
-
-			if L == 0 || R == 0 || U == 0 || D == 0 {
-				continue
-			}
-
-			rectMinX := x - L
-			rectMaxX := x - 1 + R
-			rectMinY := y - U
-			rectMaxY := y - 1 + D
-
-			if rectMinX < b.Min.X || rectMaxX >= b.Max.X || rectMinY < b.Min.Y || rectMaxY >= b.Max.Y {
-				continue
-			}
-			if rectMaxX <= rectMinX || rectMaxY <= rectMinY {
-				continue
-			}
-
-			width := rectMaxX - rectMinX
-			height := rectMaxY - rectMinY
-
-			for py := rectMinY; py <= rectMaxY; py++ {
-				v := float64(py-rectMinY) / float64(height)
-				rowOff := (py - minY) * stride
-				for px := rectMinX; px <= rectMaxX; px++ {
-					u := float64(px-rectMinX) / float64(width)
-
-					rTop := lerp8(r00, r10, u)
-					gTop := lerp8(g00, g10, u)
-					bTop := lerp8(b00, b10, u)
-					aTop := lerp8(a00, a10, u)
-
-					rBot := lerp8(r01, r11, u)
-					gBot := lerp8(g01, g11, u)
-					bBot := lerp8(b01, b11, u)
-					aBot := lerp8(a01, a11, u)
-
-					r := lerp8(rTop, rBot, v)
-					g := lerp8(gTop, gBot, v)
-					bc := lerp8(bTop, bBot, v)
-					a := lerp8(aTop, aBot, v)
-
-					idx := rowOff + (px-minX)*4
-					pix[idx+0] = r
-					pix[idx+1] = g
-					pix[idx+2] = bc
-					pix[idx+3] = a
-				}
-			}
-		}
+	// Parallelise over horizontal stripes. Each worker owns a disjoint band
+	// of rows in the destination image. Writes are clamped to the worker's
+	// stripe to avoid concurrent writes to the same pixels.
+	workers := runtime.NumCPU()
+	if workers > h {
+		workers = h
 	}
+	if workers < 1 {
+		workers = 1
+	}
+	rowsPerWorker := (h + workers - 1) / workers
 
-	return img
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		stripeStart := b.Min.Y + i*rowsPerWorker
+		if stripeStart >= b.Max.Y {
+			break
+		}
+		stripeEnd := stripeStart + rowsPerWorker
+		if stripeEnd > b.Max.Y {
+			stripeEnd = b.Max.Y
+		}
+
+		wg.Add(1)
+		go func(yStripeStart, yStripeEnd int) {
+			defer wg.Done()
+
+			for y := b.Min.Y + smallBlock; y < b.Max.Y; y += smallBlock {
+				// Only process junctions whose center row lies inside this stripe.
+				if y < yStripeStart || y >= yStripeEnd {
+					continue
+				}
+
+				for x := b.Min.X + smallBlock; x < b.Max.X; x += smallBlock {
+					// four corners around the junction, read from the original image
+					idx00 := (y-1-minY)*stride + (x-1-minX)*4 // top-left
+					idx10 := (y-1-minY)*stride + (x-minX)*4   // top-right
+					idx01 := (y-minY)*stride + (x-1-minX)*4   // bottom-left
+					idx11 := (y-minY)*stride + (x-minX)*4     // bottom-right
+
+					r00, g00, b00, a00 := srcPix[idx00+0], srcPix[idx00+1], srcPix[idx00+2], srcPix[idx00+3]
+					r10, g10, b10, a10 := srcPix[idx10+0], srcPix[idx10+1], srcPix[idx10+2], srcPix[idx10+3]
+					r01, g01, b01, a01 := srcPix[idx01+0], srcPix[idx01+1], srcPix[idx01+2], srcPix[idx01+3]
+					r11, g11, b11, a11 := srcPix[idx11+0], srcPix[idx11+1], srcPix[idx11+2], srcPix[idx11+3]
+
+					l00 := luma8(r00, g00, b00)
+					l10 := luma8(r10, g10, b10)
+					l01 := luma8(r01, g01, b01)
+					l11 := luma8(r11, g11, b11)
+
+					minL, maxL := l00, l00
+					for _, v := range []int32{l10, l01, l11} {
+						if v < minL {
+							minL = v
+						}
+						if v > maxL {
+							maxL = v
+						}
+					}
+					// if the corner luminance differs too much, treat it as a hard edge and skip
+					if maxL-minL > junctionLumaSpread {
+						continue
+					}
+
+					// grow small rectangle around the junction while colors remain similar
+					L := 0
+					for i := 1; i <= maxRadius && x-i >= b.Min.X; i++ {
+						idxUp := (y-1-minY)*stride + (x-i-minX)*4
+						idxDown := (y-minY)*stride + (x-i-minX)*4
+						rUp, gUp, bUp, aUp := srcPix[idxUp+0], srcPix[idxUp+1], srcPix[idxUp+2], srcPix[idxUp+3]
+						rDown, gDown, bDown, aDown := srcPix[idxDown+0], srcPix[idxDown+1], srcPix[idxDown+2], srcPix[idxDown+3]
+						if !similar(rUp, gUp, bUp, aUp, r00, g00, b00, a00) || !similar(rDown, gDown, bDown, aDown, r01, g01, b01, a01) {
+							break
+						}
+						L = i
+					}
+
+					R := 0
+					for i := 1; i <= maxRadius && x-1+i < b.Max.X; i++ {
+						idxUp := (y-1-minY)*stride + (x-1+i-minX)*4
+						idxDown := (y-minY)*stride + (x-1+i-minX)*4
+						rUp, gUp, bUp, aUp := srcPix[idxUp+0], srcPix[idxUp+1], srcPix[idxUp+2], srcPix[idxUp+3]
+						rDown, gDown, bDown, aDown := srcPix[idxDown+0], srcPix[idxDown+1], srcPix[idxDown+2], srcPix[idxDown+3]
+						if !similar(rUp, gUp, bUp, aUp, r10, g10, b10, a10) || !similar(rDown, gDown, bDown, aDown, r11, g11, b11, a11) {
+							break
+						}
+						R = i
+					}
+
+					U := 0
+					for i := 1; i <= maxRadius && y-i >= b.Min.Y; i++ {
+						idxLeft := (y-i-minY)*stride + (x-1-minX)*4
+						idxRight := (y-i-minY)*stride + (x-minX)*4
+						rLeft, gLeft, bLeft, aLeft := srcPix[idxLeft+0], srcPix[idxLeft+1], srcPix[idxLeft+2], srcPix[idxLeft+3]
+						rRight, gRight, bRight, aRight := srcPix[idxRight+0], srcPix[idxRight+1], srcPix[idxRight+2], srcPix[idxRight+3]
+						if !similar(rLeft, gLeft, bLeft, aLeft, r00, g00, b00, a00) || !similar(rRight, gRight, bRight, aRight, r10, g10, b10, a10) {
+							break
+						}
+						U = i
+					}
+
+					D := 0
+					for i := 1; i <= maxRadius && y-1+i < b.Max.Y; i++ {
+						idxLeft := (y-1+i-minY)*stride + (x-1-minX)*4
+						idxRight := (y-1+i-minY)*stride + (x-minX)*4
+						rLeft, gLeft, bLeft, aLeft := srcPix[idxLeft+0], srcPix[idxLeft+1], srcPix[idxLeft+2], srcPix[idxLeft+3]
+						rRight, gRight, bRight, aRight := srcPix[idxRight+0], srcPix[idxRight+1], srcPix[idxRight+2], srcPix[idxRight+3]
+						if !similar(rLeft, gLeft, bLeft, aLeft, r01, g01, b01, a01) || !similar(rRight, gRight, bRight, aRight, r11, g11, b11, a11) {
+							break
+						}
+						D = i
+					}
+
+					if L == 0 || R == 0 || U == 0 || D == 0 {
+						continue
+					}
+
+					rectMinX := x - L
+					rectMaxX := x - 1 + R
+					rectMinY := y - U
+					rectMaxY := y - 1 + D
+
+					if rectMinX < b.Min.X || rectMaxX >= b.Max.X || rectMinY < b.Min.Y || rectMaxY >= b.Max.Y {
+						continue
+					}
+					if rectMaxX <= rectMinX || rectMaxY <= rectMinY {
+						continue
+					}
+
+					// Clamp vertical extent to the current worker's stripe so that
+					// no two goroutines write to the same rows.
+					if rectMaxY < yStripeStart || rectMinY >= yStripeEnd {
+						continue
+					}
+					if rectMinY < yStripeStart {
+						rectMinY = yStripeStart
+					}
+					if rectMaxY >= yStripeEnd {
+						rectMaxY = yStripeEnd - 1
+					}
+
+					width := rectMaxX - rectMinX
+					height := rectMaxY - rectMinY
+
+					for py := rectMinY; py <= rectMaxY; py++ {
+						v := float64(py-rectMinY) / float64(height)
+						rowOff := (py - minY) * stride
+						for px := rectMinX; px <= rectMaxX; px++ {
+							u := float64(px-rectMinX) / float64(width)
+
+							rTop := lerp8(r00, r10, u)
+							gTop := lerp8(g00, g10, u)
+							bTop := lerp8(b00, b10, u)
+							aTop := lerp8(a00, a10, u)
+
+							rBot := lerp8(r01, r11, u)
+							gBot := lerp8(g01, g11, u)
+							bBot := lerp8(b01, b11, u)
+							aBot := lerp8(a01, a11, u)
+
+							r := lerp8(rTop, rBot, v)
+							g := lerp8(gTop, gBot, v)
+							bc := lerp8(bTop, bBot, v)
+							a := lerp8(aTop, aBot, v)
+
+							idx := rowOff + (px-minX)*4
+							dstPix[idx+0] = r
+							dstPix[idx+1] = g
+							dstPix[idx+2] = bc
+							dstPix[idx+3] = a
+						}
+					}
+				}
+			}
+		}(stripeStart, stripeEnd)
+	}
+	wg.Wait()
+
+	return dst
 }
 
 // smoothFlatAreas performs a light deblocking pass:
@@ -1949,34 +2002,6 @@ func deltaPackBytes(src []byte) ([]byte, error) {
 	}
 
 	return out, nil
-}
-
-// deltaUnpackBytes decodes a slice produced by deltaPackBytes,
-// given the original length totalLen.
-func deltaUnpackBytes(packed []byte, totalLen int) ([]byte, error) {
-	if totalLen == 0 {
-		return []byte{}, nil
-	}
-	if len(packed) < totalLen {
-		return nil, fmt.Errorf("delta packed data truncated")
-	}
-
-	dst := make([]byte, totalLen)
-
-	// first byte
-	first := packed[0]
-	dst[0] = first
-
-	// remaining deltas
-	prev := first
-	for i := 1; i < totalLen; i++ {
-		d := int8(packed[i])
-		val := decodeDelta8(prev, d)
-		dst[i] = val
-		prev = val
-	}
-
-	return dst, nil
 }
 
 // deltaStream provides on-the-fly decoding of a delta-packed byte slice
