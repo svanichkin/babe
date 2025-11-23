@@ -11,9 +11,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"image"
-	"image/color"
-	_ "image/gif"
-	_ "image/jpeg"
 	"io"
 	"runtime"
 	"sync"
@@ -353,7 +350,6 @@ func encodeBlockPlane(plane []uint8, stride, x0, y0, bw, bh int, pw *BitWriter) 
 		}
 	}
 
-
 	// handle degenerate cases: if one of the groups is empty, fall back to the global mean
 	avg := uint8(sum / uint64(total))
 	var fg, bg uint8
@@ -617,7 +613,7 @@ func Encode(img image.Image, quality int) ([]byte, error) {
 			if err := bw.WriteByte(0); err != nil {
 				return nil, err
 			}
-			packedFG, err := DeltaPackBytes(res.fgVals)
+			packedFG, err := deltaPackBytes(res.fgVals)
 			if err != nil {
 				return nil, err
 			}
@@ -633,7 +629,7 @@ func Encode(img image.Image, quality int) ([]byte, error) {
 			if err := bw.WriteByte(1); err != nil {
 				return nil, err
 			}
-			packedFG, err := DeltaPackBytes(res.fgVals)
+			packedFG, err := deltaPackBytes(res.fgVals)
 			if err != nil {
 				return nil, err
 			}
@@ -652,7 +648,7 @@ func Encode(img image.Image, quality int) ([]byte, error) {
 			if err := bw.WriteByte(0); err != nil {
 				return nil, err
 			}
-			packedBG, err := DeltaPackBytes(res.bgVals)
+			packedBG, err := deltaPackBytes(res.bgVals)
 			if err != nil {
 				return nil, err
 			}
@@ -668,7 +664,7 @@ func Encode(img image.Image, quality int) ([]byte, error) {
 			if err := bw.WriteByte(1); err != nil {
 				return nil, err
 			}
-			packedBG, err := DeltaPackBytes(res.bgVals)
+			packedBG, err := deltaPackBytes(res.bgVals)
 			if err != nil {
 				return nil, err
 			}
@@ -906,7 +902,7 @@ func decodeChannel(data []byte, imgW, imgH int) ([]uint8, error) {
 		if err != nil {
 			return nil, err
 		}
-		fgVals, err = DeltaUnpackBytes(packed)
+		fgVals, err = deltaUnpackBytes(packed)
 		if err != nil {
 			return nil, err
 		}
@@ -921,7 +917,7 @@ func decodeChannel(data []byte, imgW, imgH int) ([]uint8, error) {
 		if err != nil {
 			return nil, err
 		}
-		fgVals, err = DeltaUnpackBytes(packed)
+		fgVals, err = deltaUnpackBytes(packed)
 		if err != nil {
 			return nil, err
 		}
@@ -947,7 +943,7 @@ func decodeChannel(data []byte, imgW, imgH int) ([]uint8, error) {
 		if err != nil {
 			return nil, err
 		}
-		bgVals, err = DeltaUnpackBytes(packed)
+		bgVals, err = deltaUnpackBytes(packed)
 		if err != nil {
 			return nil, err
 		}
@@ -962,7 +958,7 @@ func decodeChannel(data []byte, imgW, imgH int) ([]uint8, error) {
 		if err != nil {
 			return nil, err
 		}
-		bgVals, err = DeltaUnpackBytes(packed)
+		bgVals, err = deltaUnpackBytes(packed)
 		if err != nil {
 			return nil, err
 		}
@@ -1594,28 +1590,6 @@ func rgbToYCbCr(r, g, b uint8) yuv {
 	return yuv{Y, Cb, Cr}
 }
 
-func yCbCrToRGB(v yuv) [3]uint8 {
-	Y := float64(v.Y)
-	Cb := float64(v.Cb) - 128
-	Cr := float64(v.Cr) - 128
-
-	R := Y + 1.402*Cr
-	G := Y - 0.344136*Cb - 0.714136*Cr
-	B := Y + 1.772*Cb
-
-	clip := func(x float64) uint8 {
-		if x < 0 {
-			return 0
-		}
-		if x > 255 {
-			return 255
-		}
-		return uint8(x)
-	}
-
-	return [3]uint8{clip(R), clip(G), clip(B)}
-}
-
 // delta‑coding of an 8‑bit value on a 0..255 ring into int8 [-128..127]
 func encodeDelta8(prev, curr uint8) int8 {
 	diff := int16(curr) - int16(prev)
@@ -1669,19 +1643,7 @@ func decompressZstd(data []byte) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-func luma(c color.Color) int32 {
-	r, g, b, _ := c.RGBA()
-	rr := int32(r >> 8)
-	gg := int32(g >> 8)
-	bb := int32(b >> 8)
-
-	// Integer approximation of ITU-R BT.601:
-	// Y ≈ 0.299 R + 0.587 G + 0.114 B
-	return (299*rr + 587*gg + 114*bb) / 1000
-}
-
 // bitsNeeded returns how many bits are required to represent v (0..255).
-
 func bitsNeeded(v int) int {
 	if v <= 0 {
 		return 1
@@ -1710,13 +1672,13 @@ func init() {
 	}
 }
 
-// DeltaPackBytes encodes a byte slice using circular delta coding on 0..255.
+// deltaPackBytes encodes a byte slice using circular delta coding on 0..255.
 // Layout:
 //
 //	[0..3]  = totalLen (uint32, BigEndian) — original length
 //	[4]     = first byte (if totalLen > 0)
 //	[5..]   = (totalLen-1) delta bytes (encodeDelta8(prev, curr))
-func DeltaPackBytes(src []byte) ([]byte, error) {
+func deltaPackBytes(src []byte) ([]byte, error) {
 	n := len(src)
 
 	// Always allocate header (4 bytes) + n payload bytes.
@@ -1743,8 +1705,8 @@ func DeltaPackBytes(src []byte) ([]byte, error) {
 	return out, nil
 }
 
-// DeltaUnpackBytes decodes a slice produced by DeltaPackBytes.
-func DeltaUnpackBytes(packed []byte) ([]byte, error) {
+// deltaUnpackBytes decodes a slice produced by DeltaPackBytes.
+func deltaUnpackBytes(packed []byte) ([]byte, error) {
 	if len(packed) < 4 {
 		return nil, fmt.Errorf("delta packed data too short")
 	}
