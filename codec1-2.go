@@ -704,144 +704,93 @@ func fillBlockPlane(plane []uint8, stride int, x0, y0, bw, bh int, val uint8) er
 // slice matches what decodeChannel expects, so decodeChannel can run on
 // an independent reader in parallel for each channel.
 func readChannelSegment(br *bufio.Reader) ([]byte, error) {
+	var buf bytes.Buffer
 	var tmp4 [4]byte
 
+	// Helper to read a uint32, write it into buf, and return the value.
+	readU32 := func() (uint32, error) {
+		if _, err := io.ReadFull(br, tmp4[:]); err != nil {
+			return 0, err
+		}
+		if _, err := buf.Write(tmp4[:]); err != nil {
+			return 0, err
+		}
+		return binary.BigEndian.Uint32(tmp4[:]), nil
+	}
+	// Helper to read n bytes from br, write to buf.
+	readBytes := func(n uint32) error {
+		if n == 0 {
+			return nil
+		}
+		b := make([]byte, n)
+		if _, err := io.ReadFull(br, b); err != nil {
+			return err
+		}
+		_, err := buf.Write(b)
+		return err
+	}
+
 	// blockCount (4 bytes)
-	if _, err := io.ReadFull(br, tmp4[:]); err != nil {
+	if _, err := readU32(); err != nil {
 		return nil, err
 	}
-	blockCount := binary.BigEndian.Uint32(tmp4[:])
-
 	// sizeStreamLen (4 bytes)
-	if _, err := io.ReadFull(br, tmp4[:]); err != nil {
+	sizeStreamLen, err := readU32()
+	if err != nil {
 		return nil, err
 	}
-	sizeStreamLen := binary.BigEndian.Uint32(tmp4[:])
-
+	if err := readBytes(sizeStreamLen); err != nil {
+		return nil, err
+	}
 	// typeStreamLen (4 bytes)
-	if _, err := io.ReadFull(br, tmp4[:]); err != nil {
+	typeStreamLen, err := readU32()
+	if err != nil {
 		return nil, err
 	}
-	typeStreamLen := binary.BigEndian.Uint32(tmp4[:])
-
+	if err := readBytes(typeStreamLen); err != nil {
+		return nil, err
+	}
 	// patternLen (4 bytes)
-	if _, err := io.ReadFull(br, tmp4[:]); err != nil {
-		return nil, err
-	}
-	patternLen := binary.BigEndian.Uint32(tmp4[:])
-
-	// FG: mode (1 byte) + packedLen (4 bytes)
-	modeFG, err := br.ReadByte()
+	patternLen, err := readU32()
 	if err != nil {
 		return nil, err
 	}
-	if _, err := io.ReadFull(br, tmp4[:]); err != nil {
+	if err := readBytes(patternLen); err != nil {
 		return nil, err
 	}
-	fgPackedLen := binary.BigEndian.Uint32(tmp4[:])
-
-	// BG: mode (1 byte) + packedLen (4 bytes)
-	modeBG, err := br.ReadByte()
+	// FG: mode (1 byte)
+	b, err := br.ReadByte()
 	if err != nil {
 		return nil, err
 	}
-	if _, err := io.ReadFull(br, tmp4[:]); err != nil {
+	if err := buf.WriteByte(b); err != nil {
 		return nil, err
 	}
-	bgPackedLen := binary.BigEndian.Uint32(tmp4[:])
-
-	// compute total size of the channel segment:
-	// blockCount(4) + sizeLen(4) + sizeBytes + typeLen(4) + typeBytes +
-	// patternLen(4) + patternBytes + FG(mode+len+bytes) + BG(mode+len+bytes)
-	total := 4 + 4 + int(sizeStreamLen) + 4 + int(typeStreamLen) + 4 + int(patternLen) + 1 + 4 + int(fgPackedLen) + 1 + 4 + int(bgPackedLen)
-	if total <= 0 || total > 1<<30 {
-		return nil, fmt.Errorf(
-			"readChannelSegment: absurd channel segment size %d (size=%d type=%d pattern=%d fg=%d bg=%d)",
-			total, sizeStreamLen, typeStreamLen, patternLen, fgPackedLen, bgPackedLen,
-		)
+	// FG packed length (4 bytes)
+	fgPackedLen, err := readU32()
+	if err != nil {
+		return nil, err
 	}
-	buf := make([]byte, total)
-	pos := 0
-
-	// write blockCount
-	binary.BigEndian.PutUint32(buf[pos:pos+4], blockCount)
-	pos += 4
-
-	// write sizeStreamLen and sizeBytes
-	binary.BigEndian.PutUint32(buf[pos:pos+4], sizeStreamLen)
-	pos += 4
-	if sizeStreamLen > 0 {
-		next := pos + int(sizeStreamLen)
-		if next < pos || next > len(buf) {
-			return nil, fmt.Errorf("readChannelSegment: inconsistent sizeStreamLen %d (buf=%d,pos=%d)", sizeStreamLen, len(buf), pos)
-		}
-		if _, err := io.ReadFull(br, buf[pos:next]); err != nil {
-			return nil, err
-		}
-		pos = next
+	if err := readBytes(fgPackedLen); err != nil {
+		return nil, err
 	}
-
-	// write typeStreamLen and typeBytes
-	binary.BigEndian.PutUint32(buf[pos:pos+4], typeStreamLen)
-	pos += 4
-	if typeStreamLen > 0 {
-		next := pos + int(typeStreamLen)
-		if next < pos || next > len(buf) {
-			return nil, fmt.Errorf("readChannelSegment: inconsistent typeStreamLen %d (buf=%d,pos=%d)", typeStreamLen, len(buf), pos)
-		}
-		if _, err := io.ReadFull(br, buf[pos:next]); err != nil {
-			return nil, err
-		}
-		pos = next
+	// BG: mode (1 byte)
+	b, err = br.ReadByte()
+	if err != nil {
+		return nil, err
 	}
-
-	// write patternLen and patternBytes
-	binary.BigEndian.PutUint32(buf[pos:pos+4], patternLen)
-	pos += 4
-	if patternLen > 0 {
-		next := pos + int(patternLen)
-		if next < pos || next > len(buf) {
-			return nil, fmt.Errorf("readChannelSegment: inconsistent patternLen %d (buf=%d,pos=%d)", patternLen, len(buf), pos)
-		}
-		if _, err := io.ReadFull(br, buf[pos:next]); err != nil {
-			return nil, err
-		}
-		pos = next
+	if err := buf.WriteByte(b); err != nil {
+		return nil, err
 	}
-
-	// write FG mode, packedLen and packed bytes
-	buf[pos] = modeFG
-	pos++
-	binary.BigEndian.PutUint32(buf[pos:pos+4], fgPackedLen)
-	pos += 4
-	if fgPackedLen > 0 {
-		next := pos + int(fgPackedLen)
-		if next < pos || next > len(buf) {
-			return nil, fmt.Errorf("readChannelSegment: inconsistent fgPackedLen %d (buf=%d,pos=%d)", fgPackedLen, len(buf), pos)
-		}
-		if _, err := io.ReadFull(br, buf[pos:next]); err != nil {
-			return nil, err
-		}
-		pos = next
+	// BG packed length (4 bytes)
+	bgPackedLen, err := readU32()
+	if err != nil {
+		return nil, err
 	}
-
-	// write BG mode, packedLen and packed bytes
-	buf[pos] = modeBG
-	pos++
-	binary.BigEndian.PutUint32(buf[pos:pos+4], bgPackedLen)
-	pos += 4
-	if bgPackedLen > 0 {
-		next := pos + int(bgPackedLen)
-		if next < pos || next > len(buf) {
-			return nil, fmt.Errorf("readChannelSegment: inconsistent bgPackedLen %d (buf=%d,pos=%d)", bgPackedLen, len(buf), pos)
-		}
-		if _, err := io.ReadFull(br, buf[pos:next]); err != nil {
-			return nil, err
-		}
-		pos = next
+	if err := readBytes(bgPackedLen); err != nil {
+		return nil, err
 	}
-
-	return buf, nil
+	return buf.Bytes(), nil
 }
 
 // decodeChannel decodes one channel stream into a planar buffer of size imgW x imgH.
@@ -1151,20 +1100,64 @@ func Decode(compData []byte) (image.Image, error) {
 			macroBlock, smallBlock)
 	}
 
-	// decode three channels sequentially from the shared stream:
-	// Y, then Cb, then Cr in the same order they were written.
-	yPlane, err := decodeChannel(br, imgW, imgH)
+	// read three channel segments (Y, Cb, Cr) sequentially,
+	// then decode each one in its own goroutine.
+	ySeg, err := readChannelSegment(br)
 	if err != nil {
 		return nil, err
 	}
-	cbPlane, err := decodeChannel(br, imgW, imgH)
+	cbSeg, err := readChannelSegment(br)
 	if err != nil {
 		return nil, err
 	}
-	crPlane, err := decodeChannel(br, imgW, imgH)
+	crSeg, err := readChannelSegment(br)
 	if err != nil {
 		return nil, err
 	}
+
+	type chResult struct {
+		plane []uint8
+		err   error
+	}
+
+	var (
+		resY  chResult
+		resCb chResult
+		resCr chResult
+		wg    sync.WaitGroup
+	)
+
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		r := bufio.NewReader(bytes.NewReader(ySeg))
+		resY.plane, resY.err = decodeChannel(r, imgW, imgH)
+	}()
+	go func() {
+		defer wg.Done()
+		r := bufio.NewReader(bytes.NewReader(cbSeg))
+		resCb.plane, resCb.err = decodeChannel(r, imgW, imgH)
+	}()
+	go func() {
+		defer wg.Done()
+		r := bufio.NewReader(bytes.NewReader(crSeg))
+		resCr.plane, resCr.err = decodeChannel(r, imgW, imgH)
+	}()
+	wg.Wait()
+
+	if resY.err != nil {
+		return nil, resY.err
+	}
+	if resCb.err != nil {
+		return nil, resCb.err
+	}
+	if resCr.err != nil {
+		return nil, resCr.err
+	}
+
+	yPlane := resY.plane
+	cbPlane := resCb.plane
+	crPlane := resCr.plane
 
 	// combine into RGBA (fast path: write directly into Pix)
 	dst := image.NewRGBA(image.Rect(0, 0, imgW, imgH))
