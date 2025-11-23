@@ -1581,15 +1581,11 @@ type yuv struct {
 }
 
 func rgbToYCbCr(r, g, b uint8) yuv {
-	R := float64(r)
-	G := float64(g)
-	B := float64(b)
-
-	Y := int16(0.299*R + 0.587*G + 0.114*B)
-	Cb := int16(-0.169*R - 0.331*G + 0.5*B + 128)
-	Cr := int16(0.5*R - 0.418*G - 0.081*B + 128)
-
-	return yuv{Y, Cb, Cr}
+	rr, gg, bb := int32(r), int32(g), int32(b)
+	Y := (77*rr + 150*gg + 29*bb) >> 8 // ≈ 0.299 0.587 0.114
+	Cb := ((-43*rr - 85*gg + 128*bb) >> 8) + 128
+	Cr := ((128*rr - 107*gg - 21*bb) >> 8) + 128
+	return yuv{int16(Y), int16(Cb), int16(Cr)}
 }
 
 // delta‑coding of an 8‑bit value on a 0..255 ring into int8 [-128..127]
