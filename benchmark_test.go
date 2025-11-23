@@ -78,7 +78,7 @@ func BenchmarkBABE(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		// Encode
 		startEnc := time.Now()
-		enc, err := Encode(img, 80)
+		enc, err := Encode(img, 80, false)
 		if err != nil {
 			b.Fatalf("encode failed: %v", err)
 		}

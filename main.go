@@ -74,7 +74,7 @@ func encodeToBabe(inPath, outPath string, quality int) error {
 	}
 
 	start := time.Now()
-	enc, err := Encode(img, quality)
+	enc, err := Encode(img, quality, true)
 	if err != nil {
 		return err
 	}

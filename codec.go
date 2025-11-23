@@ -33,6 +33,16 @@ var (
 // current encode quality in [0..100]; used to drive macro/small decisions.
 var encQuality int = 100
 
+// channel presence flags for the header; at least Y must be set.
+const (
+	channelFlagY  = 1 << 0
+	channelFlagCb = 1 << 1
+	channelFlagCr = 1 << 2
+)
+
+// encodeBW toggles grayscale mode; when true, only the Y channel is stored.
+var encodeBW bool
+
 // Quality mapping:
 // - quality is in [0..100]
 // - smallBlock/macroBlock are chosen from a small set of presets
@@ -75,19 +85,19 @@ func setBlocksForQuality(quality int) error {
 	return nil
 }
 
-// BitWriter writes bits to an io.ByteWriter (e.g., *bytes.Buffer).
-type BitWriter struct {
+// bitWriter writes bits to an io.ByteWriter (e.g., *bytes.Buffer).
+type bitWriter struct {
 	w    io.ByteWriter
 	byte byte
 	n    uint8 // number of bits written (0..8)
 }
 
-func NewBitWriter(w io.ByteWriter) *BitWriter {
-	return &BitWriter{w: w}
+func newBitWriter(w io.ByteWriter) *bitWriter {
+	return &bitWriter{w: w}
 }
 
-// WriteBit writes a single bit (msb-first in byte).
-func (bw *BitWriter) WriteBit(bit bool) error {
+// writeBit writes a single bit (msb-first in byte).
+func (bw *bitWriter) writeBit(bit bool) error {
 	bw.byte <<= 1
 	if bit {
 		bw.byte |= 1
@@ -103,8 +113,8 @@ func (bw *BitWriter) WriteBit(bit bool) error {
 	return nil
 }
 
-// Flush writes any remaining bits, left-padded with zeros.
-func (bw *BitWriter) Flush() error {
+// flush writes any remaining bits, left-padded with zeros.
+func (bw *bitWriter) flush() error {
 	if bw.n > 0 {
 		bw.byte <<= 8 - bw.n
 		if err := bw.w.WriteByte(bw.byte); err != nil {
@@ -116,19 +126,19 @@ func (bw *BitWriter) Flush() error {
 	return nil
 }
 
-// BitReader reads bits from a byte slice (msb-first in each byte).
-type BitReader struct {
+// bitReader reads bits from a byte slice (msb-first in each byte).
+type bitReader struct {
 	data []byte
 	idx  int
 	bit  uint8 // bit position in current byte (0..7), msb-first
 }
 
-func NewBitReader(data []byte) *BitReader {
-	return &BitReader{data: data, idx: 0, bit: 0}
+func newBitReader(data []byte) *bitReader {
+	return &bitReader{data: data, idx: 0, bit: 0}
 }
 
-// ReadBit returns the next bit, or error if out of data.
-func (br *BitReader) ReadBit() (bool, error) {
+// readBit returns the next bit, or error if out of data.
+func (br *bitReader) readBit() (bool, error) {
 	if br.idx >= len(br.data) {
 		return false, io.EOF
 	}
@@ -170,10 +180,7 @@ func extractYCbCrPlanes(img image.Image) ([]uint8, []uint8, []uint8, int, int) {
 		extractYCbCrFromNRGBA(src, yPlane, cbPlane, crPlane, w, h)
 	default:
 		// Fallback: generic path using img.At. Still parallelised by rows.
-		workers := runtime.NumCPU()
-		if workers > h {
-			workers = h
-		}
+		workers := min(runtime.NumCPU(), h)
 		if workers < 1 {
 			workers = 1
 		}
@@ -398,7 +405,7 @@ func canUseBigBlockChannel(plane []uint8, stride, height, x0, y0 int) bool {
 // encodeBlockPlane encodes a single block for one planar channel:
 // it computes a mean-based threshold, writes the FG/BG pattern bits (if pw != nil),
 // and computes FG/BG levels.
-func encodeBlockPlane(plane []uint8, stride, x0, y0, bw, bh int, pw *BitWriter) (uint8, uint8, error) {
+func encodeBlockPlane(plane []uint8, stride, x0, y0, bw, bh int, pw *bitWriter) (uint8, uint8, error) {
 	total := bw * bh
 	if total <= 0 {
 		return 0, 0, fmt.Errorf("invalid block size")
@@ -424,7 +431,7 @@ func encodeBlockPlane(plane []uint8, stride, x0, y0, bw, bh int, pw *BitWriter) 
 
 	emitBit := func(isFg bool) error {
 		if pw != nil {
-			if err := pw.WriteBit(isFg); err != nil {
+			if err := pw.writeBit(isFg); err != nil {
 				return err
 			}
 		}
@@ -516,12 +523,12 @@ func encodeChannel(plane []uint8, stride, w4, h4, fullW, fullH int, useMacro boo
 	var blockCount uint32
 
 	var sizeBuf bytes.Buffer
-	sizeW := NewBitWriter(&sizeBuf)
+	sizeW := newBitWriter(&sizeBuf)
 	var patternBuf bytes.Buffer
-	patternW := NewBitWriter(&patternBuf)
+	patternW := newBitWriter(&patternBuf)
 
 	var typeBuf bytes.Buffer
-	typeW := NewBitWriter(&typeBuf)
+	typeW := newBitWriter(&typeBuf)
 
 	var fgVals []uint8
 	var bgVals []uint8
@@ -542,7 +549,7 @@ func encodeChannel(plane []uint8, stride, w4, h4, fullW, fullH int, useMacro boo
 				}
 				fgVals = append(fgVals, fg)
 				bgVals = append(bgVals, bg)
-				if err := typeW.WriteBit(true); err != nil { // always pattern
+				if err := typeW.writeBit(true); err != nil { // always pattern
 					return 0, nil, nil, nil, nil, nil, err
 				}
 				blockCount++
@@ -553,7 +560,7 @@ func encodeChannel(plane []uint8, stride, w4, h4, fullW, fullH int, useMacro boo
 					for bx := 0; bx < macroBlock; bx += smallBlock {
 						xx, yy := mx+bx, my+by
 						// for smallBlock > 1 we also emit pattern bits; for smallBlock == 1 we skip pattern bits
-						var pw *BitWriter
+						var pw *bitWriter
 						isPattern := false
 						if smallBlock > 1 {
 							pw = patternW
@@ -565,7 +572,7 @@ func encodeChannel(plane []uint8, stride, w4, h4, fullW, fullH int, useMacro boo
 						}
 						fgVals = append(fgVals, fg)
 						bgVals = append(bgVals, bg)
-						if err := typeW.WriteBit(isPattern); err != nil {
+						if err := typeW.writeBit(isPattern); err != nil {
 							return 0, nil, nil, nil, nil, nil, err
 						}
 						blockCount++
@@ -579,7 +586,7 @@ func encodeChannel(plane []uint8, stride, w4, h4, fullW, fullH int, useMacro boo
 	// right stripe: small blocks only
 	for my := 0; my < fullH; my += smallBlock {
 		for mx := fullW; mx < w4; mx += smallBlock {
-			var pw *BitWriter
+			var pw *bitWriter
 			isPattern := false
 			if smallBlock > 1 {
 				pw = patternW
@@ -591,7 +598,7 @@ func encodeChannel(plane []uint8, stride, w4, h4, fullW, fullH int, useMacro boo
 			}
 			fgVals = append(fgVals, fg)
 			bgVals = append(bgVals, bg)
-			if err := typeW.WriteBit(isPattern); err != nil {
+			if err := typeW.writeBit(isPattern); err != nil {
 				return 0, nil, nil, nil, nil, nil, err
 			}
 			blockCount++
@@ -600,7 +607,7 @@ func encodeChannel(plane []uint8, stride, w4, h4, fullW, fullH int, useMacro boo
 	// bottom stripe: small blocks only (including bottom-right corner)
 	for my := fullH; my < h4; my += smallBlock {
 		for mx := 0; mx < w4; mx += smallBlock {
-			var pw *BitWriter
+			var pw *bitWriter
 			isPattern := false
 			if smallBlock > 1 {
 				pw = patternW
@@ -612,7 +619,7 @@ func encodeChannel(plane []uint8, stride, w4, h4, fullW, fullH int, useMacro boo
 			}
 			fgVals = append(fgVals, fg)
 			bgVals = append(bgVals, bg)
-			if err := typeW.WriteBit(isPattern); err != nil {
+			if err := typeW.writeBit(isPattern); err != nil {
 				return 0, nil, nil, nil, nil, nil, err
 			}
 			blockCount++
@@ -621,17 +628,17 @@ func encodeChannel(plane []uint8, stride, w4, h4, fullW, fullH int, useMacro boo
 
 	// write macroUseBig bits for the main area into the size stream
 	for _, useBig := range macroUseBig {
-		if err := sizeW.WriteBit(useBig); err != nil {
+		if err := sizeW.writeBit(useBig); err != nil {
 			return 0, nil, nil, nil, nil, nil, err
 		}
 	}
-	if err := sizeW.Flush(); err != nil {
+	if err := sizeW.flush(); err != nil {
 		return 0, nil, nil, nil, nil, nil, err
 	}
-	if err := typeW.Flush(); err != nil {
+	if err := typeW.flush(); err != nil {
 		return 0, nil, nil, nil, nil, nil, err
 	}
-	if err := patternW.Flush(); err != nil {
+	if err := patternW.flush(); err != nil {
 		return 0, nil, nil, nil, nil, nil, err
 	}
 
@@ -640,12 +647,21 @@ func encodeChannel(plane []uint8, stride, w4, h4, fullW, fullH int, useMacro boo
 
 // Encode runs the BABE encoder with three fully independent channel streams (Y, Cb, Cr).
 // Each channel has its own block list, size stream, pattern stream, and FG/BG levels.
-func Encode(img image.Image, quality int) ([]byte, error) {
+func Encode(img image.Image, quality int, bwmode bool) ([]byte, error) {
+	encodeBW = bwmode
+
 	if err := setBlocksForQuality(quality); err != nil {
 		return nil, err
 	}
 
 	yPlane, cbPlane, crPlane, w, h := extractYCbCrPlanes(img)
+
+	// Decide which channels will be stored. Y is always present; Cb/Cr
+	// may be omitted in grayscale mode.
+	channelsMask := byte(channelFlagY)
+	if !encodeBW {
+		channelsMask |= channelFlagCb | channelFlagCr
+	}
 
 	var raw bytes.Buffer
 	bw := bufio.NewWriter(&raw)
@@ -674,6 +690,10 @@ func Encode(img image.Image, quality int) ([]byte, error) {
 	if err := binary.Write(bw, binary.BigEndian, uint16(macroBlock)); err != nil {
 		return nil, err
 	}
+	// channels mask: which Y/Cb/Cr planes are stored.
+	if err := bw.WriteByte(channelsMask); err != nil {
+		return nil, err
+	}
 	if err := binary.Write(bw, binary.BigEndian, uint32(w)); err != nil {
 		return nil, err
 	}
@@ -681,7 +701,7 @@ func Encode(img image.Image, quality int) ([]byte, error) {
 		return nil, err
 	}
 
-	// --- Encode three independent channels: Y, Cb, Cr ---
+	// --- Encode channel(s) depending on grayscale mode ---
 	type channelResult struct {
 		blockCount   uint32
 		sizeBytes    []byte
@@ -692,19 +712,30 @@ func Encode(img image.Image, quality int) ([]byte, error) {
 		err          error
 	}
 
-	var (
-		results [3]channelResult
-		wg      sync.WaitGroup
-	)
+	var wg sync.WaitGroup
 
-	channelIDs := []int{chY, chCb, chCr}
-	planes := [][]uint8{yPlane, cbPlane, crPlane}
+	type channelSpec struct {
+		id    int
+		plane []uint8
+	}
 
-	for i := range planes {
+	var channels []channelSpec
+	// Y is always present.
+	channels = append(channels, channelSpec{id: chY, plane: yPlane})
+	// Cb/Cr are stored only if not in grayscale mode.
+	if !encodeBW {
+		channels = append(channels, channelSpec{id: chCb, plane: cbPlane})
+		channels = append(channels, channelSpec{id: chCr, plane: crPlane})
+	}
+
+	results := make([]channelResult, len(channels))
+
+	for i := range channels {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			blockCount, sizeBytes, typeBytes, patternBytes, fgVals, bgVals, err := encodeChannel(planes[i], w, w4, h4, fullW, fullH, useMacro)
+			ch := channels[i]
+			blockCount, sizeBytes, typeBytes, patternBytes, fgVals, bgVals, err := encodeChannel(ch.plane, w, w4, h4, fullW, fullH, useMacro)
 			results[i] = channelResult{
 				blockCount:   blockCount,
 				sizeBytes:    sizeBytes,
@@ -719,10 +750,10 @@ func Encode(img image.Image, quality int) ([]byte, error) {
 
 	wg.Wait()
 
-	// Write channels in fixed order: Y, Cb, Cr.
+	// Write channels in fixed order of IDs: always Y first, then optional Cb/Cr.
 	// For experimentation: smallBlocks store only FG (BG is implicit = 0),
 	// macroBlocks store both FG and BG like before.
-	for i := 0; i < 3; i++ {
+	for i, ch := range channels {
 		res := results[i]
 		if res.err != nil {
 			return nil, res.err
@@ -756,7 +787,7 @@ func Encode(img image.Image, quality int) ([]byte, error) {
 		// write FG array:
 		// mode 0 = delta-coded via DeltaPackBytes (used for Y),
 		// mode 1 = packed with PackBytes (used for Cb/Cr).
-		chID := channelIDs[i]
+		chID := ch.id
 		if chID == chY {
 			// Y channel: delta scheme via DeltaPackBytes
 			if err := bw.WriteByte(0); err != nil {
@@ -840,10 +871,10 @@ func Encode(img image.Image, quality int) ([]byte, error) {
 }
 
 // drawBlockPlane decodes a single block for one channel into a planar buffer.
-func drawBlockPlane(plane []uint8, stride int, x0, y0, bw, bh int, br *BitReader, fg, bg uint8) error {
+func drawBlockPlane(plane []uint8, stride int, x0, y0, bw, bh int, br *bitReader, fg, bg uint8) error {
 	for yy := 0; yy < bh; yy++ {
 		for xx := 0; xx < bw; xx++ {
-			bit, err := br.ReadBit()
+			bit, err := br.readBit()
 			if err != nil {
 				return err
 			}
@@ -1002,7 +1033,7 @@ func decodeChannel(data []byte, imgW, imgH int) ([]uint8, error) {
 	if err != nil {
 		return nil, err
 	}
-	sizeBR := NewBitReader(sizeBytes)
+	sizeBR := newBitReader(sizeBytes)
 
 	// type stream (pattern vs solid blocks)
 	typeStreamLen, err := readU32("typeStreamLen")
@@ -1013,7 +1044,7 @@ func decodeChannel(data []byte, imgW, imgH int) ([]uint8, error) {
 	if err != nil {
 		return nil, err
 	}
-	typeBR := NewBitReader(typeBytes)
+	typeBR := newBitReader(typeBytes)
 
 	// pattern stream (actual bi-level patterns)
 	patternLen, err := readU32("patternLen")
@@ -1024,7 +1055,7 @@ func decodeChannel(data []byte, imgW, imgH int) ([]uint8, error) {
 	if err != nil {
 		return nil, err
 	}
-	patternBR := NewBitReader(patternBytes)
+	patternBR := newBitReader(patternBytes)
 
 	// FG: read mode and decode as a delta stream
 	if pos >= len(data) {
@@ -1086,8 +1117,8 @@ func decodeChannel(data []byte, imgW, imgH int) ([]uint8, error) {
 
 	// rebuild macro-block size decisions from the size stream
 	macroBig := make([]bool, macroGroupCount)
-	for i := 0; i < macroGroupCount; i++ {
-		bit, err := sizeBR.ReadBit()
+	for i := range macroGroupCount {
+		bit, err := sizeBR.readBit()
 		if err != nil {
 			return nil, err
 		}
@@ -1105,17 +1136,17 @@ func decodeChannel(data []byte, imgW, imgH int) ([]uint8, error) {
 			}
 			if useMacro && macroBig[macroIndex] {
 				// macroBlock: read one type bit, FG and BG from the delta streams, use full pattern
-				bitType, err := typeBR.ReadBit()
+				bitType, err := typeBR.readBit()
 				if err != nil {
 					return nil, err
 				}
 				_ = bitType // always true for macro blocks
 
-				fg, err := fgStream.Next()
+				fg, err := fgStream.next()
 				if err != nil {
 					return nil, err
 				}
-				bg, err := bgStream.Next()
+				bg, err := bgStream.next()
 				if err != nil {
 					return nil, err
 				}
@@ -1130,15 +1161,15 @@ func decodeChannel(data []byte, imgW, imgH int) ([]uint8, error) {
 						if blockIndex >= int(blockCount) {
 							return nil, fmt.Errorf("unexpected end of blocks in macro grid")
 						}
-						bitType, err := typeBR.ReadBit()
+						bitType, err := typeBR.readBit()
 						if err != nil {
 							return nil, err
 						}
-						fg, err := fgStream.Next()
+						fg, err := fgStream.next()
 						if err != nil {
 							return nil, err
 						}
-						bg, err := bgStream.Next()
+						bg, err := bgStream.next()
 						if err != nil {
 							return nil, err
 						}
@@ -1165,15 +1196,15 @@ func decodeChannel(data []byte, imgW, imgH int) ([]uint8, error) {
 			if blockIndex >= int(blockCount) {
 				return nil, fmt.Errorf("unexpected end of blocks in right stripe")
 			}
-			bitType, err := typeBR.ReadBit()
+			bitType, err := typeBR.readBit()
 			if err != nil {
 				return nil, err
 			}
-			fg, err := fgStream.Next()
+			fg, err := fgStream.next()
 			if err != nil {
 				return nil, err
 			}
-			bg, err := bgStream.Next()
+			bg, err := bgStream.next()
 			if err != nil {
 				return nil, err
 			}
@@ -1195,15 +1226,15 @@ func decodeChannel(data []byte, imgW, imgH int) ([]uint8, error) {
 			if blockIndex >= int(blockCount) {
 				return nil, fmt.Errorf("unexpected end of blocks in bottom stripe")
 			}
-			bitType, err := typeBR.ReadBit()
+			bitType, err := typeBR.readBit()
 			if err != nil {
 				return nil, err
 			}
-			fg, err := fgStream.Next()
+			fg, err := fgStream.next()
 			if err != nil {
 				return nil, err
 			}
-			bg, err := bgStream.Next()
+			bg, err := bgStream.next()
 			if err != nil {
 				return nil, err
 			}
@@ -1283,6 +1314,16 @@ func Decode(compData []byte) (image.Image, error) {
 	smallBlock = int(bwSize)
 	macroBlock = int(bhSize)
 
+	// channels mask: which Y/Cb/Cr planes are stored.
+	if len(payload)-pos < 1 {
+		return nil, fmt.Errorf("decode: truncated while reading channels mask")
+	}
+	channelsMask := payload[pos]
+	pos++
+	if channelsMask&channelFlagY == 0 {
+		return nil, fmt.Errorf("decode: Y channel missing in header")
+	}
+
 	imgW32, err := readU32("image width")
 	if err != nil {
 		return nil, err
@@ -1299,19 +1340,28 @@ func Decode(compData []byte) (image.Image, error) {
 			macroBlock, smallBlock)
 	}
 
-	// read three channel segments (Y, Cb, Cr) sequentially from the payload slice,
-	// then decode each one in its own goroutine.
+	// read channel segments sequentially from the payload slice.
+	// Y is always present; Cb/Cr may be omitted in grayscale mode.
 	ySeg, err := readChannelSegment(payload, &pos)
 	if err != nil {
 		return nil, err
 	}
-	cbSeg, err := readChannelSegment(payload, &pos)
-	if err != nil {
-		return nil, err
+
+	hasCb := (channelsMask & channelFlagCb) != 0
+	hasCr := (channelsMask & channelFlagCr) != 0
+
+	var cbSeg, crSeg []byte
+	if hasCb {
+		cbSeg, err = readChannelSegment(payload, &pos)
+		if err != nil {
+			return nil, err
+		}
 	}
-	crSeg, err := readChannelSegment(payload, &pos)
-	if err != nil {
-		return nil, err
+	if hasCr {
+		crSeg, err = readChannelSegment(payload, &pos)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	type chResult struct {
@@ -1326,59 +1376,78 @@ func Decode(compData []byte) (image.Image, error) {
 		wg    sync.WaitGroup
 	)
 
-	wg.Add(3)
+	// Y is always decoded.
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		resY.plane, resY.err = decodeChannel(ySeg, imgW, imgH)
 	}()
-	go func() {
-		defer wg.Done()
-		resCb.plane, resCb.err = decodeChannel(cbSeg, imgW, imgH)
-	}()
-	go func() {
-		defer wg.Done()
-		resCr.plane, resCr.err = decodeChannel(crSeg, imgW, imgH)
-	}()
+
+	if hasCb {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resCb.plane, resCb.err = decodeChannel(cbSeg, imgW, imgH)
+		}()
+	}
+	if hasCr {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resCr.plane, resCr.err = decodeChannel(crSeg, imgW, imgH)
+		}()
+	}
+
 	wg.Wait()
 
 	if resY.err != nil {
 		return nil, resY.err
 	}
-	if resCb.err != nil {
-		return nil, resCb.err
-	}
-	if resCr.err != nil {
-		return nil, resCr.err
-	}
 
 	yPlane := resY.plane
-	cbPlane := resCb.plane
-	crPlane := resCr.plane
+
+	// If Cb/Cr are missing, synthesise neutral chroma=128 so that the
+	// resulting RGB image is grayscale.
+	var cbPlane, crPlane []uint8
+	if hasCb {
+		if resCb.err != nil {
+			return nil, resCb.err
+		}
+		cbPlane = resCb.plane
+	} else {
+		cbPlane = make([]uint8, imgW*imgH)
+		for i := range cbPlane {
+			cbPlane[i] = 128
+		}
+	}
+
+	if hasCr {
+		if resCr.err != nil {
+			return nil, resCr.err
+		}
+		crPlane = resCr.plane
+	} else {
+		crPlane = make([]uint8, imgW*imgH)
+		for i := range crPlane {
+			crPlane[i] = 128
+		}
+	}
 
 	// combine into RGBA (fast path: write directly into Pix) using integer-based YCbCr->RGB conversion
 	dst := image.NewRGBA(image.Rect(0, 0, imgW, imgH))
 	pix := dst.Pix
 	stride := dst.Stride
 
-	workers := runtime.NumCPU()
-	if workers > imgH {
-		workers = imgH
-	}
-	if workers < 1 {
-		workers = 1
-	}
+	workers := max(min(runtime.NumCPU(), imgH), 1)
 	rowsPerWorker := (imgH + workers - 1) / workers
 
 	var wgRGB sync.WaitGroup
-	for i := 0; i < workers; i++ {
+	for i := range workers {
 		y0 := i * rowsPerWorker
 		if y0 >= imgH {
 			break
 		}
-		y1 := y0 + rowsPerWorker
-		if y1 > imgH {
-			y1 = imgH
-		}
+		y1 := min(y0+rowsPerWorker, imgH)
 
 		wgRGB.Add(1)
 		go func(yStart, yEnd int) {
@@ -1386,7 +1455,7 @@ func Decode(compData []byte) (image.Image, error) {
 			for y := yStart; y < yEnd; y++ {
 				rowOff := y * stride
 				baseIdx := y * imgW
-				for x := 0; x < imgW; x++ {
+				for x := range imgW {
 					idx := baseIdx + x
 					Y := int32(yPlane[idx])
 					Cb := int32(cbPlane[idx]) - 128
@@ -1448,10 +1517,7 @@ func smoothJunctions(img *image.RGBA) *image.RGBA {
 		return img
 	}
 
-	maxRadius := smallBlock
-	if maxRadius > 3 {
-		maxRadius = 3
-	}
+	maxRadius := min(smallBlock, 3)
 	const junctionLumaSpread int32 = 32
 	const lumaSimThreshold int32 = 8
 
@@ -1491,25 +1557,16 @@ func smoothJunctions(img *image.RGBA) *image.RGBA {
 	// Parallelise over horizontal stripes. Each worker owns a disjoint band
 	// of rows in the destination image. Writes are clamped to the worker's
 	// stripe to avoid concurrent writes to the same pixels.
-	workers := runtime.NumCPU()
-	if workers > h {
-		workers = h
-	}
-	if workers < 1 {
-		workers = 1
-	}
+	workers := max(min(runtime.NumCPU(), h), 1)
 	rowsPerWorker := (h + workers - 1) / workers
 
 	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
+	for i := range workers {
 		stripeStart := b.Min.Y + i*rowsPerWorker
 		if stripeStart >= b.Max.Y {
 			break
 		}
-		stripeEnd := stripeStart + rowsPerWorker
-		if stripeEnd > b.Max.Y {
-			stripeEnd = b.Max.Y
-		}
+		stripeEnd := min(stripeStart+rowsPerWorker, b.Max.Y)
 
 		wg.Add(1)
 		go func(yStripeStart, yStripeEnd int) {
@@ -1701,17 +1758,11 @@ func smoothFlatAreas(src *image.RGBA) *image.RGBA {
 	minY := b.Min.Y
 
 	// vertical block boundaries: x = k * smallBlock
-	workersV := runtime.NumCPU()
-	if workersV < 1 {
-		workersV = 1
-	}
-	if workersV > h {
-		workersV = h
-	}
+	workersV := min(max(runtime.NumCPU(), 1), h)
 	rowsPerWorker := (h + workersV - 1) / workersV
 
 	var wgV sync.WaitGroup
-	for i := 0; i < workersV; i++ {
+	for i := range workersV {
 		y0 := b.Min.Y + i*rowsPerWorker
 		if y0 >= b.Max.Y {
 			break
@@ -1772,25 +1823,16 @@ func smoothFlatAreas(src *image.RGBA) *image.RGBA {
 	wgV.Wait()
 
 	// horizontal block boundaries: y = k * smallBlock
-	workersH := runtime.NumCPU()
-	if workersH < 1 {
-		workersH = 1
-	}
-	if workersH > w {
-		workersH = w
-	}
+	workersH := min(max(runtime.NumCPU(), 1), w)
 	colsPerWorker := (w + workersH - 1) / workersH
 
 	var wgH sync.WaitGroup
-	for i := 0; i < workersH; i++ {
+	for i := range workersH {
 		x0 := b.Min.X + i*colsPerWorker
 		if x0 >= b.Max.X {
 			break
 		}
-		x1 := x0 + colsPerWorker
-		if x1 > b.Max.X {
-			x1 = b.Max.X
-		}
+		x1 := min(x0+colsPerWorker, b.Max.X)
 
 		wgH.Add(1)
 		go func(xStart, xEnd int) {
@@ -2028,7 +2070,7 @@ func newDeltaStream(packed []byte, n int) (*deltaStream, error) {
 	}, nil
 }
 
-func (ds *deltaStream) Next() (byte, error) {
+func (ds *deltaStream) next() (byte, error) {
 	if ds.n == 0 {
 		return 0, io.EOF
 	}
