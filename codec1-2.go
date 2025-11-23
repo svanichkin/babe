@@ -734,7 +734,7 @@ func readChannelSegment(br *bufio.Reader) ([]byte, error) {
 	var buf bytes.Buffer
 	var tmp4 [4]byte
 
-	// Helper to read a uint32, write it into buf, and return the value.
+	// Helper to read a uint32, write its raw bytes into buf, and return the value.
 	readU32 := func() (uint32, error) {
 		if _, err := io.ReadFull(br, tmp4[:]); err != nil {
 			return 0, err
@@ -744,47 +744,47 @@ func readChannelSegment(br *bufio.Reader) ([]byte, error) {
 		}
 		return binary.BigEndian.Uint32(tmp4[:]), nil
 	}
-	// Helper to read n bytes from br, write to buf.
-	readBytes := func(n uint32) error {
+
+	// Helper to copy n bytes from br directly into buf without intermediate allocations.
+	readCopyN := func(n uint32) error {
 		if n == 0 {
 			return nil
 		}
-		b := make([]byte, n)
-		if _, err := io.ReadFull(br, b); err != nil {
+		if _, err := io.CopyN(&buf, br, int64(n)); err != nil {
 			return err
 		}
-		_, err := buf.Write(b)
-		return err
+		return nil
 	}
 
 	// blockCount (4 bytes)
 	if _, err := readU32(); err != nil {
 		return nil, err
 	}
-	// sizeStreamLen (4 bytes)
+	// sizeStreamLen (4 bytes) + payload
 	sizeStreamLen, err := readU32()
 	if err != nil {
 		return nil, err
 	}
-	if err := readBytes(sizeStreamLen); err != nil {
+	if err := readCopyN(sizeStreamLen); err != nil {
 		return nil, err
 	}
-	// typeStreamLen (4 bytes)
+	// typeStreamLen (4 bytes) + payload
 	typeStreamLen, err := readU32()
 	if err != nil {
 		return nil, err
 	}
-	if err := readBytes(typeStreamLen); err != nil {
+	if err := readCopyN(typeStreamLen); err != nil {
 		return nil, err
 	}
-	// patternLen (4 bytes)
+	// patternLen (4 bytes) + payload
 	patternLen, err := readU32()
 	if err != nil {
 		return nil, err
 	}
-	if err := readBytes(patternLen); err != nil {
+	if err := readCopyN(patternLen); err != nil {
 		return nil, err
 	}
+
 	// FG: mode (1 byte)
 	b, err := br.ReadByte()
 	if err != nil {
@@ -793,14 +793,15 @@ func readChannelSegment(br *bufio.Reader) ([]byte, error) {
 	if err := buf.WriteByte(b); err != nil {
 		return nil, err
 	}
-	// FG packed length (4 bytes)
+	// FG packed length (4 bytes) + payload
 	fgPackedLen, err := readU32()
 	if err != nil {
 		return nil, err
 	}
-	if err := readBytes(fgPackedLen); err != nil {
+	if err := readCopyN(fgPackedLen); err != nil {
 		return nil, err
 	}
+
 	// BG: mode (1 byte)
 	b, err = br.ReadByte()
 	if err != nil {
@@ -809,14 +810,15 @@ func readChannelSegment(br *bufio.Reader) ([]byte, error) {
 	if err := buf.WriteByte(b); err != nil {
 		return nil, err
 	}
-	// BG packed length (4 bytes)
+	// BG packed length (4 bytes) + payload
 	bgPackedLen, err := readU32()
 	if err != nil {
 		return nil, err
 	}
-	if err := readBytes(bgPackedLen); err != nil {
+	if err := readCopyN(bgPackedLen); err != nil {
 		return nil, err
 	}
+
 	return buf.Bytes(), nil
 }
 
