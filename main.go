@@ -15,8 +15,8 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 || len(os.Args) > 3 {
-		fmt.Fprint(os.Stderr, "Encode: babe <input-image> [quality 0–100]\nDecode: babe <input.babe>\n")
+	if len(os.Args) < 2 || len(os.Args) > 4 {
+		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw]\n  babe <input.babe>\n  (bw flag can appear anywhere after the filename)\n")
 		os.Exit(1)
 	}
 
@@ -35,7 +35,7 @@ func main() {
 
 	// Otherwise: encode image → .babe with default or provided quality
 	quality := 10
-	if len(os.Args) == 3 {
+	if len(os.Args) >= 3 {
 		q, err := strconv.Atoi(os.Args[2])
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "quality must be an integer between 0 and 100")
@@ -48,14 +48,22 @@ func main() {
 		quality = q
 	}
 
+	bwmode := false
+	for _, a := range os.Args[2:] {
+		if a == "bw" {
+			bwmode = true
+			break
+		}
+	}
+
 	outPath := base + ".babe"
-	if err := encodeToBabe(inputPath, outPath, quality); err != nil {
+	if err := encodeToBabe(inputPath, outPath, quality, bwmode); err != nil {
 		fmt.Fprintln(os.Stderr, "encode error:", err)
 		os.Exit(1)
 	}
 }
 
-func encodeToBabe(inPath, outPath string, quality int) error {
+func encodeToBabe(inPath, outPath string, quality int, bwmode bool) error {
 	info, err := os.Stat(inPath)
 	if err != nil {
 		return err
@@ -74,7 +82,7 @@ func encodeToBabe(inPath, outPath string, quality int) error {
 	}
 
 	start := time.Now()
-	enc, err := Encode(img, quality, true)
+	enc, err := Encode(img, quality, bwmode)
 	if err != nil {
 		return err
 	}
