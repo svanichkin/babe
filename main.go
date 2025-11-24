@@ -34,7 +34,7 @@ func main() {
 	}
 
 	// Otherwise: encode image → .babe with default or provided quality
-	quality := 10
+	quality := 70
 	if len(os.Args) >= 3 {
 		q, err := strconv.Atoi(os.Args[2])
 		if err != nil {
