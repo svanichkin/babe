@@ -179,6 +179,19 @@ func (br *bitReader) readBit() (bool, error) {
 	return isSet, nil
 }
 
+// readBitFast is a no-error variant of readBit. The caller must ensure
+// there is enough input data remaining.
+func (br *bitReader) readBitFast() bool {
+	b := br.data[br.idx]
+	isSet := (b & (1 << (7 - br.bit))) != 0
+	br.bit++
+	if br.bit == 8 {
+		br.bit = 0
+		br.idx++
+	}
+	return isSet
+}
+
 // readBits reads n bits (1..8) and returns them in the low n bits of the result,
 // msb-first within the n bits. For example, if the next bits are 1,0,1,1 and n=4,
 // this returns 0b1011.
@@ -219,6 +232,36 @@ func (br *bitReader) readBits(n uint8) (uint8, error) {
 	br.idx++
 	br.bit = n2
 	return out, nil
+}
+
+// readBitsFast is a no-error variant of readBits. The caller must ensure
+// there is enough input data remaining, and 1 <= n <= 8.
+func (br *bitReader) readBitsFast(n uint8) uint8 {
+	rem := uint8(8 - br.bit)
+	if n <= rem {
+		b := br.data[br.idx]
+		shift := rem - n
+		out := uint8((b >> shift) & byte((1<<n)-1))
+		br.bit += n
+		if br.bit == 8 {
+			br.bit = 0
+			br.idx++
+		}
+		return out
+	}
+
+	// Need bits from the next byte as well.
+	b0 := br.data[br.idx]
+	b1 := br.data[br.idx+1]
+
+	first := uint8(b0 & byte((1<<rem)-1)) // lower "rem" bits
+	n2 := n - rem
+	second := uint8(b1 >> (8 - n2))
+
+	out := (first << n2) | second
+	br.idx++
+	br.bit = n2
+	return out
 }
 
 // channel IDs for Y, Cb, Cr.
@@ -382,11 +425,11 @@ func extractYCbCrFromRGBAStripe(pix []byte, stride, w int, yPlane, cbPlane, crPl
 			r8 := pix[p+0]
 			g8 := pix[p+1]
 			b8 := pix[p+2]
-			ycc := rgbToYCbCr(r8, g8, b8)
 			idx := baseIdx + x
-			yPlane[idx] = uint8(ycc.Y)
-			cbPlane[idx] = uint8(ycc.Cb)
-			crPlane[idx] = uint8(ycc.Cr)
+			rr, gg, bb := int32(r8), int32(g8), int32(b8)
+			yPlane[idx] = uint8((77*rr + 150*gg + 29*bb) >> 8)
+			cbPlane[idx] = uint8(((-43*rr - 85*gg + 128*bb) >> 8) + 128)
+			crPlane[idx] = uint8(((128*rr - 107*gg - 21*bb) >> 8) + 128)
 		}
 	}
 }
@@ -403,11 +446,11 @@ func extractYCbCrFromRGBASequential(src *image.RGBA, yPlane, cbPlane, crPlane []
 			r8 := pix[p+0]
 			g8 := pix[p+1]
 			b8 := pix[p+2]
-			ycc := rgbToYCbCr(r8, g8, b8)
 			idx := baseIdx + x
-			yPlane[idx] = uint8(ycc.Y)
-			cbPlane[idx] = uint8(ycc.Cb)
-			crPlane[idx] = uint8(ycc.Cr)
+			rr, gg, bb := int32(r8), int32(g8), int32(b8)
+			yPlane[idx] = uint8((77*rr + 150*gg + 29*bb) >> 8)
+			cbPlane[idx] = uint8(((-43*rr - 85*gg + 128*bb) >> 8) + 128)
+			crPlane[idx] = uint8(((128*rr - 107*gg - 21*bb) >> 8) + 128)
 		}
 	}
 }
@@ -455,11 +498,11 @@ func extractYCbCrFromNRGBAStripe(pix []byte, stride, w int, yPlane, cbPlane, crP
 			r8 := pix[p+0]
 			g8 := pix[p+1]
 			b8 := pix[p+2]
-			ycc := rgbToYCbCr(r8, g8, b8)
 			idx := baseIdx + x
-			yPlane[idx] = uint8(ycc.Y)
-			cbPlane[idx] = uint8(ycc.Cb)
-			crPlane[idx] = uint8(ycc.Cr)
+			rr, gg, bb := int32(r8), int32(g8), int32(b8)
+			yPlane[idx] = uint8((77*rr + 150*gg + 29*bb) >> 8)
+			cbPlane[idx] = uint8(((-43*rr - 85*gg + 128*bb) >> 8) + 128)
+			crPlane[idx] = uint8(((128*rr - 107*gg - 21*bb) >> 8) + 128)
 		}
 	}
 }
@@ -476,11 +519,11 @@ func extractYCbCrFromNRGBASequential(src *image.NRGBA, yPlane, cbPlane, crPlane 
 			r8 := pix[p+0]
 			g8 := pix[p+1]
 			b8 := pix[p+2]
-			ycc := rgbToYCbCr(r8, g8, b8)
 			idx := baseIdx + x
-			yPlane[idx] = uint8(ycc.Y)
-			cbPlane[idx] = uint8(ycc.Cb)
-			crPlane[idx] = uint8(ycc.Cr)
+			rr, gg, bb := int32(r8), int32(g8), int32(b8)
+			yPlane[idx] = uint8((77*rr + 150*gg + 29*bb) >> 8)
+			cbPlane[idx] = uint8(((-43*rr - 85*gg + 128*bb) >> 8) + 128)
+			crPlane[idx] = uint8(((128*rr - 107*gg - 21*bb) >> 8) + 128)
 		}
 	}
 }
@@ -1229,6 +1272,150 @@ func (e *Encoder) encodeChannelReuse(plane []uint8, stride, w4, h4, fullW, fullH
 	var blockCount uint32
 	height := h4
 	spread := allowedMacroSpreadForQuality(encQuality)
+
+	if useMacro && smallBlock == 1 && macroBlock == 2 {
+		// Specialized hot path for the most common setting (quality >= 80):
+		// - macro blocks are 2x2
+		// - small blocks are 1x1 (always solid, no pattern bits)
+		// This avoids canUseBigBlockChannel/encodeBlockPlane calls for the 1x1 case
+		// and encodes 2x2 blocks with direct 4-byte loads.
+		for my := 0; my < fullH; my += 2 {
+			row0 := my * stride
+			row1 := (my + 1) * stride
+			for mx := 0; mx < fullW; mx += 2 {
+				idx0 := row0 + mx
+				idx2 := row1 + mx
+
+				v0 := plane[idx0]
+				v1 := plane[idx0+1]
+				v2 := plane[idx2]
+				v3 := plane[idx2+1]
+
+				minV := v0
+				maxV := v0
+				if v1 < minV {
+					minV = v1
+				} else if v1 > maxV {
+					maxV = v1
+				}
+				if v2 < minV {
+					minV = v2
+				} else if v2 > maxV {
+					maxV = v2
+				}
+				if v3 < minV {
+					minV = v3
+				} else if v3 > maxV {
+					maxV = v3
+				}
+
+				useBig := int32(maxV)-int32(minV) < spread
+				sizeW.writeBit(useBig)
+
+				if useBig {
+					sum := uint64(v0) + uint64(v1) + uint64(v2) + uint64(v3)
+					avg := uint8(sum / 4)
+					thr := avg
+
+					var bits uint64
+					var fgSum, bgSum uint64
+					var fgCnt, bgCnt uint32
+
+					isFg0 := v0 >= thr
+					bits <<= 1
+					if isFg0 {
+						bits |= 1
+						fgSum += uint64(v0)
+						fgCnt++
+					} else {
+						bgSum += uint64(v0)
+						bgCnt++
+					}
+
+					isFg1 := v1 >= thr
+					bits <<= 1
+					if isFg1 {
+						bits |= 1
+						fgSum += uint64(v1)
+						fgCnt++
+					} else {
+						bgSum += uint64(v1)
+						bgCnt++
+					}
+
+					isFg2 := v2 >= thr
+					bits <<= 1
+					if isFg2 {
+						bits |= 1
+						fgSum += uint64(v2)
+						fgCnt++
+					} else {
+						bgSum += uint64(v2)
+						bgCnt++
+					}
+
+					isFg3 := v3 >= thr
+					bits <<= 1
+					if isFg3 {
+						bits |= 1
+						fgSum += uint64(v3)
+						fgCnt++
+					} else {
+						bgSum += uint64(v3)
+						bgCnt++
+					}
+
+					patternW.writeBits(bits, 4)
+
+					fg, bg := avg, avg
+					if fgCnt != 0 && bgCnt != 0 {
+						fg = uint8(fgSum / uint64(fgCnt))
+						bg = uint8(bgSum / uint64(bgCnt))
+					}
+
+					scratch.fgVals = append(scratch.fgVals, fg)
+					scratch.bgVals = append(scratch.bgVals, bg)
+					typeW.writeBit(true) // always pattern for big 2x2 block
+					blockCount++
+				} else {
+					// 4 solid 1x1 blocks, no pattern bits, type bits are all 0.
+					scratch.fgVals = append(scratch.fgVals, v0, v1, v2, v3)
+					scratch.bgVals = append(scratch.bgVals, v0, v1, v2, v3)
+					typeW.writeBits(0, 4)
+					blockCount += 4
+				}
+			}
+		}
+
+		// right stripe: 1x1 solid blocks only
+		for my := 0; my < fullH; my++ {
+			for mx := fullW; mx < w4; mx++ {
+				v := plane[my*stride+mx]
+				scratch.fgVals = append(scratch.fgVals, v)
+				scratch.bgVals = append(scratch.bgVals, v)
+				typeW.writeBit(false)
+				blockCount++
+			}
+		}
+
+		// bottom stripe: 1x1 solid blocks only (including bottom-right corner)
+		for my := fullH; my < h4; my++ {
+			row := my * stride
+			for mx := 0; mx < w4; mx++ {
+				v := plane[row+mx]
+				scratch.fgVals = append(scratch.fgVals, v)
+				scratch.bgVals = append(scratch.bgVals, v)
+				typeW.writeBit(false)
+				blockCount++
+			}
+		}
+
+		sizeW.flush()
+		typeW.flush()
+		patternW.flush()
+
+		return blockCount, scratch.sizeBuf.Bytes(), scratch.typeBuf.Bytes(), scratch.patternBuf.Bytes(), scratch.fgVals, scratch.bgVals, nil
+	}
 
 	// main macroBlock x macroBlock area
 	for my := 0; my < fullH; my += macroBlock {
@@ -2395,6 +2582,142 @@ func decodeChannelToPix(data []byte, imgW, imgH int, pix []byte, strideBytes int
 
 	blockIndex := 0
 
+	// Hot path for the most common benchmark setting (quality >= 80):
+	// - macro blocks are 2x2
+	// - small blocks are 1x1 (always solid)
+	// This avoids per-1x1 block calls and reduces bitReader overhead.
+	if useMacro && smallBlock == 1 && macroBlock == 2 {
+		macroGroupsX := fullW / 2
+		macroGroupsY := fullH / 2
+		macroGroupCount := macroGroupsX * macroGroupsY
+
+		if macroGroupCount > 0 && len(sizeBytes)*8 < macroGroupCount {
+			return fmt.Errorf("decodeChannel: size stream too short")
+		}
+		if int(blockCount) > 0 && len(typeBytes)*8 < int(blockCount) {
+			return fmt.Errorf("decodeChannel: type stream too short")
+		}
+
+		for my := 0; my < fullH; my += 2 {
+			row0 := my*strideBytes + channelOffset
+			row1 := row0 + strideBytes
+			for mx := 0; mx < fullW; mx += 2 {
+				if blockIndex >= int(blockCount) {
+					return fmt.Errorf("unexpected end of blocks in main area")
+				}
+
+				macroIsBig := sizeBR.readBitFast()
+				if macroIsBig {
+					_ = typeBR.readBitFast() // must be 1 for macro blocks
+
+					fg := fgStream.nextFast()
+					bg := bgStream.nextFast()
+
+					bits, err := patternBR.readBits(4)
+					if err != nil {
+						return err
+					}
+
+					o00 := row0 + mx*4
+					o01 := o00 + 4
+					o10 := row1 + mx*4
+					o11 := o10 + 4
+					if o00 < 0 || o11 >= len(pix) {
+						return fmt.Errorf("decodeChannel: index out of range")
+					}
+
+					if (bits & 0b1000) != 0 {
+						pix[o00] = fg
+					} else {
+						pix[o00] = bg
+					}
+					if (bits & 0b0100) != 0 {
+						pix[o01] = fg
+					} else {
+						pix[o01] = bg
+					}
+					if (bits & 0b0010) != 0 {
+						pix[o10] = fg
+					} else {
+						pix[o10] = bg
+					}
+					if (bits & 0b0001) != 0 {
+						pix[o11] = fg
+					} else {
+						pix[o11] = bg
+					}
+
+					blockIndex++
+					continue
+				}
+
+				_ = typeBR.readBitsFast(4) // four 1x1 blocks; type bits are all 0
+
+				v0 := fgStream.nextFast()
+				_ = bgStream.nextFast()
+				v1 := fgStream.nextFast()
+				_ = bgStream.nextFast()
+				v2 := fgStream.nextFast()
+				_ = bgStream.nextFast()
+				v3 := fgStream.nextFast()
+				_ = bgStream.nextFast()
+
+				o00 := row0 + mx*4
+				o01 := o00 + 4
+				o10 := row1 + mx*4
+				o11 := o10 + 4
+				if o00 < 0 || o11 >= len(pix) {
+					return fmt.Errorf("decodeChannel: index out of range")
+				}
+				pix[o00] = v0
+				pix[o01] = v1
+				pix[o10] = v2
+				pix[o11] = v3
+
+				blockIndex += 4
+			}
+		}
+
+		// right stripe: 1x1 blocks only
+		for my := 0; my < fullH; my++ {
+			row := my*strideBytes + channelOffset
+			for mx := fullW; mx < w4; mx++ {
+				_ = typeBR.readBitFast()
+				v := fgStream.nextFast()
+				_ = bgStream.nextFast()
+
+				o := row + mx*4
+				if o < 0 || o >= len(pix) {
+					return fmt.Errorf("decodeChannel: index out of range")
+				}
+				pix[o] = v
+				blockIndex++
+			}
+		}
+
+		// bottom stripe: 1x1 blocks only (including bottom-right corner)
+		for my := fullH; my < h4; my++ {
+			row := my*strideBytes + channelOffset
+			for mx := 0; mx < w4; mx++ {
+				_ = typeBR.readBitFast()
+				v := fgStream.nextFast()
+				_ = bgStream.nextFast()
+
+				o := row + mx*4
+				if o < 0 || o >= len(pix) {
+					return fmt.Errorf("decodeChannel: index out of range")
+				}
+				pix[o] = v
+				blockIndex++
+			}
+		}
+
+		if blockIndex != int(blockCount) {
+			return fmt.Errorf("block count mismatch: used %d of %d", blockIndex, blockCount)
+		}
+		return nil
+	}
+
 	for my := 0; my < fullH; my += macroBlock {
 		for mx := 0; mx < fullW; mx += macroBlock {
 			if blockIndex >= int(blockCount) {
@@ -2413,14 +2736,8 @@ func decodeChannelToPix(data []byte, imgW, imgH int, pix []byte, strideBytes int
 				}
 				_ = bitType
 
-				fg, err := fgStream.next()
-				if err != nil {
-					return err
-				}
-				bg, err := bgStream.next()
-				if err != nil {
-					return err
-				}
+				fg := fgStream.nextFast()
+				bg := bgStream.nextFast()
 				if err := drawBlockPix(pix, strideBytes, mx, my, macroBlock, macroBlock, &patternBR, fg, bg, channelOffset); err != nil {
 					return err
 				}
@@ -2437,14 +2754,8 @@ func decodeChannelToPix(data []byte, imgW, imgH int, pix []byte, strideBytes int
 					if err != nil {
 						return err
 					}
-					fg, err := fgStream.next()
-					if err != nil {
-						return err
-					}
-					bg, err := bgStream.next()
-					if err != nil {
-						return err
-					}
+					fg := fgStream.nextFast()
+					bg := bgStream.nextFast()
 					if bitType {
 						if err := drawBlockPix(pix, strideBytes, mx+bx, my+by, smallBlock, smallBlock, &patternBR, fg, bg, channelOffset); err != nil {
 							return err
@@ -2470,14 +2781,8 @@ func decodeChannelToPix(data []byte, imgW, imgH int, pix []byte, strideBytes int
 			if err != nil {
 				return err
 			}
-			fg, err := fgStream.next()
-			if err != nil {
-				return err
-			}
-			bg, err := bgStream.next()
-			if err != nil {
-				return err
-			}
+			fg := fgStream.nextFast()
+			bg := bgStream.nextFast()
 			if bitType {
 				if err := drawBlockPix(pix, strideBytes, mx, my, smallBlock, smallBlock, &patternBR, fg, bg, channelOffset); err != nil {
 					return err
@@ -2501,14 +2806,8 @@ func decodeChannelToPix(data []byte, imgW, imgH int, pix []byte, strideBytes int
 			if err != nil {
 				return err
 			}
-			fg, err := fgStream.next()
-			if err != nil {
-				return err
-			}
-			bg, err := bgStream.next()
-			if err != nil {
-				return err
-			}
+			fg := fgStream.nextFast()
+			bg := bgStream.nextFast()
 			if bitType {
 				if err := drawBlockPix(pix, strideBytes, mx, my, smallBlock, smallBlock, &patternBR, fg, bg, channelOffset); err != nil {
 					return err
@@ -2987,21 +3286,30 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 		}
 		wgRGB.Wait()
 	} else {
-		for y := 0; y < imgH; y++ {
+		ycbcrToRGB(pix, stride, imgW, 0, imgH, hasCb, hasCr)
+	}
+
+	if postfilter {
+		return smoothBlocks(dst), nil
+	}
+
+	return dst, nil
+}
+
+func decodeChannelToPixWorker(data []byte, imgW, imgH int, pix []byte, strideBytes int, channelOffset int, dstErr *error, wg *sync.WaitGroup) {
+	defer wg.Done()
+	*dstErr = decodeChannelToPix(data, imgW, imgH, pix, strideBytes, channelOffset)
+}
+
+func ycbcrToRGB(pix []byte, stride, imgW int, yStart, yEnd int, hasCb, hasCr bool) {
+	if hasCb && hasCr {
+		for y := yStart; y < yEnd; y++ {
 			rowOff := y * stride
-			baseIdx := y * imgW
 			for x := 0; x < imgW; x++ {
-				_ = baseIdx
 				o := rowOff + x*4
 				Y := int32(pix[o+0])
-				Cb := int32(0)
-				Cr := int32(0)
-				if hasCb {
-					Cb = int32(pix[o+1]) - 128
-				}
-				if hasCr {
-					Cr = int32(pix[o+2]) - 128
-				}
+				Cb := int32(pix[o+1]) - 128
+				Cr := int32(pix[o+2]) - 128
 
 				R := Y + ((91881 * Cr) >> 16)
 				G := Y - ((22554*Cb + 46802*Cr) >> 16)
@@ -3029,62 +3337,100 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 				pix[o+3] = 255
 			}
 		}
+		return
 	}
 
-	if postfilter {
-		return smoothBlocks(dst), nil
+	if hasCb {
+		for y := yStart; y < yEnd; y++ {
+			rowOff := y * stride
+			for x := 0; x < imgW; x++ {
+				o := rowOff + x*4
+				Y := int32(pix[o+0])
+				Cb := int32(pix[o+1]) - 128
+
+				R := Y
+				G := Y - ((22554 * Cb) >> 16)
+				B := Y + ((116130 * Cb) >> 16)
+
+				if R < 0 {
+					R = 0
+				} else if R > 255 {
+					R = 255
+				}
+				if G < 0 {
+					G = 0
+				} else if G > 255 {
+					G = 255
+				}
+				if B < 0 {
+					B = 0
+				} else if B > 255 {
+					B = 255
+				}
+
+				pix[o+0] = uint8(R)
+				pix[o+1] = uint8(G)
+				pix[o+2] = uint8(B)
+				pix[o+3] = 255
+			}
+		}
+		return
 	}
 
-	return dst, nil
-}
+	if hasCr {
+		for y := yStart; y < yEnd; y++ {
+			rowOff := y * stride
+			for x := 0; x < imgW; x++ {
+				o := rowOff + x*4
+				Y := int32(pix[o+0])
+				Cr := int32(pix[o+2]) - 128
 
-func decodeChannelToPixWorker(data []byte, imgW, imgH int, pix []byte, strideBytes int, channelOffset int, dstErr *error, wg *sync.WaitGroup) {
-	defer wg.Done()
-	*dstErr = decodeChannelToPix(data, imgW, imgH, pix, strideBytes, channelOffset)
+				R := Y + ((91881 * Cr) >> 16)
+				G := Y - ((46802 * Cr) >> 16)
+				B := Y
+
+				if R < 0 {
+					R = 0
+				} else if R > 255 {
+					R = 255
+				}
+				if G < 0 {
+					G = 0
+				} else if G > 255 {
+					G = 255
+				}
+				if B < 0 {
+					B = 0
+				} else if B > 255 {
+					B = 255
+				}
+
+				pix[o+0] = uint8(R)
+				pix[o+1] = uint8(G)
+				pix[o+2] = uint8(B)
+				pix[o+3] = 255
+			}
+		}
+		return
+	}
+
+	// Y only.
+	for y := yStart; y < yEnd; y++ {
+		rowOff := y * stride
+		for x := 0; x < imgW; x++ {
+			o := rowOff + x*4
+			Y := pix[o+0]
+			pix[o+0] = Y
+			pix[o+1] = Y
+			pix[o+2] = Y
+			pix[o+3] = 255
+		}
+	}
 }
 
 func ycbcrToRGBStripe(pix []byte, stride, imgW int, yStart, yEnd int, hasCb, hasCr bool, wg *sync.WaitGroup) {
 	defer wg.Done()
-	for y := yStart; y < yEnd; y++ {
-		rowOff := y * stride
-		for x := range imgW {
-			o := rowOff + x*4
-			Y := int32(pix[o+0])
-			Cb := int32(0)
-			Cr := int32(0)
-			if hasCb {
-				Cb = int32(pix[o+1]) - 128
-			}
-			if hasCr {
-				Cr = int32(pix[o+2]) - 128
-			}
-
-			R := Y + ((91881 * Cr) >> 16)
-			G := Y - ((22554*Cb + 46802*Cr) >> 16)
-			B := Y + ((116130 * Cb) >> 16)
-
-			if R < 0 {
-				R = 0
-			} else if R > 255 {
-				R = 255
-			}
-			if G < 0 {
-				G = 0
-			} else if G > 255 {
-				G = 255
-			}
-			if B < 0 {
-				B = 0
-			} else if B > 255 {
-				B = 255
-			}
-
-			pix[o+0] = uint8(R)
-			pix[o+1] = uint8(G)
-			pix[o+2] = uint8(B)
-			pix[o+3] = 255
-		}
-	}
+	ycbcrToRGB(pix, stride, imgW, yStart, yEnd, hasCb, hasCr)
 }
 
 // Decode reads a BABE-compressed stream (Zstd + three independent Y/Cb/Cr streams)
@@ -3524,6 +3870,7 @@ func mustNewZstdEncoder() *zstd.Encoder {
 	enc, err := zstd.NewWriter(
 		nil,
 		zstd.WithEncoderConcurrency(1),
+		zstd.WithEncoderLevel(zstd.SpeedFastest),
 		zstd.WithLowerEncoderMem(true),
 	)
 	if err != nil {
@@ -3741,4 +4088,17 @@ func (ds *deltaStream) next() (byte, error) {
 	ds.prev = v
 	ds.i++
 	return v, nil
+}
+
+// nextFast is a no-error variant of next. The caller must ensure the stream
+// has at least one remaining value.
+func (ds *deltaStream) nextFast() byte {
+	if ds.i == 0 {
+		ds.i = 1
+		return ds.prev
+	}
+	d := int8(ds.packed[ds.i])
+	ds.prev = decodeDelta8(ds.prev, d)
+	ds.i++
+	return ds.prev
 }

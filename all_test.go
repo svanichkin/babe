@@ -46,6 +46,7 @@ func TestEncodeDecode_RoundTrip(t *testing.T) {
 	}{
 		{name: "color_no_postfilter", quality: 70, bw: false, postfilter: false},
 		{name: "color_postfilter", quality: 70, bw: false, postfilter: true},
+		{name: "color_no_postfilter_q80", quality: 80, bw: false, postfilter: false},
 		{name: "bw_no_postfilter", quality: 70, bw: true, postfilter: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -132,6 +133,9 @@ func benchmarkEncodeDecode(b *testing.B, encode func() ([]byte, error), decode f
 // - identical loop shape per codec: encode(); decode()
 // - warm-up before timing
 // - optional sample lines under -v (outside timing)
+// - all codecs reuse their state between iterations:
+//   - JPEG/QOI reuse `bytes.Buffer`/`bytes.Reader` via Reset()
+//   - BABE reuses `*Encoder`/`*Decoder` internal scratch buffers
 func BenchmarkCodecs(b *testing.B) {
 	img := loadTestImage(b)
 
