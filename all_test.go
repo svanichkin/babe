@@ -183,15 +183,17 @@ func BenchmarkCodecs(b *testing.B) {
 	b.Run("BABE", func(b *testing.B) {
 		enc := NewEncoder()
 		dec := NewDecoder()
+		var buf bytes.Buffer
 
 		if testing.Verbose() {
 			b.Logf("cpus=%d gomaxprocs=%d goroutines=%d", runtime.NumCPU(), runtime.GOMAXPROCS(0), runtime.NumGoroutine())
 
 			startEnc := time.Now()
-			encBytes, err := enc.Encode(img, 80, false)
-			if err != nil {
+			buf.Reset()
+			if err := enc.EncodeTo(&buf, img, 80, false); err != nil {
 				b.Fatalf("encode failed: %v", err)
 			}
+			encBytes := buf.Bytes()
 			encTime := time.Since(startEnc)
 
 			startDec := time.Now()
@@ -204,7 +206,13 @@ func BenchmarkCodecs(b *testing.B) {
 		}
 
 		benchmarkEncodeDecode(b,
-			func() ([]byte, error) { return enc.Encode(img, 80, false) },
+			func() ([]byte, error) {
+				buf.Reset()
+				if err := enc.EncodeTo(&buf, img, 80, false); err != nil {
+					return nil, err
+				}
+				return buf.Bytes(), nil
+			},
 			func(encBytes []byte) error {
 				_, err := dec.Decode(encBytes, false)
 				return err
@@ -358,26 +366,29 @@ func benchBABE(img image.Image) summaryBenchFn {
 	enc := NewEncoder()
 	dec := NewDecoder()
 	return func(b *testing.B) (int, time.Duration, time.Duration) {
+		var buf bytes.Buffer
 		sizeB := 0
 		var encTotal, decTotal time.Duration
 
 		// Warm-up and reset so one-time allocations don't dominate the summary.
-		encBytes, err := enc.Encode(img, 80, false)
-		if err != nil {
+		buf.Reset()
+		if err := enc.EncodeTo(&buf, img, 80, false); err != nil {
 			b.Fatalf("encode failed: %v", err)
 		}
+		encBytes := buf.Bytes()
 		if _, err := dec.Decode(encBytes, false); err != nil {
 			b.Fatalf("decode failed: %v", err)
 		}
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
+			buf.Reset()
 			startEnc := time.Now()
-			encBytes, err := enc.Encode(img, 80, false)
-			if err != nil {
+			if err := enc.EncodeTo(&buf, img, 80, false); err != nil {
 				b.Fatalf("encode failed: %v", err)
 			}
 			encTotal += time.Since(startEnc)
+			encBytes := buf.Bytes()
 			sizeB = len(encBytes)
 
 			startDec := time.Now()

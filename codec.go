@@ -1720,6 +1720,18 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 	return e.comp, nil
 }
 
+// EncodeTo encodes the image and writes the compressed result to w.
+// This mirrors the common Go codec style (e.g. image/jpeg), while still reusing
+// Encoder internal scratch buffers between calls.
+func (e *Encoder) EncodeTo(w io.Writer, img image.Image, quality int, bwmode bool) error {
+	comp, err := e.Encode(img, quality, bwmode)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(comp)
+	return err
+}
+
 // Encode runs the BABE encoder with three fully independent channel streams (Y, Cb, Cr).
 // Each channel has its own block list, size stream, pattern stream, and FG/BG levels.
 func Encode(img image.Image, quality int, bwmode bool) ([]byte, error) {
@@ -3294,6 +3306,18 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	}
 
 	return dst, nil
+}
+
+// DecodeFrom reads compressed data from r and decodes it.
+// This mirrors codecs that accept io.Reader/io.Writer and is useful for
+// benchmarking. It allocates to read the full input; for zero-copy decoding,
+// prefer Decode([]byte,...).
+func (d *Decoder) DecodeFrom(r io.Reader, postfilter bool) (*image.RGBA, error) {
+	compData, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	return d.Decode(compData, postfilter)
 }
 
 func decodeChannelToPixWorker(data []byte, imgW, imgH int, pix []byte, strideBytes int, channelOffset int, dstErr *error, wg *sync.WaitGroup) {
