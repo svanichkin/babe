@@ -3894,7 +3894,7 @@ func mustNewZstdEncoder() *zstd.Encoder {
 	enc, err := zstd.NewWriter(
 		nil,
 		zstd.WithEncoderConcurrency(1),
-		zstd.WithEncoderLevel(zstd.SpeedFastest),
+		zstd.WithEncoderLevel(zstd.SpeedBetterCompression),
 		zstd.WithLowerEncoderMem(true),
 	)
 	if err != nil {
