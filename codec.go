@@ -409,17 +409,18 @@ type Encoder struct {
 }
 
 type EncodeOptions struct {
-	BW       bool
-	YBits    int
-	CbBits   int
-	CrBits   int
-	Pattern  string
-	TileSize int
-	UseZstd  bool
-	Shuffle  bool
-	RGBMode  bool
-	ZXMode   bool
-	Palette  string
+	BW         bool
+	YBits      int
+	CbBits     int
+	CrBits     int
+	Pattern    string
+	TileSize   int
+	UseZstd    bool
+	Shuffle    bool
+	RGBMode    bool
+	ZXMode     bool
+	Palette    string
+	RawPalette bool
 
 	PatternW int
 	PatternH int
@@ -539,7 +540,7 @@ func (e *Encoder) EncodeWithOptions(img image.Image, quality int, opts EncodeOpt
 			yBits = max(1, bitsNeeded(len(chosenPalette)-1))
 			cbBits = 0
 			crBits = 0
-			quantizePaletteIndices(e.yPlane, e.cbPlane, e.crPlane, w, h, quality, chosenPalette, yPhaseX, yPhaseY, cbPhaseX, cbPhaseY, crPhaseX, crPhaseY, opts.Shuffle, true, opts.TileSize, &e.yBits)
+			quantizePaletteIndices(e.yPlane, e.cbPlane, e.crPlane, w, h, quality, chosenPalette, yPhaseX, yPhaseY, cbPhaseX, cbPhaseY, crPhaseX, crPhaseY, opts.Shuffle, true, opts.TileSize, opts.RawPalette, &e.yBits)
 		} else {
 			if cbBits > 0 {
 				channelsMask |= channelFlagCb
@@ -1130,7 +1131,7 @@ func paletteFromMode(zxMode bool, paletteName string, rPlane, gPlane, bPlane []u
 	return rgbPrimaryPalette
 }
 
-func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, palette [][3]uint8, rPhaseX, rPhaseY, gPhaseX, gPhaseY, bPhaseX, bPhaseY int, shuffle, adaptive bool, tileSize int, dst *bytes.Buffer) {
+func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, palette [][3]uint8, rPhaseX, rPhaseY, gPhaseX, gPhaseY, bPhaseX, bPhaseY int, shuffle, adaptive bool, tileSize int, rawMode bool, dst *bytes.Buffer) {
 	dst.Reset()
 	if len(palette) < 1 {
 		palette = rgbPrimaryPalette
@@ -1207,6 +1208,20 @@ func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, p
 			canvasIdx = i
 		}
 	}
+	if rawMode {
+		dst.WriteByte(1) // raw packed palette indices
+		indexBits := bitsNeeded(len(palette) - 1)
+		if indexBits < 1 {
+			indexBits = 1
+		}
+		bw := newBitWriter(dst)
+		for _, idx := range pixelIdx {
+			bw.writeBits(uint64(idx), uint8(indexBits))
+		}
+		bw.flush()
+		_ = canvasIdx
+		return
+	}
 	if tileSize <= 0 {
 		tileSize = paletteTileSize
 	}
@@ -1263,11 +1278,17 @@ func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, p
 			var tileBuf bytes.Buffer
 			bw := newBitWriter(&tileBuf)
 			order := zOrderIndices(x1-x0, y1-y0)
+			values := make([]int, 0, len(order))
 			for _, localPi := range order {
 				lx := localPi % (x1 - x0)
 				ly := localPi / (x1 - x0)
 				globalPi := (y0+ly)*w + (x0 + lx)
-				bw.writeBits(uint64(inv[pixelIdx[globalPi]]), uint8(localBits))
+				values = append(values, inv[pixelIdx[globalPi]])
+			}
+			for bit := localBits - 1; bit >= 0; bit-- {
+				for _, v := range values {
+					bw.writeBit(((v >> bit) & 1) != 0)
+				}
 			}
 			bw.flush()
 			dst.Write(tileBuf.Bytes())
@@ -2343,17 +2364,27 @@ func decodePaletteToRGBA(dst *image.RGBA, data []byte, bitDepth int, yStorageMod
 				br := newBitReader(data[pos : pos+tileBytes])
 				pos += tileBytes
 				order := zOrderIndices(x1-x0, y1-y0)
-				for _, localPi := range order {
-					v, err := br.readBits(uint8(localBits))
-					if err != nil {
-						return fmt.Errorf("decode: truncated tile local index stream")
+				values := make([]int, len(order))
+				for bit := localBits - 1; bit >= 0; bit-- {
+					for i := range values {
+						b, err := br.readBit()
+						if err != nil {
+							return fmt.Errorf("decode: truncated tile local index stream")
+						}
+						values[i] <<= 1
+						if b {
+							values[i] |= 1
+						}
 					}
-					if int(v) >= len(subset) {
+				}
+				for i, localPi := range order {
+					v := values[i]
+					if v >= len(subset) {
 						return fmt.Errorf("decode: tile local index out of range")
 					}
 					lx := localPi % (x1 - x0)
 					ly := localPi / (x1 - x0)
-					idx := subset[int(v)]
+					idx := subset[v]
 					p := idx * 3
 					off := (y0+ly)*dst.Stride + (x0+lx)*4
 					dst.Pix[off+0] = palette[p+0]
@@ -2362,6 +2393,35 @@ func decodePaletteToRGBA(dst *image.RGBA, data []byte, bitDepth int, yStorageMod
 					dst.Pix[off+3] = 255
 				}
 			}
+		}
+		_, _, _ = bitDepth, patternW, patternH
+		return nil
+	}
+	if submode == 1 {
+		indexBits := bitsNeeded(paletteSize - 1)
+		if indexBits < 1 {
+			indexBits = 1
+		}
+		pixels := w * h
+		streamBytes := (pixels*indexBits + 7) >> 3
+		if len(data)-pos < streamBytes {
+			return fmt.Errorf("decode: truncated raw palette index stream")
+		}
+		br := newBitReader(data[pos : pos+streamBytes])
+		for i := 0; i < pixels; i++ {
+			idx, err := br.readBits(uint8(indexBits))
+			if err != nil {
+				return fmt.Errorf("decode: truncated raw palette index stream")
+			}
+			if int(idx) >= paletteSize {
+				return fmt.Errorf("decode: raw palette index out of range")
+			}
+			p := int(idx) * 3
+			off := (i/w)*dst.Stride + (i%w)*4
+			dst.Pix[off+0] = palette[p+0]
+			dst.Pix[off+1] = palette[p+1]
+			dst.Pix[off+2] = palette[p+2]
+			dst.Pix[off+3] = 255
 		}
 		_, _, _ = bitDepth, patternW, patternH
 		return nil

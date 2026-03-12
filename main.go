@@ -17,8 +17,8 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 || len(os.Args) > 12 {
-		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [pattern] [decoded.png] [-z] [shuffle]\n  babe <input-image> [quality] [bright] [decoded.png] [-z] [shuffle]\n  babe <input-image> [quality] [adaptive N] [decoded.png] [-z] [-tile N] [shuffle]\n  babe <input-image> [quality] [zx|cga|ega|vga|c64|gameboy|pico8|db16|nes|sunset|pastel|ocean|forest|<palette-spec> ...] [decoded.png] [-z] [-tile N] [shuffle]\n  babe <input.babe> [-postfilter]\n")
+	if len(os.Args) < 2 || len(os.Args) > 13 {
+		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [pattern] [decoded.png] [-z] [shuffle]\n  babe <input-image> [quality] [bright] [decoded.png] [-z] [shuffle]\n  babe <input-image> [quality] [adaptive N] [decoded.png] [-z] [-tile N] [-raw] [shuffle]\n  babe <input-image> [quality] [zx|cga|ega|vga|c64|gameboy|pico8|db16|nes|sunset|pastel|ocean|forest|<palette-spec> ...] [decoded.png] [-z] [-tile N] [-raw] [shuffle]\n  babe <input.babe> [-postfilter]\n")
 		os.Exit(1)
 	}
 
@@ -60,6 +60,7 @@ func main() {
 	useZstd := false
 	useShuffle := false
 	debugLog := false
+	rawPalette := false
 	zxMode := false
 	tileSize := 0
 	paletteName := ""
@@ -79,6 +80,10 @@ func main() {
 			}
 			if a == "-log" {
 				debugLog = true
+				continue
+			}
+			if a == "-raw" {
+				rawPalette = true
 				continue
 			}
 			if a == "-tile" {
@@ -160,7 +165,7 @@ func main() {
 	bwBits := yBits
 
 	outPath := base + ".babe"
-	if err := encodeToBabe(inputPath, outPath, quality, bwmode, bwBits, yBits, cbBits, crBits, pattern, tileSize, useZstd, useShuffle, false, zxMode, paletteName); err != nil {
+	if err := encodeToBabe(inputPath, outPath, quality, bwmode, bwBits, yBits, cbBits, crBits, pattern, tileSize, useZstd, useShuffle, false, zxMode, paletteName, rawPalette); err != nil {
 		fmt.Fprintln(os.Stderr, "encode error:", err)
 		os.Exit(1)
 	}
@@ -293,7 +298,7 @@ func parseBitDepth(s, label string) (int, error) {
 	return v, nil
 }
 
-func encodeToBabe(inPath, outPath string, quality int, bwmode bool, bwBits, yBits, cbBits, crBits int, pattern string, tileSize int, useZstd, useShuffle bool, rgbMode, zxMode bool, paletteName string) error {
+func encodeToBabe(inPath, outPath string, quality int, bwmode bool, bwBits, yBits, cbBits, crBits int, pattern string, tileSize int, useZstd, useShuffle bool, rgbMode, zxMode bool, paletteName string, rawPalette bool) error {
 	info, err := os.Stat(inPath)
 	if err != nil {
 		return err
@@ -324,17 +329,18 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, bwBits, yBit
 		})
 	} else {
 		enc, err = NewEncoder().EncodeWithOptions(img, quality, EncodeOptions{
-			BW:       false,
-			YBits:    yBits,
-			CbBits:   cbBits,
-			CrBits:   crBits,
-			Pattern:  pattern,
-			TileSize: tileSize,
-			UseZstd:  useZstd,
-			Shuffle:  useShuffle,
-			RGBMode:  false,
-			ZXMode:   zxMode,
-			Palette:  paletteName,
+			BW:         false,
+			YBits:      yBits,
+			CbBits:     cbBits,
+			CrBits:     crBits,
+			Pattern:    pattern,
+			TileSize:   tileSize,
+			UseZstd:    useZstd,
+			Shuffle:    useShuffle,
+			RGBMode:    false,
+			ZXMode:     zxMode,
+			Palette:    paletteName,
+			RawPalette: rawPalette,
 		})
 	}
 	if err != nil {
@@ -386,15 +392,15 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, bwBits, yBit
 	} else {
 		if paletteName != "" {
 			if tileSize > 0 {
-				fmt.Printf("quality=%d, mode=%s, tile=%d, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, paletteName, tileSize, useZstd, useShuffle, ratio, finish)
+				fmt.Printf("quality=%d, mode=%s, tile=%d, raw=%t, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, paletteName, tileSize, rawPalette, useZstd, useShuffle, ratio, finish)
 			} else {
-				fmt.Printf("quality=%d, mode=%s, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, paletteName, useZstd, useShuffle, ratio, finish)
+				fmt.Printf("quality=%d, mode=%s, raw=%t, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, paletteName, rawPalette, useZstd, useShuffle, ratio, finish)
 			}
 		} else if zxMode {
 			if tileSize > 0 {
-				fmt.Printf("quality=%d, mode=zx, tile=%d, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, tileSize, useZstd, useShuffle, ratio, finish)
+				fmt.Printf("quality=%d, mode=zx, tile=%d, raw=%t, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, tileSize, rawPalette, useZstd, useShuffle, ratio, finish)
 			} else {
-				fmt.Printf("quality=%d, mode=zx, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, useZstd, useShuffle, ratio, finish)
+				fmt.Printf("quality=%d, mode=zx, raw=%t, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, rawPalette, useZstd, useShuffle, ratio, finish)
 			}
 		} else if yBits == 1 && cbBits == 1 && crBits == 1 {
 			fmt.Printf("quality=%d, mode=ycb, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, useZstd, useShuffle, ratio, finish)
