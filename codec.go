@@ -57,7 +57,7 @@ const blueNoiseTileSize = 128
 const (
 	neighborhoodBackSpan    = 2
 	neighborhoodForwardSpan = 3
-	paletteTileSize         = 8
+	paletteTileSize         = 16
 )
 
 var (
@@ -409,16 +409,17 @@ type Encoder struct {
 }
 
 type EncodeOptions struct {
-	BW      bool
-	YBits   int
-	CbBits  int
-	CrBits  int
-	Pattern string
-	UseZstd bool
-	Shuffle bool
-	RGBMode bool
-	ZXMode  bool
-	Palette string
+	BW       bool
+	YBits    int
+	CbBits   int
+	CrBits   int
+	Pattern  string
+	TileSize int
+	UseZstd  bool
+	Shuffle  bool
+	RGBMode  bool
+	ZXMode   bool
+	Palette  string
 
 	PatternW int
 	PatternH int
@@ -478,6 +479,11 @@ func normalizeEncodeOptions(opts EncodeOptions) (EncodeOptions, error) {
 	if opts.CrBits < 1 || opts.CrBits > 4 {
 		return opts, fmt.Errorf("Cr bit depth must be in [1..4], got %d", opts.CrBits)
 	}
+	if opts.TileSize != 0 {
+		if opts.TileSize < 2 || opts.TileSize > 255 {
+			return opts, fmt.Errorf("tile size must be in [2..255], got %d", opts.TileSize)
+		}
+	}
 	return opts, nil
 }
 
@@ -533,7 +539,7 @@ func (e *Encoder) EncodeWithOptions(img image.Image, quality int, opts EncodeOpt
 			yBits = max(1, bitsNeeded(len(chosenPalette)-1))
 			cbBits = 0
 			crBits = 0
-			quantizePaletteIndices(e.yPlane, e.cbPlane, e.crPlane, w, h, quality, chosenPalette, yPhaseX, yPhaseY, cbPhaseX, cbPhaseY, crPhaseX, crPhaseY, opts.Shuffle, true, opts.PatternW, opts.PatternH, &e.yBits)
+			quantizePaletteIndices(e.yPlane, e.cbPlane, e.crPlane, w, h, quality, chosenPalette, yPhaseX, yPhaseY, cbPhaseX, cbPhaseY, crPhaseX, crPhaseY, opts.Shuffle, true, opts.TileSize, &e.yBits)
 		} else {
 			if cbBits > 0 {
 				channelsMask |= channelFlagCb
@@ -1124,7 +1130,7 @@ func paletteFromMode(zxMode bool, paletteName string, rPlane, gPlane, bPlane []u
 	return rgbPrimaryPalette
 }
 
-func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, palette [][3]uint8, rPhaseX, rPhaseY, gPhaseX, gPhaseY, bPhaseX, bPhaseY int, shuffle, adaptive bool, patternW, patternH int, dst *bytes.Buffer) {
+func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, palette [][3]uint8, rPhaseX, rPhaseY, gPhaseX, gPhaseY, bPhaseX, bPhaseY int, shuffle, adaptive bool, tileSize int, dst *bytes.Buffer) {
 	dst.Reset()
 	if len(palette) < 1 {
 		palette = rgbPrimaryPalette
@@ -1201,18 +1207,21 @@ func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, p
 			canvasIdx = i
 		}
 	}
+	if tileSize <= 0 {
+		tileSize = paletteTileSize
+	}
 	dst.WriteByte(2) // tile-local subset mode
-	dst.WriteByte(byte(paletteTileSize))
-	dst.WriteByte(byte(paletteTileSize))
+	dst.WriteByte(byte(tileSize))
+	dst.WriteByte(byte(tileSize))
 
-	tilesX := ceilDiv(w, paletteTileSize)
-	tilesY := ceilDiv(h, paletteTileSize)
+	tilesX := ceilDiv(w, tileSize)
+	tilesY := ceilDiv(h, tileSize)
 	for ty := 0; ty < tilesY; ty++ {
-		y0 := ty * paletteTileSize
-		y1 := min(y0+paletteTileSize, h)
+		y0 := ty * tileSize
+		y1 := min(y0+tileSize, h)
 		for tx := 0; tx < tilesX; tx++ {
-			x0 := tx * paletteTileSize
-			x1 := min(x0+paletteTileSize, w)
+			x0 := tx * tileSize
+			x1 := min(x0+tileSize, w)
 
 			localFreq := make(map[int]int, len(palette))
 			for y := y0; y < y1; y++ {
@@ -1253,17 +1262,17 @@ func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, p
 			}
 			var tileBuf bytes.Buffer
 			bw := newBitWriter(&tileBuf)
-			for y := y0; y < y1; y++ {
-				row := y * w
-				for x := x0; x < x1; x++ {
-					bw.writeBits(uint64(inv[pixelIdx[row+x]]), uint8(localBits))
-				}
+			order := zOrderIndices(x1-x0, y1-y0)
+			for _, localPi := range order {
+				lx := localPi % (x1 - x0)
+				ly := localPi / (x1 - x0)
+				globalPi := (y0+ly)*w + (x0 + lx)
+				bw.writeBits(uint64(inv[pixelIdx[globalPi]]), uint8(localBits))
 			}
 			bw.flush()
 			dst.Write(tileBuf.Bytes())
 		}
 	}
-	_, _ = patternW, patternH
 }
 
 func adaptivePaletteTarget(rPlane, gPlane, bPlane []uint8, w, h, x, y int, targetR, targetG, targetB float64) (float64, float64, float64) {
@@ -2333,24 +2342,24 @@ func decodePaletteToRGBA(dst *image.RGBA, data []byte, bitDepth int, yStorageMod
 				}
 				br := newBitReader(data[pos : pos+tileBytes])
 				pos += tileBytes
-				for y := y0; y < y1; y++ {
-					rowOff := y * dst.Stride
-					for x := x0; x < x1; x++ {
-						v, err := br.readBits(uint8(localBits))
-						if err != nil {
-							return fmt.Errorf("decode: truncated tile local index stream")
-						}
-						if int(v) >= len(subset) {
-							return fmt.Errorf("decode: tile local index out of range")
-						}
-						idx := subset[int(v)]
-						p := idx * 3
-						off := rowOff + x*4
-						dst.Pix[off+0] = palette[p+0]
-						dst.Pix[off+1] = palette[p+1]
-						dst.Pix[off+2] = palette[p+2]
-						dst.Pix[off+3] = 255
+				order := zOrderIndices(x1-x0, y1-y0)
+				for _, localPi := range order {
+					v, err := br.readBits(uint8(localBits))
+					if err != nil {
+						return fmt.Errorf("decode: truncated tile local index stream")
 					}
+					if int(v) >= len(subset) {
+						return fmt.Errorf("decode: tile local index out of range")
+					}
+					lx := localPi % (x1 - x0)
+					ly := localPi / (x1 - x0)
+					idx := subset[int(v)]
+					p := idx * 3
+					off := (y0+ly)*dst.Stride + (x0+lx)*4
+					dst.Pix[off+0] = palette[p+0]
+					dst.Pix[off+1] = palette[p+1]
+					dst.Pix[off+2] = palette[p+2]
+					dst.Pix[off+3] = 255
 				}
 			}
 		}
@@ -2448,6 +2457,41 @@ func absInt(v int) int {
 		return -v
 	}
 	return v
+}
+
+func zOrderIndices(w, h int) []int {
+	if w <= 0 || h <= 0 {
+		return nil
+	}
+	maxDim := w
+	if h > maxDim {
+		maxDim = h
+	}
+	side := 1
+	for side < maxDim {
+		side <<= 1
+	}
+	total := w * h
+	out := make([]int, 0, total)
+	for code := 0; len(out) < total; code++ {
+		x, y := decodeMorton2(uint32(code))
+		if x >= side || y >= side {
+			break
+		}
+		if x < w && y < h {
+			out = append(out, y*w+x)
+		}
+	}
+	return out
+}
+
+func decodeMorton2(code uint32) (int, int) {
+	var x, y uint32
+	for bit := uint(0); bit < 16; bit++ {
+		x |= ((code >> (bit * 2)) & 1) << bit
+		y |= ((code >> (bit*2 + 1)) & 1) << bit
+	}
+	return int(x), int(y)
 }
 
 func reconstructLevel(bits []byte, idx int, low, high uint8) uint8 {
