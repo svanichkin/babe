@@ -42,15 +42,113 @@ func TestEncodeDecode_RoundTrip(t *testing.T) {
 		name       string
 		quality    int
 		bw         bool
+		bwBits     int
 		postfilter bool
 	}{
-		{name: "color_no_postfilter", quality: 70, bw: false, postfilter: false},
-		{name: "color_postfilter", quality: 70, bw: false, postfilter: true},
-		{name: "color_no_postfilter_q80", quality: 80, bw: false, postfilter: false},
-		{name: "bw_no_postfilter", quality: 70, bw: true, postfilter: false},
+		{name: "color_no_postfilter", quality: 70, bw: false, bwBits: 1, postfilter: false},
+		{name: "color_postfilter", quality: 70, bw: false, bwBits: 1, postfilter: true},
+		{name: "color_no_postfilter_q80", quality: 80, bw: false, bwBits: 1, postfilter: false},
+		{name: "color_custom_bits", quality: 80, bw: false, bwBits: 1, postfilter: false},
+		{name: "color_rgb_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
+		{name: "color_zx_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
+		{name: "color_ymc_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
+		{name: "color_ymcrgb_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
+		{name: "color_palette_spec_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
+		{name: "color_palette_spec_multi_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
+		{name: "color_adaptive_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
+		{name: "color_ega_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
+		{name: "color_vga_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
+		{name: "color_sunset_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
+		{name: "bw_no_postfilter", quality: 70, bw: true, bwBits: 1, postfilter: false},
+		{name: "bw_3bit", quality: 70, bw: true, bwBits: 3, postfilter: false},
+		{name: "bw_2bit_pattern", quality: 70, bw: true, bwBits: 2, postfilter: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			comp, err := Encode(src, tc.quality, tc.bw)
+			var (
+				comp []byte
+				err  error
+			)
+			if tc.name == "color_custom_bits" {
+				comp, err = EncodeWithBits(src, tc.quality, 3, 1, 1)
+			} else if tc.name == "color_rgb_mode" {
+				comp, err = NewEncoder().EncodeWithOptions(src, tc.quality, EncodeOptions{
+					YBits:   1,
+					CbBits:  1,
+					CrBits:  1,
+					RGBMode: true,
+				})
+			} else if tc.name == "color_zx_mode" {
+				comp, err = NewEncoder().EncodeWithOptions(src, tc.quality, EncodeOptions{
+					YBits:  1,
+					CbBits: 1,
+					CrBits: 1,
+					ZXMode: true,
+				})
+			} else if tc.name == "color_sunset_mode" {
+				comp, err = NewEncoder().EncodeWithOptions(src, tc.quality, EncodeOptions{
+					YBits:   1,
+					CbBits:  1,
+					CrBits:  1,
+					Palette: "sunset",
+				})
+			} else if tc.name == "color_ymc_mode" {
+				comp, err = NewEncoder().EncodeWithOptions(src, tc.quality, EncodeOptions{
+					YBits:   1,
+					CbBits:  1,
+					CrBits:  1,
+					Palette: "ymc",
+				})
+			} else if tc.name == "color_ymcrgb_mode" {
+				comp, err = NewEncoder().EncodeWithOptions(src, tc.quality, EncodeOptions{
+					YBits:   1,
+					CbBits:  1,
+					CrBits:  1,
+					Palette: "ymcrgb",
+				})
+			} else if tc.name == "color_palette_spec_mode" {
+				comp, err = NewEncoder().EncodeWithOptions(src, tc.quality, EncodeOptions{
+					YBits:   1,
+					CbBits:  1,
+					CrBits:  1,
+					Palette: "ycmrgbbw",
+				})
+			} else if tc.name == "color_palette_spec_multi_mode" {
+				comp, err = NewEncoder().EncodeWithOptions(src, tc.quality, EncodeOptions{
+					YBits:   1,
+					CbBits:  1,
+					CrBits:  1,
+					Palette: "rgb+ycm+wb",
+				})
+			} else if tc.name == "color_adaptive_mode" {
+				comp, err = NewEncoder().EncodeWithOptions(src, tc.quality, EncodeOptions{
+					YBits:   1,
+					CbBits:  1,
+					CrBits:  1,
+					Palette: "adaptive:16",
+				})
+			} else if tc.name == "color_ega_mode" {
+				comp, err = NewEncoder().EncodeWithOptions(src, tc.quality, EncodeOptions{
+					YBits:   1,
+					CbBits:  1,
+					CrBits:  1,
+					Palette: "ega",
+				})
+			} else if tc.name == "color_vga_mode" {
+				comp, err = NewEncoder().EncodeWithOptions(src, tc.quality, EncodeOptions{
+					YBits:   1,
+					CbBits:  1,
+					CrBits:  1,
+					Palette: "vga",
+				})
+			} else if tc.name == "bw_2bit_pattern" {
+				comp, err = NewEncoder().EncodeWithOptions(src, tc.quality, EncodeOptions{
+					BW:      true,
+					YBits:   2,
+					Pattern: "2x2",
+				})
+			} else {
+				comp, err = Encode(src, tc.quality, tc.bw, tc.bwBits)
+			}
 			if err != nil {
 				t.Fatalf("Encode: %v", err)
 			}
@@ -73,10 +171,9 @@ func TestEncodeDecode_RoundTrip(t *testing.T) {
 }
 
 func TestEncode_ImageTooSmall(t *testing.T) {
-	// At quality=0, smallBlock becomes 4, so a 1x1 image cannot be encoded.
 	img := makeTestImage(1, 1)
-	if _, err := Encode(img, 0, false); err == nil {
-		t.Fatalf("expected error for too-small image, got nil")
+	if _, err := Encode(img, 0, false, 1); err != nil {
+		t.Fatalf("unexpected error for 1x1 image: %v", err)
 	}
 }
 
@@ -190,7 +287,7 @@ func BenchmarkCodecs(b *testing.B) {
 
 			startEnc := time.Now()
 			buf.Reset()
-			if err := enc.EncodeTo(&buf, img, 80, false); err != nil {
+			if err := enc.EncodeTo(&buf, img, 80, false, 1); err != nil {
 				b.Fatalf("encode failed: %v", err)
 			}
 			encBytes := buf.Bytes()
@@ -208,7 +305,7 @@ func BenchmarkCodecs(b *testing.B) {
 		benchmarkEncodeDecode(b,
 			func() ([]byte, error) {
 				buf.Reset()
-				if err := enc.EncodeTo(&buf, img, 80, false); err != nil {
+				if err := enc.EncodeTo(&buf, img, 80, false, 1); err != nil {
 					return nil, err
 				}
 				return buf.Bytes(), nil
@@ -372,7 +469,7 @@ func benchBABE(img image.Image) summaryBenchFn {
 
 		// Warm-up and reset so one-time allocations don't dominate the summary.
 		buf.Reset()
-		if err := enc.EncodeTo(&buf, img, 80, false); err != nil {
+		if err := enc.EncodeTo(&buf, img, 80, false, 1); err != nil {
 			b.Fatalf("encode failed: %v", err)
 		}
 		encBytes := buf.Bytes()
@@ -384,7 +481,7 @@ func benchBABE(img image.Image) summaryBenchFn {
 		for i := 0; i < b.N; i++ {
 			buf.Reset()
 			startEnc := time.Now()
-			if err := enc.EncodeTo(&buf, img, 80, false); err != nil {
+			if err := enc.EncodeTo(&buf, img, 80, false, 1); err != nil {
 				b.Fatalf("encode failed: %v", err)
 			}
 			encTotal += time.Since(startEnc)

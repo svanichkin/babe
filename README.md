@@ -1,146 +1,66 @@
-# Babe — Bi-Level Adaptive Block Encoding
+# Babe
 
-**Babe** is an experimental dual‑tone block-based image codec designed for extremely lightweight compression with visually smooth output.  
-It focuses on simplicity, compact encoded size, and fast decoding rather than perfect fidelity.
+**Babe** is an experimental 1-bit-per-channel image codec.
+It converts the source into `YCbCr`, quantizes each stored channel to a single bit, applies blue-noise dithering during encode, then compresses the packed bitplanes with Zstandard.
 
-## Features
+## Format
 
-- Two‑tone block encoding with adaptive subdivision  
-- Palette reduction in YUV space  
-- Delta-indexed blocks for compact representation  
-- Zstandard used for final compression stage  
-- Lossy encoder, PNG output on decode  
-- Minimal API: `Encode(image, quality)` and `Decode(data)`
+- `Y` is always stored
+- `Cb` and `Cr` are stored in color mode, omitted in `bw` mode
+- each stored plane uses exactly `1 bit` per pixel
+- decode reconstructs the image from fixed low/high levels per channel
+- final payload is `zstd(bitstream)`
 
-## How It Works
+In color mode this means the raw image model is effectively `3 bits per pixel` before Zstandard.
 
-At a high level, Babe works as a lossy, block-based codec with a dual-tone model per block and an indexed palette in YUV space.
+## Current Model
 
-1. **Color space and input**
-   - The source image is converted to a YUV-like space.
-   - Luma and chroma are processed with different sensitivity so that most detail is preserved in brightness while color is simplified more aggressively.
+1. Input is converted to planar `YCbCr`.
+2. Each plane is thresholded against a procedurally generated blue-noise tile.
+3. The result is packed into 1-bit planes.
+4. The packed planes are written into a compact header + payload container.
+5. The container is compressed with Zstandard.
 
-2. **Block partitioning**
-   - The image is split into rectangular blocks (macroblocks).
-   - Blocks can be further subdivided adaptively depending on local contrast and quality settings.
-   - Very flat or low-contrast regions tend to keep larger blocks; detailed regions get smaller blocks.
+The blue-noise tile is generated with a deterministic best-candidate sampler on a toroidal grid, so the threshold map is actually noise-distributed rather than a small ordered-dither table.
 
-3. **Dual-tone model**
-   - For each block Babe tries to approximate all pixels using only **two representative colors** (a “dual-tone”).
-   - A simple pattern (bit mask) inside the block tells, for each pixel, which of the two tones is used.
-   - This creates a kind of ordered dither / posterization that looks smooth at a distance but is cheap to store.
+This is intentionally aggressive and stylized. The goal is not fidelity; the goal is an ultra-small, fast, visibly dithered codec.
 
-4. **Palette construction in YUV space**
-   - Instead of storing raw RGB values per block, Babe builds a global and/or local palette in YUV space.
-   - Colors are quantized and re-used across blocks, so repeated tones only cost index references, not full 24‑bit triples.
-   - The palette layout and index width depend on quality settings and image complexity.
+## CLI
 
-5. **Delta indexing and reuse**
-   - Indices into the palette are not stored independently; Babe exploits spatial coherence.
-   - Neighboring blocks often share or slightly adjust their tones, so indices can often be stored as **small deltas** from a previous index.
-   - This reduces the effective bits per block and helps the entropy stage.
+Encode:
 
-6. **Pattern and metadata encoding**
-   - For each block, Babe stores:
-     - indices of the two palette colors,
-     - a compact pattern describing which tone is used per pixel,
-     - optional flags/metadata to describe special cases (e.g. flat blocks).
-   - Patterns themselves are chosen from a limited family so they can be encoded in only a few bits when repeated.
-
-7. **Bitstream layout**
-   - All palette data, block indices, and patterns are serialized into a compact binary stream.
-   - The layout is designed for fast sequential decoding: you can reconstruct block tones and patterns with minimal branching.
-
-8. **Final compression (Zstandard)**
-   - The raw Babe bitstream is passed through Zstandard.
-   - Babe’s structure (reused indices, repeating patterns, small deltas) is optimized to be very friendly to a general‑purpose compressor.
-   - This final stage usually cuts the already compact stream by a significant factor.
-
-9. **Decoding**
-   - Decode reverses the process:
-     - Zstandard decompression to restore the Babe bitstream.
-     - Rebuild palettes and per-block parameters.
-     - Reconstruct each block’s two tones and pattern.
-     - Stitch all blocks into a full‑resolution image in YUV space and convert back to RGB.
-   - The operations are mostly table lookups and simple math, which is why decoding is very fast.
-
-This description is simplified; the actual implementation contains additional heuristics and tuning for block sizes, palette limits, and quality parameters to balance speed, size, and visual quality.
-
-## CLI Utility
-
-The repository includes a command-line tool for encoding and decoding.
-
-### Encode an image → `.babe`
-
-```
-babe input.jpg
+```bash
+babe input.png
+babe input.png 85
+babe input.png 70 3
+babe input.png 100 4:4:4
+babe input.png 100 3 1 1
 ```
 
-Produces:
+Rules:
 
-```
-input.babe
-```
+- one numeric bit depth after `quality` means monochrome `bw`
+- a triplet means color `Y:Cb:Cr`
+- color triplet can be passed either as `4:4:4` or as `4 4 4`
 
-Default quality is **10**.
+Decode:
 
-Specify a custom quality (0–100):
-
-```
-babe input.jpg 5
-```
-
-### Decode `.babe` → PNG
-
-```
+```bash
 babe input.babe
 ```
 
-Produces:
-
-```
-input.png
-```
-
-## API Usage
-
-### Encode
+## API
 
 ```go
-comp, err := Encode(img, quality)
-if err != nil {
-    // handle error
-}
+comp, err := Encode(img, 80, false)
+dec, err := Decode(comp, false)
 ```
 
-### Decode
+`quality` now controls dithering strength rather than block partitioning.
+When only one bit depth is provided, the encoder uses the monochrome luma-first photographic pipeline.
 
-```go
-img, err := Decode(compData)
-if err != nil {
-    // handle error
-}
-```
+## Notes
 
-`Decode` returns a standard `image.Image`.
-
-
-## Status
-
-This codec is currently experimental.  
-Format details, quality tuning, and performance optimizations are still evolving.
-
-## Benchmark Comparison
-
-Approximate performance on Apple M3 (single‑threaded encode/decode):
-
-| Metric | JPEG (q=80) | BABE (q=80) | QOI |
-|--------|-------------|-------------|------|
-| **Encode time** | 1.10 s | 1.00 s | 0.86 s |
-| **Decode time** | 0.44 s | 0.31 s | 0.31 s |
-| **Total (encode+decode)** | 1.54 s | 1.31 s | 1.17 s |
-| **Output size** | 10.6 MB | 28.9 MB | 60.6 MB |
-
-## License
-
-MIT
+- The previous block dual-tone model has been removed.
+- `postfilter` is currently a no-op.
+- The bitstream format changed and is not compatible with older `.babe` files.
