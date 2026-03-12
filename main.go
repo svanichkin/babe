@@ -18,7 +18,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 || len(os.Args) > 13 {
-		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [pattern] [decoded.png] [-z] [shuffle]\n  babe <input-image> [quality] [bright] [decoded.png] [-z] [shuffle]\n  babe <input-image> [quality] [adaptive N] [decoded.png] [-z] [-tile N] [-raw] [shuffle]\n  babe <input-image> [quality] [zx|cga|ega|vga|c64|gameboy|pico8|db16|nes|sunset|pastel|ocean|forest|<palette-spec> ...] [decoded.png] [-z] [-tile N] [-raw] [shuffle]\n  babe <input.babe> [-postfilter]\n")
+		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [pattern] [decoded.png] [-z] [shuffle]\n  babe <input-image> [quality] [bright] [decoded.png] [-z] [shuffle]\n  babe <input-image> [quality] [adaptive N] [decoded.png] [-z] [-tile N] [-raw] [-reconstruct] [shuffle]\n  babe <input-image> [quality] [zx|cga|ega|vga|c64|gameboy|pico8|db16|nes|sunset|pastel|ocean|forest|<palette-spec> ...] [decoded.png] [-z] [-tile N] [-raw] [-reconstruct] [shuffle]\n  babe <input.babe> [-postfilter]\n")
 		os.Exit(1)
 	}
 
@@ -61,6 +61,7 @@ func main() {
 	useShuffle := false
 	debugLog := false
 	rawPalette := false
+	reconstructPalette := false
 	zxMode := false
 	tileSize := 0
 	paletteName := ""
@@ -84,6 +85,10 @@ func main() {
 			}
 			if a == "-raw" {
 				rawPalette = true
+				continue
+			}
+			if a == "-reconstruct" {
+				reconstructPalette = true
 				continue
 			}
 			if a == "-tile" {
@@ -165,7 +170,7 @@ func main() {
 	bwBits := yBits
 
 	outPath := base + ".babe"
-	if err := encodeToBabe(inputPath, outPath, quality, bwmode, bwBits, yBits, cbBits, crBits, pattern, tileSize, useZstd, useShuffle, false, zxMode, paletteName, rawPalette); err != nil {
+	if err := encodeToBabe(inputPath, outPath, quality, bwmode, bwBits, yBits, cbBits, crBits, pattern, tileSize, useZstd, useShuffle, false, zxMode, paletteName, rawPalette, reconstructPalette); err != nil {
 		fmt.Fprintln(os.Stderr, "encode error:", err)
 		os.Exit(1)
 	}
@@ -298,7 +303,7 @@ func parseBitDepth(s, label string) (int, error) {
 	return v, nil
 }
 
-func encodeToBabe(inPath, outPath string, quality int, bwmode bool, bwBits, yBits, cbBits, crBits int, pattern string, tileSize int, useZstd, useShuffle bool, rgbMode, zxMode bool, paletteName string, rawPalette bool) error {
+func encodeToBabe(inPath, outPath string, quality int, bwmode bool, bwBits, yBits, cbBits, crBits int, pattern string, tileSize int, useZstd, useShuffle bool, rgbMode, zxMode bool, paletteName string, rawPalette, reconstructPalette bool) error {
 	info, err := os.Stat(inPath)
 	if err != nil {
 		return err
@@ -329,18 +334,19 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, bwBits, yBit
 		})
 	} else {
 		enc, err = NewEncoder().EncodeWithOptions(img, quality, EncodeOptions{
-			BW:         false,
-			YBits:      yBits,
-			CbBits:     cbBits,
-			CrBits:     crBits,
-			Pattern:    pattern,
-			TileSize:   tileSize,
-			UseZstd:    useZstd,
-			Shuffle:    useShuffle,
-			RGBMode:    false,
-			ZXMode:     zxMode,
-			Palette:    paletteName,
-			RawPalette: rawPalette,
+			BW:                 false,
+			YBits:              yBits,
+			CbBits:             cbBits,
+			CrBits:             crBits,
+			Pattern:            pattern,
+			TileSize:           tileSize,
+			UseZstd:            useZstd,
+			Shuffle:            useShuffle,
+			RGBMode:            false,
+			ZXMode:             zxMode,
+			Palette:            paletteName,
+			RawPalette:         rawPalette,
+			ReconstructPalette: reconstructPalette,
 		})
 	}
 	if err != nil {
@@ -392,15 +398,15 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, bwBits, yBit
 	} else {
 		if paletteName != "" {
 			if tileSize > 0 {
-				fmt.Printf("quality=%d, mode=%s, tile=%d, raw=%t, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, paletteName, tileSize, rawPalette, useZstd, useShuffle, ratio, finish)
+				fmt.Printf("quality=%d, mode=%s, tile=%d, raw=%t, reconstruct=%t, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, paletteName, tileSize, rawPalette, reconstructPalette, useZstd, useShuffle, ratio, finish)
 			} else {
-				fmt.Printf("quality=%d, mode=%s, raw=%t, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, paletteName, rawPalette, useZstd, useShuffle, ratio, finish)
+				fmt.Printf("quality=%d, mode=%s, raw=%t, reconstruct=%t, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, paletteName, rawPalette, reconstructPalette, useZstd, useShuffle, ratio, finish)
 			}
 		} else if zxMode {
 			if tileSize > 0 {
-				fmt.Printf("quality=%d, mode=zx, tile=%d, raw=%t, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, tileSize, rawPalette, useZstd, useShuffle, ratio, finish)
+				fmt.Printf("quality=%d, mode=zx, tile=%d, raw=%t, reconstruct=%t, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, tileSize, rawPalette, reconstructPalette, useZstd, useShuffle, ratio, finish)
 			} else {
-				fmt.Printf("quality=%d, mode=zx, raw=%t, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, rawPalette, useZstd, useShuffle, ratio, finish)
+				fmt.Printf("quality=%d, mode=zx, raw=%t, reconstruct=%t, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, rawPalette, reconstructPalette, useZstd, useShuffle, ratio, finish)
 			}
 		} else if yBits == 1 && cbBits == 1 && crBits == 1 {
 			fmt.Printf("quality=%d, mode=ycb, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, useZstd, useShuffle, ratio, finish)
@@ -616,7 +622,189 @@ func decodeBabe(inPath, outPath string, splitChannels, postfilter bool) error {
 }
 
 func writePatternLogPNG(inPath, outPath string) error {
-	return fmt.Errorf("log is only available for bw pattern mode")
+	comp, err := os.ReadFile(inPath)
+	if err != nil {
+		return err
+	}
+	payload := comp
+	if len(comp) < len(codec) || string(comp[:len(codec)]) != codec {
+		dec := mustNewZstdDecoder()
+		payload, err = dec.DecodeAll(comp, nil)
+		if err != nil {
+			return err
+		}
+	}
+	pos := len(codec)
+	if len(payload) < pos+8 {
+		return fmt.Errorf("short payload")
+	}
+	pos++ // quality
+	colorMode := payload[pos]
+	pos++
+	yBits := int(payload[pos])
+	pos++
+	pos++ // cb bits
+	pos++ // cr bits
+	yStorageMode := payload[pos]
+	pos++
+	patternW := int(payload[pos])
+	pos++
+	patternH := int(payload[pos])
+	pos++
+	channelsMask := payload[pos]
+	pos++
+	w, err := readU32BE(payload, &pos, "image width")
+	if err != nil {
+		return err
+	}
+	h, err := readU32BE(payload, &pos, "image height")
+	if err != nil {
+		return err
+	}
+	yData, err := readBitPlane(payload, &pos, "Y")
+	if err != nil {
+		return err
+	}
+
+	var img *image.RGBA
+	switch {
+	case colorMode == colorModePaletteRGB && yStorageMode == yStorageRaw && channelsMask == channelFlagY:
+		img, err = buildReconstructLogImage(yData, w, h)
+		if err != nil {
+			return err
+		}
+	case yBits == 1 && (yStorageMode == yStoragePatternGrid || yStorageMode == yStoragePatternGridDirect) && channelsMask == channelFlagY:
+		img, err = buildPatternLogImage(yData, w, h, yBits, yStorageMode, patternW, patternH)
+		if err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("log is only available for bw pattern mode or palette reconstruct mode")
+	}
+
+	out, err := os.Create(outPath)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	return png.Encode(out, img)
+}
+
+func buildReconstructLogImage(yData []byte, imgW, imgH int) (*image.RGBA, error) {
+	if len(yData) < 2 {
+		return nil, fmt.Errorf("short palette payload")
+	}
+	paletteSize := int(binary.BigEndian.Uint16(yData[0:2]))
+	if paletteSize < 1 || len(yData) < 2+paletteSize*3+1 {
+		return nil, fmt.Errorf("short palette header")
+	}
+	paletteRGB := make([]color.RGBA, paletteSize)
+	for i := 0; i < paletteSize; i++ {
+		base := 2 + i*3
+		paletteRGB[i] = color.RGBA{yData[base], yData[base+1], yData[base+2], 255}
+	}
+	pos := 2 + paletteSize*3
+	submode := int(yData[pos])
+	pos++
+	if submode != 3 {
+		return nil, fmt.Errorf("log is only available for reconstruct palette mode")
+	}
+	if len(yData)-pos < 2 {
+		return nil, fmt.Errorf("truncated reconstruct header")
+	}
+	usedCount := int(binary.BigEndian.Uint16(yData[pos : pos+2]))
+	pos += 2
+	if usedCount < 1 || usedCount > paletteSize || len(yData)-pos < usedCount {
+		return nil, fmt.Errorf("truncated reconstruct order")
+	}
+	order := make([]int, usedCount)
+	for i := 0; i < usedCount; i++ {
+		order[i] = int(yData[pos+i])
+	}
+	pos += usedCount
+
+	type section struct {
+		img *image.RGBA
+	}
+	sections := make([]section, 0, max(1, usedCount))
+	currLen := imgW * imgH
+	if currLen < 1 {
+		return nil, fmt.Errorf("invalid reconstruct image size")
+	}
+	for i := 0; i < usedCount-1; i++ {
+		planeLen := (currLen + 7) >> 3
+		if len(yData)-pos < planeLen {
+			return nil, fmt.Errorf("truncated reconstruct plane")
+		}
+		plane := yData[pos : pos+planeLen]
+		pos += planeLen
+		sec := renderReconstructMask(plane, currLen, imgW, paletteRGB[order[i]])
+		sections = append(sections, section{img: sec})
+		ones := countBitsPrefix(plane, currLen)
+		currLen -= ones
+	}
+	if currLen > 0 {
+		sections = append(sections, section{img: renderSolidStrip(currLen, imgW, paletteRGB[order[usedCount-1]])})
+	}
+	if len(sections) == 0 {
+		return nil, fmt.Errorf("no reconstruct sections")
+	}
+	maxW := 0
+	totalH := 8
+	for _, s := range sections {
+		if s.img.Bounds().Dx() > maxW {
+			maxW = s.img.Bounds().Dx()
+		}
+		totalH += s.img.Bounds().Dy() + 8
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, maxW+16, totalH))
+	fillRGBA(dst, color.RGBA{20, 20, 20, 255})
+	y := 8
+	for _, s := range sections {
+		drawAt(dst, s.img, 8, y)
+		y += s.img.Bounds().Dy() + 8
+	}
+	return dst, nil
+}
+
+func renderReconstructMask(plane []byte, n, w int, fg color.RGBA) *image.RGBA {
+	if w < 1 {
+		w = 1
+	}
+	h := ceilDiv(n, w)
+	dst := image.NewRGBA(image.Rect(0, 0, w, h))
+	bg := color.RGBA{8, 8, 8, 255}
+	fillRGBA(dst, bg)
+	for i := 0; i < n; i++ {
+		if monoBitAt(plane, i) {
+			dst.SetRGBA(i%w, i/w, fg)
+		}
+	}
+	return dst
+}
+
+func renderSolidStrip(n, w int, fg color.RGBA) *image.RGBA {
+	if w < 1 {
+		w = 1
+	}
+	h := ceilDiv(n, w)
+	dst := image.NewRGBA(image.Rect(0, 0, w, h))
+	bg := color.RGBA{8, 8, 8, 255}
+	fillRGBA(dst, bg)
+	for i := 0; i < n; i++ {
+		dst.SetRGBA(i%w, i/w, fg)
+	}
+	return dst
+}
+
+func countBitsPrefix(src []byte, n int) int {
+	c := 0
+	for i := 0; i < n; i++ {
+		if monoBitAt(src, i) {
+			c++
+		}
+	}
+	return c
 }
 
 func buildPatternLogImage(yData []byte, w, h, bitDepth int, yStorageMode byte, patternW, patternH int) (*image.RGBA, error) {

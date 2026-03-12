@@ -409,18 +409,19 @@ type Encoder struct {
 }
 
 type EncodeOptions struct {
-	BW         bool
-	YBits      int
-	CbBits     int
-	CrBits     int
-	Pattern    string
-	TileSize   int
-	UseZstd    bool
-	Shuffle    bool
-	RGBMode    bool
-	ZXMode     bool
-	Palette    string
-	RawPalette bool
+	BW                 bool
+	YBits              int
+	CbBits             int
+	CrBits             int
+	Pattern            string
+	TileSize           int
+	UseZstd            bool
+	Shuffle            bool
+	RGBMode            bool
+	ZXMode             bool
+	Palette            string
+	RawPalette         bool
+	ReconstructPalette bool
 
 	PatternW int
 	PatternH int
@@ -540,7 +541,7 @@ func (e *Encoder) EncodeWithOptions(img image.Image, quality int, opts EncodeOpt
 			yBits = max(1, bitsNeeded(len(chosenPalette)-1))
 			cbBits = 0
 			crBits = 0
-			quantizePaletteIndices(e.yPlane, e.cbPlane, e.crPlane, w, h, quality, chosenPalette, yPhaseX, yPhaseY, cbPhaseX, cbPhaseY, crPhaseX, crPhaseY, opts.Shuffle, true, opts.TileSize, opts.RawPalette, &e.yBits)
+			quantizePaletteIndices(e.yPlane, e.cbPlane, e.crPlane, w, h, quality, chosenPalette, yPhaseX, yPhaseY, cbPhaseX, cbPhaseY, crPhaseX, crPhaseY, opts.Shuffle, true, opts.TileSize, opts.RawPalette, opts.ReconstructPalette, &e.yBits)
 		} else {
 			if cbBits > 0 {
 				channelsMask |= channelFlagCb
@@ -1131,7 +1132,7 @@ func paletteFromMode(zxMode bool, paletteName string, rPlane, gPlane, bPlane []u
 	return rgbPrimaryPalette
 }
 
-func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, palette [][3]uint8, rPhaseX, rPhaseY, gPhaseX, gPhaseY, bPhaseX, bPhaseY int, shuffle, adaptive bool, tileSize int, rawMode bool, dst *bytes.Buffer) {
+func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, palette [][3]uint8, rPhaseX, rPhaseY, gPhaseX, gPhaseY, bPhaseX, bPhaseY int, shuffle, adaptive bool, tileSize int, rawMode, reconstructMode bool, dst *bytes.Buffer) {
 	dst.Reset()
 	if len(palette) < 1 {
 		palette = rgbPrimaryPalette
@@ -1220,6 +1221,68 @@ func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, p
 		}
 		bw.flush()
 		_ = canvasIdx
+		return
+	}
+	if reconstructMode {
+		remaining := make([]int, len(pixelIdx))
+		copy(remaining, pixelIdx)
+		order := make([]int, 0, len(palette))
+		planes := make([][]byte, 0, max(0, len(palette)-1))
+		for {
+			currFreq := make([]int, len(palette))
+			for _, idx := range remaining {
+				currFreq[idx]++
+			}
+			chosen := -1
+			for i, c := range currFreq {
+				if c == 0 {
+					continue
+				}
+				if chosen < 0 || c > currFreq[chosen] {
+					chosen = i
+				}
+			}
+			if chosen < 0 {
+				break
+			}
+			order = append(order, chosen)
+			if len(remaining) == currFreq[chosen] {
+				break
+			}
+			hasOther := false
+			var planeBuf bytes.Buffer
+			bw := newBitWriter(&planeBuf)
+			nextRemaining := make([]int, 0, len(remaining)-currFreq[chosen])
+			for _, idx := range remaining {
+				match := idx == chosen
+				bw.writeBit(match)
+				if !match {
+					hasOther = true
+					nextRemaining = append(nextRemaining, idx)
+				}
+			}
+			bw.flush()
+			if hasOther {
+				plane := append([]byte(nil), planeBuf.Bytes()...)
+				planes = append(planes, plane)
+				remaining = nextRemaining
+				continue
+			}
+			break
+		}
+		if len(order) < 1 {
+			order = append(order, canvasIdx)
+		}
+		dst.WriteByte(3) // sequential peel planes
+		tmp := make([]byte, 2)
+		binary.BigEndian.PutUint16(tmp, uint16(len(order)))
+		dst.Write(tmp)
+		for _, idx := range order {
+			dst.WriteByte(byte(idx))
+		}
+		for _, plane := range planes {
+			dst.Write(plane)
+		}
 		return
 	}
 	if tileSize <= 0 {
@@ -2422,6 +2485,77 @@ func decodePaletteToRGBA(dst *image.RGBA, data []byte, bitDepth int, yStorageMod
 			dst.Pix[off+1] = palette[p+1]
 			dst.Pix[off+2] = palette[p+2]
 			dst.Pix[off+3] = 255
+		}
+		_, _, _ = bitDepth, patternW, patternH
+		return nil
+	}
+	if submode == 3 {
+		if len(data)-pos < 2 {
+			return fmt.Errorf("decode: truncated reconstruct palette header")
+		}
+		usedCount := int(binary.BigEndian.Uint16(data[pos : pos+2]))
+		pos += 2
+		if usedCount < 1 || usedCount > paletteSize {
+			return fmt.Errorf("decode: invalid reconstruct palette size")
+		}
+		if len(data)-pos < usedCount {
+			return fmt.Errorf("decode: truncated reconstruct palette order")
+		}
+		order := make([]int, usedCount)
+		for i := 0; i < usedCount; i++ {
+			order[i] = int(data[pos+i])
+			if order[i] < 0 || order[i] >= paletteSize {
+				return fmt.Errorf("decode: reconstruct palette index out of range")
+			}
+		}
+		pos += usedCount
+		remainingPos := make([]int, w*h)
+		for i := range remainingPos {
+			remainingPos[i] = i
+		}
+		for i := 0; i < usedCount-1; i++ {
+			planeLen := (len(remainingPos) + 7) >> 3
+			if len(data)-pos < planeLen {
+				return fmt.Errorf("decode: truncated reconstruct plane data")
+			}
+			plane := data[pos : pos+planeLen]
+			pos += planeLen
+			idx := order[i]
+			p := idx * 3
+			nextRemaining := make([]int, 0, len(remainingPos))
+			for j, pi := range remainingPos {
+				if monoBitAt(plane, j) {
+					off := (pi/w)*dst.Stride + (pi%w)*4
+					dst.Pix[off+0] = palette[p+0]
+					dst.Pix[off+1] = palette[p+1]
+					dst.Pix[off+2] = palette[p+2]
+					dst.Pix[off+3] = 255
+				} else {
+					nextRemaining = append(nextRemaining, pi)
+				}
+			}
+			remainingPos = nextRemaining
+		}
+		base := order[usedCount-1]
+		baseOff := base * 3
+		for _, pi := range remainingPos {
+			off := (pi/w)*dst.Stride + (pi%w)*4
+			dst.Pix[off+0] = palette[baseOff+0]
+			dst.Pix[off+1] = palette[baseOff+1]
+			dst.Pix[off+2] = palette[baseOff+2]
+			dst.Pix[off+3] = 255
+		}
+		for y := 0; y < h; y++ {
+			rowOff := y * dst.Stride
+			for x := 0; x < w; x++ {
+				off := rowOff + x*4
+				if dst.Pix[off+3] == 0 {
+					dst.Pix[off+0] = palette[baseOff+0]
+					dst.Pix[off+1] = palette[baseOff+1]
+					dst.Pix[off+2] = palette[baseOff+2]
+					dst.Pix[off+3] = 255
+				}
+			}
 		}
 		_, _, _ = bitDepth, patternW, patternH
 		return nil
