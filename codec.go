@@ -57,6 +57,7 @@ const blueNoiseTileSize = 128
 const (
 	neighborhoodBackSpan    = 2
 	neighborhoodForwardSpan = 3
+	paletteTileSize         = 8
 )
 
 var (
@@ -1144,11 +1145,8 @@ func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, p
 	bAmp := ditherAmplitude(28, quality)
 	fsStrength := fsDiffusionStrength(quality)
 	rowIdx := make([]int, w)
-	indexBits := bitsNeeded(len(palette) - 1)
-	if indexBits < 1 {
-		indexBits = 1
-	}
-	bw := newBitWriter(dst)
+	pixelIdx := make([]int, w*h)
+	freq := make([]int, len(palette))
 	errRCurr := make([]float64, w+2)
 	errRNext := make([]float64, w+2)
 	errGCurr := make([]float64, w+2)
@@ -1186,7 +1184,9 @@ func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, p
 			}
 		}
 		for x := 0; x < w; x++ {
-			bw.writeBits(uint64(rowIdx[x]), uint8(indexBits))
+			idx := rowIdx[x]
+			pixelIdx[row+x] = idx
+			freq[idx]++
 		}
 		for i := range errRCurr {
 			errRCurr[i], errRNext[i] = errRNext[i], 0
@@ -1194,7 +1194,75 @@ func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, p
 			errBCurr[i], errBNext[i] = errBNext[i], 0
 		}
 	}
-	bw.flush()
+
+	canvasIdx := 0
+	for i := 1; i < len(freq); i++ {
+		if freq[i] > freq[canvasIdx] {
+			canvasIdx = i
+		}
+	}
+	dst.WriteByte(2) // tile-local subset mode
+	dst.WriteByte(byte(paletteTileSize))
+	dst.WriteByte(byte(paletteTileSize))
+
+	tilesX := ceilDiv(w, paletteTileSize)
+	tilesY := ceilDiv(h, paletteTileSize)
+	for ty := 0; ty < tilesY; ty++ {
+		y0 := ty * paletteTileSize
+		y1 := min(y0+paletteTileSize, h)
+		for tx := 0; tx < tilesX; tx++ {
+			x0 := tx * paletteTileSize
+			x1 := min(x0+paletteTileSize, w)
+
+			localFreq := make(map[int]int, len(palette))
+			for y := y0; y < y1; y++ {
+				row := y * w
+				for x := x0; x < x1; x++ {
+					localFreq[pixelIdx[row+x]]++
+				}
+			}
+			subset := make([]int, 0, len(localFreq))
+			for idx := range localFreq {
+				subset = append(subset, idx)
+			}
+			sort.Slice(subset, func(i, j int) bool {
+				fi := localFreq[subset[i]]
+				fj := localFreq[subset[j]]
+				if fi != fj {
+					return fi > fj
+				}
+				return subset[i] < subset[j]
+			})
+			if len(subset) < 1 {
+				subset = append(subset, canvasIdx)
+			}
+			dst.WriteByte(byte(len(subset)))
+			for _, idx := range subset {
+				dst.WriteByte(byte(idx))
+			}
+			localBits := bitsNeeded(len(subset) - 1)
+			if localBits < 1 {
+				localBits = 1
+			}
+			inv := make([]int, len(palette))
+			for i := range inv {
+				inv[i] = -1
+			}
+			for i, idx := range subset {
+				inv[idx] = i
+			}
+			var tileBuf bytes.Buffer
+			bw := newBitWriter(&tileBuf)
+			for y := y0; y < y1; y++ {
+				row := y * w
+				for x := x0; x < x1; x++ {
+					bw.writeBits(uint64(inv[pixelIdx[row+x]]), uint8(localBits))
+				}
+			}
+			bw.flush()
+			dst.Write(tileBuf.Bytes())
+		}
+	}
 	_, _ = patternW, patternH
 }
 
@@ -2212,21 +2280,121 @@ func decodePaletteToRGBA(dst *image.RGBA, data []byte, bitDepth int, yStorageMod
 		return fmt.Errorf("decode: palette mode only supports raw index storage")
 	}
 	pos := 2 + paletteSize*3
+	if len(data)-pos < 1 {
+		return fmt.Errorf("decode: truncated palette submode")
+	}
+	submode := int(data[pos])
+	pos++
+	if submode == 2 {
+		if len(data)-pos < 2 {
+			return fmt.Errorf("decode: truncated tile subset header")
+		}
+		tileW := int(data[pos])
+		tileH := int(data[pos+1])
+		pos += 2
+		if tileW < 1 || tileH < 1 {
+			return fmt.Errorf("decode: invalid tile subset size")
+		}
+		tilesX := ceilDiv(w, tileW)
+		tilesY := ceilDiv(h, tileH)
+		for ty := 0; ty < tilesY; ty++ {
+			y0 := ty * tileH
+			y1 := min(y0+tileH, h)
+			for tx := 0; tx < tilesX; tx++ {
+				x0 := tx * tileW
+				x1 := min(x0+tileW, w)
+				if len(data)-pos < 1 {
+					return fmt.Errorf("decode: truncated tile subset size")
+				}
+				subsetSize := int(data[pos])
+				pos++
+				if subsetSize < 1 || subsetSize > paletteSize {
+					return fmt.Errorf("decode: invalid tile subset size")
+				}
+				if len(data)-pos < subsetSize {
+					return fmt.Errorf("decode: truncated tile subset")
+				}
+				subset := make([]int, subsetSize)
+				for i := 0; i < subsetSize; i++ {
+					subset[i] = int(data[pos+i])
+					if subset[i] < 0 || subset[i] >= paletteSize {
+						return fmt.Errorf("decode: tile subset index out of range")
+					}
+				}
+				pos += subsetSize
+				localBits := bitsNeeded(subsetSize - 1)
+				if localBits < 1 {
+					localBits = 1
+				}
+				pixels := (x1 - x0) * (y1 - y0)
+				tileBytes := (pixels*localBits + 7) >> 3
+				if len(data)-pos < tileBytes {
+					return fmt.Errorf("decode: truncated tile local index stream")
+				}
+				br := newBitReader(data[pos : pos+tileBytes])
+				pos += tileBytes
+				for y := y0; y < y1; y++ {
+					rowOff := y * dst.Stride
+					for x := x0; x < x1; x++ {
+						v, err := br.readBits(uint8(localBits))
+						if err != nil {
+							return fmt.Errorf("decode: truncated tile local index stream")
+						}
+						if int(v) >= len(subset) {
+							return fmt.Errorf("decode: tile local index out of range")
+						}
+						idx := subset[int(v)]
+						p := idx * 3
+						off := rowOff + x*4
+						dst.Pix[off+0] = palette[p+0]
+						dst.Pix[off+1] = palette[p+1]
+						dst.Pix[off+2] = palette[p+2]
+						dst.Pix[off+3] = 255
+					}
+				}
+			}
+		}
+		_, _, _ = bitDepth, patternW, patternH
+		return nil
+	}
+	canvasIdx := submode
+	if canvasIdx < 0 || canvasIdx >= paletteSize {
+		return fmt.Errorf("decode: invalid canvas index")
+	}
+	maskLen := packedPlaneLenBits(w, h, 1)
+	if len(data)-pos < maskLen {
+		return fmt.Errorf("decode: truncated exception mask")
+	}
+	mask := data[pos : pos+maskLen]
+	pos += maskLen
 	br := newBitReader(data[pos:])
-	indexBits := bitDepth
-	if indexBits < 1 {
-		indexBits = max(1, bitsNeeded(paletteSize-1))
+	literalCount := paletteSize - 1
+	literalBits := bitsNeeded(literalCount - 1)
+	invMap := make([]int, 0, literalCount)
+	for pi := 0; pi < paletteSize; pi++ {
+		if pi != canvasIdx {
+			invMap = append(invMap, pi)
+		}
 	}
 	for y := 0; y < h; y++ {
 		rowOff := y * dst.Stride
 		for x := 0; x < w; x++ {
-			v, err := br.readBits(uint8(indexBits))
-			if err != nil {
-				return fmt.Errorf("decode: truncated palette index stream")
-			}
-			idx := int(v)
-			if idx < 0 || idx >= paletteSize {
-				return fmt.Errorf("decode: palette index out of range")
+			idx := canvasIdx
+			if monoBitAt(mask, y*w+x) {
+				if literalBits > 0 {
+					v, err := br.readBits(uint8(literalBits))
+					if err != nil {
+						return fmt.Errorf("decode: truncated palette literal stream")
+					}
+					if int(v) >= len(invMap) {
+						return fmt.Errorf("decode: palette literal out of range")
+					}
+					idx = invMap[int(v)]
+				} else if len(invMap) == 1 {
+					idx = invMap[0]
+				} else {
+					return fmt.Errorf("decode: invalid palette literal configuration")
+				}
 			}
 			p := idx * 3
 			off := rowOff + x*4
