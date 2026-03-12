@@ -768,7 +768,7 @@ func buildReconstructLogImage(yData []byte, imgW, imgH int) (*image.RGBA, error)
 		totalH += s.img.Bounds().Dy() + 8
 	}
 	dst := image.NewRGBA(image.Rect(0, 0, maxW+16, totalH))
-	fillRGBA(dst, color.RGBA{20, 20, 20, 255})
+	fillRGBA(dst, color.RGBA{32, 32, 32, 255})
 	y := 8
 	for _, s := range sections {
 		drawAt(dst, s.img, 8, y)
@@ -783,7 +783,7 @@ func renderReconstructMask(plane []byte, n, w int, fg color.RGBA) *image.RGBA {
 	}
 	h := ceilDiv(n, w)
 	dst := image.NewRGBA(image.Rect(0, 0, w, h))
-	bg := color.RGBA{8, 8, 8, 255}
+	bg := previewContrastBG(fg)
 	fillRGBA(dst, bg)
 	for i := 0; i < n; i++ {
 		if monoBitAt(plane, i) {
@@ -799,7 +799,7 @@ func renderSolidStrip(n, w int, fg color.RGBA) *image.RGBA {
 	}
 	h := ceilDiv(n, w)
 	dst := image.NewRGBA(image.Rect(0, 0, w, h))
-	bg := color.RGBA{8, 8, 8, 255}
+	bg := previewContrastBG(fg)
 	fillRGBA(dst, bg)
 	for i := 0; i < n; i++ {
 		dst.SetRGBA(i%w, i/w, fg)
@@ -915,7 +915,7 @@ func buildPatternLogImage(yData []byte, w, h, bitDepth int, yStorageMode byte, p
 		totalH += s.preview.Bounds().Dy() + 6 + s.glyphs.Bounds().Dy() + 12
 	}
 	dst := image.NewRGBA(image.Rect(0, 0, maxW+8, totalH))
-	fillRGBA(dst, color.RGBA{24, 24, 24, 255})
+	fillRGBA(dst, color.RGBA{32, 32, 32, 255})
 	y := 8
 	for _, s := range sections {
 		drawAt(dst, s.preview, 8, y)
@@ -1016,7 +1016,7 @@ func renderGlyphSheet(data []byte, patternW, patternH, stateBits int, direct boo
 	}
 	rows := ceilDiv(len(glyphs), cols)
 	dst := image.NewRGBA(image.Rect(0, 0, cols*stepX, rows*stepY))
-	fillRGBA(dst, color.RGBA{10, 10, 10, 255})
+	fillRGBA(dst, previewContrastBG(blendRGBA(a, b)))
 	for i, g := range glyphs {
 		ox := (i % cols) * stepX
 		oy := (i / cols) * stepY
@@ -1062,6 +1062,34 @@ func blendRGBA(a, b color.RGBA) color.RGBA {
 		B: uint8((uint16(a.B) + uint16(b.B)) / 2),
 		A: 255,
 	}
+}
+
+func previewContrastBG(fg color.RGBA) color.RGBA {
+	bg := color.RGBA{255 - fg.R, 255 - fg.G, 255 - fg.B, 255}
+	if contrastScore(fg, bg) >= 220 {
+		return bg
+	}
+	lum := int(fg.R)*299 + int(fg.G)*587 + int(fg.B)*114
+	if lum >= 128000 {
+		return color.RGBA{24, 24, 24, 255}
+	}
+	return color.RGBA{244, 244, 244, 255}
+}
+
+func contrastScore(a, b color.RGBA) int {
+	dr := int(a.R) - int(b.R)
+	if dr < 0 {
+		dr = -dr
+	}
+	dg := int(a.G) - int(b.G)
+	if dg < 0 {
+		dg = -dg
+	}
+	db := int(a.B) - int(b.B)
+	if db < 0 {
+		db = -db
+	}
+	return dr + dg + db
 }
 
 func fillRGBA(img *image.RGBA, c color.RGBA) {
