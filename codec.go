@@ -415,6 +415,7 @@ type EncodeOptions struct {
 	CrBits             int
 	Pattern            string
 	TileSize           int
+	BlockSize          int
 	UseZstd            bool
 	Shuffle            bool
 	RGBMode            bool
@@ -422,6 +423,7 @@ type EncodeOptions struct {
 	Palette            string
 	RawPalette         bool
 	ReconstructPalette bool
+	BlockSubset        bool
 
 	PatternW int
 	PatternH int
@@ -486,6 +488,11 @@ func normalizeEncodeOptions(opts EncodeOptions) (EncodeOptions, error) {
 			return opts, fmt.Errorf("tile size must be in [2..255], got %d", opts.TileSize)
 		}
 	}
+	if opts.BlockSize != 0 {
+		if opts.BlockSize < 2 || opts.BlockSize > 255 {
+			return opts, fmt.Errorf("block size must be in [2..255], got %d", opts.BlockSize)
+		}
+	}
 	return opts, nil
 }
 
@@ -541,7 +548,7 @@ func (e *Encoder) EncodeWithOptions(img image.Image, quality int, opts EncodeOpt
 			yBits = max(1, bitsNeeded(len(chosenPalette)-1))
 			cbBits = 0
 			crBits = 0
-			quantizePaletteIndices(e.yPlane, e.cbPlane, e.crPlane, w, h, quality, chosenPalette, yPhaseX, yPhaseY, cbPhaseX, cbPhaseY, crPhaseX, crPhaseY, opts.Shuffle, true, opts.TileSize, opts.RawPalette, opts.ReconstructPalette, &e.yBits)
+			quantizePaletteIndices(e.yPlane, e.cbPlane, e.crPlane, w, h, quality, chosenPalette, yPhaseX, yPhaseY, cbPhaseX, cbPhaseY, crPhaseX, crPhaseY, opts.Shuffle, true, opts.TileSize, opts.BlockSize, opts.RawPalette, opts.ReconstructPalette, opts.BlockSubset, &e.yBits)
 		} else {
 			if cbBits > 0 {
 				channelsMask |= channelFlagCb
@@ -1132,7 +1139,7 @@ func paletteFromMode(zxMode bool, paletteName string, rPlane, gPlane, bPlane []u
 	return rgbPrimaryPalette
 }
 
-func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, palette [][3]uint8, rPhaseX, rPhaseY, gPhaseX, gPhaseY, bPhaseX, bPhaseY int, shuffle, adaptive bool, tileSize int, rawMode, reconstructMode bool, dst *bytes.Buffer) {
+func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, palette [][3]uint8, rPhaseX, rPhaseY, gPhaseX, gPhaseY, bPhaseX, bPhaseY int, shuffle, adaptive bool, tileSize, blockSize int, rawMode, reconstructMode, blockSubset bool, dst *bytes.Buffer) {
 	dst.Reset()
 	if len(palette) < 1 {
 		palette = rgbPrimaryPalette
@@ -1210,6 +1217,89 @@ func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, p
 		}
 	}
 	if rawMode {
+		if blockSize > 0 && blockSubset {
+			dst.WriteByte(5) // raw palette indices with per-block subset
+			dst.WriteByte(byte(blockSize))
+			for by := 0; by < h; by += blockSize {
+				y1 := min(by+blockSize, h)
+				for bx := 0; bx < w; bx += blockSize {
+					x1 := min(bx+blockSize, w)
+					localFreq := make(map[int]int, len(palette))
+					for y := by; y < y1; y++ {
+						row := y * w
+						for x := bx; x < x1; x++ {
+							localFreq[pixelIdx[row+x]]++
+						}
+					}
+					subset := make([]int, 0, len(localFreq))
+					for idx := range localFreq {
+						subset = append(subset, idx)
+					}
+					sort.Slice(subset, func(i, j int) bool {
+						if localFreq[subset[i]] != localFreq[subset[j]] {
+							return localFreq[subset[i]] > localFreq[subset[j]]
+						}
+						return subset[i] < subset[j]
+					})
+					if len(subset) < 1 {
+						subset = append(subset, canvasIdx)
+					}
+					dst.WriteByte(byte(len(subset)))
+					for _, idx := range subset {
+						dst.WriteByte(byte(idx))
+					}
+					localBits := bitsNeeded(len(subset) - 1)
+					if localBits < 1 {
+						localBits = 1
+					}
+					inv := make([]int, len(palette))
+					for i := range inv {
+						inv[i] = -1
+					}
+					for i, idx := range subset {
+						inv[idx] = i
+					}
+					var block bytes.Buffer
+					bw := newBitWriter(&block)
+					for y := by; y < y1; y++ {
+						row := y * w
+						for x := bx; x < x1; x++ {
+							bw.writeBits(uint64(inv[pixelIdx[row+x]]), uint8(localBits))
+						}
+					}
+					bw.flush()
+					dst.Write(block.Bytes())
+				}
+			}
+			_ = canvasIdx
+			return
+		}
+		if blockSize > 0 {
+			dst.WriteByte(4) // raw packed palette indices, chunked by NxN blocks
+			dst.WriteByte(byte(blockSize))
+			indexBits := bitsNeeded(len(palette) - 1)
+			if indexBits < 1 {
+				indexBits = 1
+			}
+			for by := 0; by < h; by += blockSize {
+				y1 := min(by+blockSize, h)
+				for bx := 0; bx < w; bx += blockSize {
+					x1 := min(bx+blockSize, w)
+					var block bytes.Buffer
+					bw := newBitWriter(&block)
+					for y := by; y < y1; y++ {
+						row := y * w
+						for x := bx; x < x1; x++ {
+							bw.writeBits(uint64(pixelIdx[row+x]), uint8(indexBits))
+						}
+					}
+					bw.flush()
+					dst.Write(block.Bytes())
+				}
+			}
+			_ = canvasIdx
+			return
+		}
 		dst.WriteByte(1) // raw packed palette indices
 		indexBits := bitsNeeded(len(palette) - 1)
 		if indexBits < 1 {
@@ -2454,6 +2544,118 @@ func decodePaletteToRGBA(dst *image.RGBA, data []byte, bitDepth int, yStorageMod
 					dst.Pix[off+1] = palette[p+1]
 					dst.Pix[off+2] = palette[p+2]
 					dst.Pix[off+3] = 255
+				}
+			}
+		}
+		_, _, _ = bitDepth, patternW, patternH
+		return nil
+	}
+	if submode == 5 {
+		if len(data)-pos < 1 {
+			return fmt.Errorf("decode: truncated block subset header")
+		}
+		blockSize := int(data[pos])
+		pos++
+		if blockSize < 1 {
+			return fmt.Errorf("decode: invalid block subset size")
+		}
+		for by := 0; by < h; by += blockSize {
+			y1 := min(by+blockSize, h)
+			for bx := 0; bx < w; bx += blockSize {
+				x1 := min(bx+blockSize, w)
+				if len(data)-pos < 1 {
+					return fmt.Errorf("decode: truncated block subset size")
+				}
+				subsetSize := int(data[pos])
+				pos++
+				if subsetSize < 1 || subsetSize > paletteSize {
+					return fmt.Errorf("decode: invalid block subset size")
+				}
+				if len(data)-pos < subsetSize {
+					return fmt.Errorf("decode: truncated block subset")
+				}
+				subset := make([]int, subsetSize)
+				for i := 0; i < subsetSize; i++ {
+					subset[i] = int(data[pos+i])
+					if subset[i] < 0 || subset[i] >= paletteSize {
+						return fmt.Errorf("decode: block subset index out of range")
+					}
+				}
+				pos += subsetSize
+				localBits := bitsNeeded(subsetSize - 1)
+				if localBits < 1 {
+					localBits = 1
+				}
+				pixels := (x1 - bx) * (y1 - by)
+				blockBytes := (pixels*localBits + 7) >> 3
+				if len(data)-pos < blockBytes {
+					return fmt.Errorf("decode: truncated block subset index stream")
+				}
+				br := newBitReader(data[pos : pos+blockBytes])
+				pos += blockBytes
+				for y := by; y < y1; y++ {
+					for x := bx; x < x1; x++ {
+						v, err := br.readBits(uint8(localBits))
+						if err != nil {
+							return fmt.Errorf("decode: truncated block subset index stream")
+						}
+						if int(v) >= len(subset) {
+							return fmt.Errorf("decode: block subset local index out of range")
+						}
+						idx := subset[int(v)]
+						p := idx * 3
+						off := y*dst.Stride + x*4
+						dst.Pix[off+0] = palette[p+0]
+						dst.Pix[off+1] = palette[p+1]
+						dst.Pix[off+2] = palette[p+2]
+						dst.Pix[off+3] = 255
+					}
+				}
+			}
+		}
+		_, _, _ = bitDepth, patternW, patternH
+		return nil
+	}
+	if submode == 4 {
+		if len(data)-pos < 1 {
+			return fmt.Errorf("decode: truncated block raw header")
+		}
+		blockSize := int(data[pos])
+		pos++
+		if blockSize < 1 {
+			return fmt.Errorf("decode: invalid block size")
+		}
+		indexBits := bitsNeeded(paletteSize - 1)
+		if indexBits < 1 {
+			indexBits = 1
+		}
+		for by := 0; by < h; by += blockSize {
+			y1 := min(by+blockSize, h)
+			for bx := 0; bx < w; bx += blockSize {
+				x1 := min(bx+blockSize, w)
+				pixels := (x1 - bx) * (y1 - by)
+				blockBytes := (pixels*indexBits + 7) >> 3
+				if len(data)-pos < blockBytes {
+					return fmt.Errorf("decode: truncated block raw index stream")
+				}
+				br := newBitReader(data[pos : pos+blockBytes])
+				pos += blockBytes
+				for y := by; y < y1; y++ {
+					for x := bx; x < x1; x++ {
+						idx, err := br.readBits(uint8(indexBits))
+						if err != nil {
+							return fmt.Errorf("decode: truncated block raw index stream")
+						}
+						if int(idx) >= paletteSize {
+							return fmt.Errorf("decode: block raw palette index out of range")
+						}
+						p := int(idx) * 3
+						off := y*dst.Stride + x*4
+						dst.Pix[off+0] = palette[p+0]
+						dst.Pix[off+1] = palette[p+1]
+						dst.Pix[off+2] = palette[p+2]
+						dst.Pix[off+3] = 255
+					}
 				}
 			}
 		}
