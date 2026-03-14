@@ -422,6 +422,8 @@ type EncodeOptions struct {
 	ZXMode             bool
 	Palette            string
 	RawPalette         bool
+	RawTop16           bool
+	RawShift           int
 	ReconstructPalette bool
 	BlockSubset        bool
 
@@ -548,7 +550,7 @@ func (e *Encoder) EncodeWithOptions(img image.Image, quality int, opts EncodeOpt
 			yBits = max(1, bitsNeeded(len(chosenPalette)-1))
 			cbBits = 0
 			crBits = 0
-			quantizePaletteIndices(e.yPlane, e.cbPlane, e.crPlane, w, h, quality, chosenPalette, yPhaseX, yPhaseY, cbPhaseX, cbPhaseY, crPhaseX, crPhaseY, opts.Shuffle, true, opts.TileSize, opts.BlockSize, opts.RawPalette, opts.ReconstructPalette, opts.BlockSubset, &e.yBits)
+			quantizePaletteIndices(e.yPlane, e.cbPlane, e.crPlane, w, h, quality, chosenPalette, yPhaseX, yPhaseY, cbPhaseX, cbPhaseY, crPhaseX, crPhaseY, opts.Shuffle, true, opts.TileSize, opts.BlockSize, opts.RawPalette, opts.RawTop16, opts.RawShift, opts.ReconstructPalette, opts.BlockSubset, &e.yBits)
 		} else {
 			if cbBits > 0 {
 				channelsMask |= channelFlagCb
@@ -1139,7 +1141,7 @@ func paletteFromMode(zxMode bool, paletteName string, rPlane, gPlane, bPlane []u
 	return rgbPrimaryPalette
 }
 
-func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, palette [][3]uint8, rPhaseX, rPhaseY, gPhaseX, gPhaseY, bPhaseX, bPhaseY int, shuffle, adaptive bool, tileSize, blockSize int, rawMode, reconstructMode, blockSubset bool, dst *bytes.Buffer) {
+func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, palette [][3]uint8, rPhaseX, rPhaseY, gPhaseX, gPhaseY, bPhaseX, bPhaseY int, shuffle, adaptive bool, tileSize, blockSize int, rawMode, rawTop16 bool, rawShift int, reconstructMode, blockSubset bool, dst *bytes.Buffer) {
 	dst.Reset()
 	if len(palette) < 1 {
 		palette = rgbPrimaryPalette
@@ -1300,16 +1302,30 @@ func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, p
 			_ = canvasIdx
 			return
 		}
-		dst.WriteByte(1) // raw packed palette indices
 		indexBits := bitsNeeded(len(palette) - 1)
 		if indexBits < 1 {
 			indexBits = 1
 		}
-		bw := newBitWriter(dst)
+		var rawBuf bytes.Buffer
+		bw := newBitWriter(&rawBuf)
 		for _, idx := range pixelIdx {
 			bw.writeBits(uint64(idx), uint8(indexBits))
 		}
 		bw.flush()
+		if rawTop16 {
+			rawStream := rawBuf.Bytes()
+			shift, topA, prefixBits, suffixBits, stream := encodeShiftedTop16Stream(rawStream, w*h*indexBits, rawShift)
+			dst.WriteByte(6) // raw packed palette indices with shifted top16 byte coding
+			dst.WriteByte(byte(shift))
+			dst.WriteByte(prefixBits)
+			dst.WriteByte(suffixBits)
+			dst.Write(topA[:])
+			dst.Write(stream)
+			_ = canvasIdx
+			return
+		}
+		dst.WriteByte(1) // raw packed palette indices
+		dst.Write(rawBuf.Bytes())
 		_ = canvasIdx
 		return
 	}
@@ -1447,6 +1463,114 @@ func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, p
 			dst.Write(tileBuf.Bytes())
 		}
 	}
+}
+
+func packShiftedBytes(src []byte, totalBits, shift int) []byte {
+	if totalBits <= shift {
+		return nil
+	}
+	byteCount := (totalBits - shift) / 8
+	out := make([]byte, byteCount)
+	for i := 0; i < byteCount; i++ {
+		base := shift + i*8
+		var v byte
+		for b := 0; b < 8; b++ {
+			if monoBitAt(src, base+b) {
+				v |= 1 << (7 - b)
+			}
+		}
+		out[i] = v
+	}
+	return out
+}
+
+func gatherPackedBits(src []byte, start, count int) byte {
+	var out byte
+	for i := 0; i < count; i++ {
+		if monoBitAt(src, start+i) {
+			out |= 1 << (7 - i)
+		}
+	}
+	return out
+}
+
+func splitTop16Stream(src []byte) ([16]byte, []byte, []byte, []byte) {
+	var top [16]byte
+	freq := make(map[byte]int, 256)
+	for _, b := range src {
+		freq[b]++
+	}
+	type kv struct {
+		b byte
+		c int
+	}
+	pairs := make([]kv, 0, len(freq))
+	for b, c := range freq {
+		pairs = append(pairs, kv{b: b, c: c})
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].c != pairs[j].c {
+			return pairs[i].c > pairs[j].c
+		}
+		return pairs[i].b < pairs[j].b
+	})
+	index := make(map[byte]int, 16)
+	for i := 0; i < min(16, len(pairs)); i++ {
+		top[i] = pairs[i].b
+		index[pairs[i].b] = i
+	}
+	mask := make([]byte, (len(src)+7)>>3)
+	topIDs := make([]byte, 0, len(src))
+	others := make([]byte, 0, len(src))
+	for i, b := range src {
+		if idx, ok := index[b]; ok {
+			monoBitSet(mask, i)
+			topIDs = append(topIDs, byte(idx))
+		} else {
+			others = append(others, b)
+		}
+	}
+	var idsBuf bytes.Buffer
+	bw := newBitWriter(&idsBuf)
+	for _, id := range topIDs {
+		bw.writeBits(uint64(id), 4)
+	}
+	bw.flush()
+	return top, mask, idsBuf.Bytes(), others
+}
+
+func encodeShiftedTop16Stream(rawStream []byte, totalBits int, forcedShift int) (int, [16]byte, byte, byte, []byte) {
+	bestShift := 0
+	bestSize := int(^uint(0) >> 1)
+	var bestTopA [16]byte
+	var bestPrefix byte
+	var bestSuffix byte
+	var bestStream []byte
+	startShift := 0
+	endShift := 7
+	if forcedShift >= 0 {
+		startShift = forcedShift
+		endShift = forcedShift
+	}
+	for shift := startShift; shift <= endShift; shift++ {
+		byteStream := packShiftedBytes(rawStream, totalBits, shift)
+		topA, maskA, idsA, otherA := splitTop16Stream(byteStream)
+		var payload bytes.Buffer
+		payload.Write(maskA)
+		payload.Write(idsA)
+		payload.Write(otherA)
+		size := payload.Len()
+		if size < bestSize {
+			bestSize = size
+			bestShift = shift
+			bestTopA = topA
+			bestPrefix = gatherPackedBits(rawStream, 0, shift)
+			suffixCount := (totalBits - shift) & 7
+			bestSuffix = gatherPackedBits(rawStream, totalBits-suffixCount, suffixCount)
+			bestStream = append(bestStream[:0], payload.Bytes()...)
+		}
+	}
+	return bestShift, bestTopA, bestPrefix, bestSuffix, bestStream
 }
 
 func adaptivePaletteTarget(rPlane, gPlane, bPlane []uint8, w, h, x, y int, targetR, targetG, targetB float64) (float64, float64, float64) {
@@ -2691,6 +2815,113 @@ func decodePaletteToRGBA(dst *image.RGBA, data []byte, bitDepth int, yStorageMod
 		_, _, _ = bitDepth, patternW, patternH
 		return nil
 	}
+	if submode == 6 {
+		indexBits := bitsNeeded(paletteSize - 1)
+		if indexBits < 1 {
+			indexBits = 1
+		}
+		totalBits := w * h * indexBits
+		if len(data)-pos < 19 {
+			return fmt.Errorf("decode: truncated raw top16 header")
+		}
+		shift := int(data[pos])
+		pos++
+		prefixBits := data[pos]
+		pos++
+		suffixBits := data[pos]
+		pos++
+		if shift < 0 || shift > 7 {
+			return fmt.Errorf("decode: invalid raw top16 shift")
+		}
+		if prefixBits>>shift != 0 {
+			// kept packed in high bits only
+		}
+		var topA [16]byte
+		copy(topA[:], data[pos:pos+16])
+		pos += 16
+		byteCount := 0
+		if totalBits > shift {
+			byteCount = (totalBits - shift) / 8
+		}
+		maskBytes := (byteCount + 7) >> 3
+		if len(data)-pos < maskBytes {
+			return fmt.Errorf("decode: truncated raw top16 mask")
+		}
+		maskA := data[pos : pos+maskBytes]
+		pos += maskBytes
+		topCountA := 0
+		for i := 0; i < byteCount; i++ {
+			if monoBitAt(maskA, i) {
+				topCountA++
+			}
+		}
+		idBytesA := (topCountA*4 + 7) >> 3
+		if len(data)-pos < idBytesA {
+			return fmt.Errorf("decode: truncated raw top16 id stream")
+		}
+		idReaderA := newBitReader(data[pos : pos+idBytesA])
+		pos += idBytesA
+		otherCountA := byteCount - topCountA
+		if len(data)-pos < otherCountA {
+			return fmt.Errorf("decode: truncated raw top16 other stream")
+		}
+		otherA := data[pos : pos+otherCountA]
+		pos += otherCountA
+		byteStream := make([]byte, byteCount)
+		otherPos := 0
+		for i := 0; i < byteCount; i++ {
+			if monoBitAt(maskA, i) {
+				v, err := idReaderA.readBits(4)
+				if err != nil {
+					return fmt.Errorf("decode: truncated raw top16 symbol")
+				}
+				byteStream[i] = topA[int(v)]
+			} else {
+				byteStream[i] = otherA[otherPos]
+				otherPos++
+			}
+		}
+		rawBits := make([]byte, (totalBits+7)>>3)
+		for i := 0; i < shift; i++ {
+			if (prefixBits & (1 << (7 - i))) != 0 {
+				monoBitSet(rawBits, i)
+			}
+		}
+		for i, b := range byteStream {
+			base := shift + i*8
+			for j := 0; j < 8; j++ {
+				if (b & (1 << (7 - j))) != 0 {
+					monoBitSet(rawBits, base+j)
+				}
+			}
+		}
+		suffixCount := (totalBits - shift) & 7
+		suffixStart := totalBits - suffixCount
+		for i := 0; i < suffixCount; i++ {
+			if (suffixBits & (1 << (7 - i))) != 0 {
+				monoBitSet(rawBits, suffixStart+i)
+			}
+		}
+		br := newBitReader(rawBits)
+		pixels := w * h
+		for i := 0; i < pixels; i++ {
+			idx, err := br.readBits(uint8(indexBits))
+			if err != nil {
+				return fmt.Errorf("decode: truncated raw palette index stream")
+			}
+			if int(idx) >= paletteSize {
+				return fmt.Errorf("decode: raw palette index out of range")
+			}
+			p := int(idx) * 3
+			off := (i/w)*dst.Stride + (i%w)*4
+			dst.Pix[off+0] = palette[p+0]
+			dst.Pix[off+1] = palette[p+1]
+			dst.Pix[off+2] = palette[p+2]
+			dst.Pix[off+3] = 255
+		}
+		_, _, _ = bitDepth, patternW, patternH
+		return nil
+	}
 	if submode == 3 {
 		if len(data)-pos < 2 {
 			return fmt.Errorf("decode: truncated reconstruct palette header")
@@ -3235,6 +3466,12 @@ func monoBitAt(src []byte, idx int) bool {
 	byteIdx := idx >> 3
 	shift := 7 - uint(idx&7)
 	return ((src[byteIdx] >> shift) & 1) != 0
+}
+
+func monoBitSet(dst []byte, idx int) {
+	byteIdx := idx >> 3
+	shift := 7 - uint(idx&7)
+	dst[byteIdx] |= 1 << shift
 }
 
 func unpackMonoPatternGrid(data []byte, w, h, patternW, patternH int, low, high uint8) ([]uint8, error) {

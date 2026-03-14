@@ -17,8 +17,8 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 || len(os.Args) > 13 {
-		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [pattern] [decoded.png] [-z] [shuffle]\n  babe <input-image> [quality] [bright] [decoded.png] [-z] [shuffle]\n  babe <input-image> [quality] [adaptive N] [decoded.png] [-z] [-tile N] [-block] [-raw] [-reconstruct] [shuffle]\n  babe <input-image> [quality] [zx|cga|ega|vga|c64|gameboy|pico8|db16|nes|sunset|pastel|ocean|forest|<palette-spec> ...] [decoded.png] [-z] [-tile N] [-block] [-raw] [-reconstruct] [shuffle]\n  babe <input.babe> [-postfilter]\n")
+	if len(os.Args) < 2 || len(os.Args) > 16 {
+		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [pattern] [decoded.png] [-z] [shuffle]\n  babe <input-image> [quality] [bright] [decoded.png] [-z] [shuffle]\n  babe <input-image> [quality] [adaptive N] [decoded.png] [-z] [-tile N] [-block] [-raw] [-top16] [-shift N] [-reconstruct] [shuffle]\n  babe <input-image> [quality] [zx|cga|ega|vga|c64|gameboy|pico8|db16|nes|sunset|pastel|ocean|forest|<palette-spec> ...] [decoded.png] [-z] [-tile N] [-block] [-raw] [-top16] [-shift N] [-reconstruct] [shuffle]\n  babe <input.babe> [-postfilter]\n")
 		os.Exit(1)
 	}
 
@@ -66,6 +66,8 @@ func main() {
 	zxMode := false
 	tileSize := 0
 	blockSize := 0
+	rawTop16 := false
+	rawShift := -1
 	paletteName := ""
 	paletteSpecs := make([]string, 0, 4)
 	explicitYCB := false
@@ -111,6 +113,25 @@ func main() {
 				blockSize = 16
 				blockSubset = true
 				rawPalette = true
+				continue
+			}
+			if a == "-top16" {
+				rawTop16 = true
+				rawPalette = true
+				continue
+			}
+			if a == "-shift" {
+				if i+1 >= len(rawArgs) {
+					fmt.Fprintln(os.Stderr, "-shift requires a value between 0 and 7")
+					os.Exit(1)
+				}
+				n, err := strconv.Atoi(rawArgs[i+1])
+				if err != nil || n < 0 || n > 7 {
+					fmt.Fprintln(os.Stderr, "shift must be an integer between 0 and 7")
+					os.Exit(1)
+				}
+				rawShift = n
+				i++
 				continue
 			}
 			if strings.EqualFold(a, "shuffle") {
@@ -178,7 +199,7 @@ func main() {
 	bwBits := yBits
 
 	outPath := base + ".babe"
-	if err := encodeToBabe(inputPath, outPath, quality, bwmode, bwBits, yBits, cbBits, crBits, pattern, tileSize, blockSize, useZstd, useShuffle, false, zxMode, paletteName, rawPalette, reconstructPalette, blockSubset); err != nil {
+	if err := encodeToBabe(inputPath, outPath, quality, bwmode, bwBits, yBits, cbBits, crBits, pattern, tileSize, blockSize, useZstd, useShuffle, false, zxMode, paletteName, rawPalette, rawTop16, rawShift, reconstructPalette, blockSubset); err != nil {
 		fmt.Fprintln(os.Stderr, "encode error:", err)
 		os.Exit(1)
 	}
@@ -311,7 +332,7 @@ func parseBitDepth(s, label string) (int, error) {
 	return v, nil
 }
 
-func encodeToBabe(inPath, outPath string, quality int, bwmode bool, bwBits, yBits, cbBits, crBits int, pattern string, tileSize, blockSize int, useZstd, useShuffle bool, rgbMode, zxMode bool, paletteName string, rawPalette, reconstructPalette, blockSubset bool) error {
+func encodeToBabe(inPath, outPath string, quality int, bwmode bool, bwBits, yBits, cbBits, crBits int, pattern string, tileSize, blockSize int, useZstd, useShuffle bool, rgbMode, zxMode bool, paletteName string, rawPalette, rawTop16 bool, rawShift int, reconstructPalette, blockSubset bool) error {
 	info, err := os.Stat(inPath)
 	if err != nil {
 		return err
@@ -355,6 +376,8 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, bwBits, yBit
 			ZXMode:             zxMode,
 			Palette:            paletteName,
 			RawPalette:         rawPalette,
+			RawTop16:           rawTop16,
+			RawShift:           rawShift,
 			ReconstructPalette: reconstructPalette,
 			BlockSubset:        blockSubset,
 		})
@@ -408,15 +431,15 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, bwBits, yBit
 	} else {
 		if paletteName != "" {
 			if tileSize > 0 {
-				fmt.Printf("quality=%d, mode=%s, tile=%d, block=%d, subset=%t, raw=%t, reconstruct=%t, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, paletteName, tileSize, blockSize, blockSubset, rawPalette, reconstructPalette, useZstd, useShuffle, ratio, finish)
+				fmt.Printf("quality=%d, mode=%s, tile=%d, block=%d, subset=%t, raw=%t, top16=%t, shift=%d, reconstruct=%t, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, paletteName, tileSize, blockSize, blockSubset, rawPalette, rawTop16, rawShift, reconstructPalette, useZstd, useShuffle, ratio, finish)
 			} else {
-				fmt.Printf("quality=%d, mode=%s, block=%d, subset=%t, raw=%t, reconstruct=%t, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, paletteName, blockSize, blockSubset, rawPalette, reconstructPalette, useZstd, useShuffle, ratio, finish)
+				fmt.Printf("quality=%d, mode=%s, block=%d, subset=%t, raw=%t, top16=%t, shift=%d, reconstruct=%t, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, paletteName, blockSize, blockSubset, rawPalette, rawTop16, rawShift, reconstructPalette, useZstd, useShuffle, ratio, finish)
 			}
 		} else if zxMode {
 			if tileSize > 0 {
-				fmt.Printf("quality=%d, mode=zx, tile=%d, block=%d, subset=%t, raw=%t, reconstruct=%t, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, tileSize, blockSize, blockSubset, rawPalette, reconstructPalette, useZstd, useShuffle, ratio, finish)
+				fmt.Printf("quality=%d, mode=zx, tile=%d, block=%d, subset=%t, raw=%t, top16=%t, shift=%d, reconstruct=%t, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, tileSize, blockSize, blockSubset, rawPalette, rawTop16, rawShift, reconstructPalette, useZstd, useShuffle, ratio, finish)
 			} else {
-				fmt.Printf("quality=%d, mode=zx, block=%d, subset=%t, raw=%t, reconstruct=%t, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, blockSize, blockSubset, rawPalette, reconstructPalette, useZstd, useShuffle, ratio, finish)
+				fmt.Printf("quality=%d, mode=zx, block=%d, subset=%t, raw=%t, top16=%t, shift=%d, reconstruct=%t, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, blockSize, blockSubset, rawPalette, rawTop16, rawShift, reconstructPalette, useZstd, useShuffle, ratio, finish)
 			}
 		} else if yBits == 1 && cbBits == 1 && crBits == 1 {
 			fmt.Printf("quality=%d, mode=ycb, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, useZstd, useShuffle, ratio, finish)
