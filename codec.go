@@ -424,6 +424,7 @@ type EncodeOptions struct {
 	RawPalette         bool
 	RawTop16           bool
 	RawTree            bool
+	RawTreeAdapt       bool
 	RawShift           int
 	ReconstructPalette bool
 	BlockSubset        bool
@@ -551,7 +552,7 @@ func (e *Encoder) EncodeWithOptions(img image.Image, quality int, opts EncodeOpt
 			yBits = max(1, bitsNeeded(len(chosenPalette)-1))
 			cbBits = 0
 			crBits = 0
-			quantizePaletteIndices(e.yPlane, e.cbPlane, e.crPlane, w, h, quality, chosenPalette, yPhaseX, yPhaseY, cbPhaseX, cbPhaseY, crPhaseX, crPhaseY, opts.Shuffle, true, opts.TileSize, opts.BlockSize, opts.RawPalette, opts.RawTop16, opts.RawTree, opts.RawShift, opts.ReconstructPalette, opts.BlockSubset, &e.yBits)
+			quantizePaletteIndices(e.yPlane, e.cbPlane, e.crPlane, w, h, quality, chosenPalette, yPhaseX, yPhaseY, cbPhaseX, cbPhaseY, crPhaseX, crPhaseY, opts.Shuffle, true, opts.TileSize, opts.BlockSize, opts.RawPalette, opts.RawTop16, opts.RawTree, opts.RawTreeAdapt, opts.RawShift, opts.ReconstructPalette, opts.BlockSubset, &e.yBits)
 		} else {
 			if cbBits > 0 {
 				channelsMask |= channelFlagCb
@@ -1142,7 +1143,7 @@ func paletteFromMode(zxMode bool, paletteName string, rPlane, gPlane, bPlane []u
 	return rgbPrimaryPalette
 }
 
-func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, palette [][3]uint8, rPhaseX, rPhaseY, gPhaseX, gPhaseY, bPhaseX, bPhaseY int, shuffle, adaptive bool, tileSize, blockSize int, rawMode, rawTop16, rawTree bool, rawShift int, reconstructMode, blockSubset bool, dst *bytes.Buffer) {
+func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, palette [][3]uint8, rPhaseX, rPhaseY, gPhaseX, gPhaseY, bPhaseX, bPhaseY int, shuffle, adaptive bool, tileSize, blockSize int, rawMode, rawTop16, rawTree, rawTreeAdapt bool, rawShift int, reconstructMode, blockSubset bool, dst *bytes.Buffer) {
 	dst.Reset()
 	if len(palette) < 1 {
 		palette = rgbPrimaryPalette
@@ -1313,6 +1314,29 @@ func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, p
 			bw.writeBits(uint64(idx), uint8(indexBits))
 		}
 		bw.flush()
+		if rawTreeAdapt {
+			dst.WriteByte(9) // raw palette indices as frequency-adapted tree
+			freq := make([]int, len(palette))
+			for _, idx := range pixelIdx {
+				freq[idx]++
+			}
+			order := make([]byte, len(palette))
+			for i := range order {
+				order[i] = byte(i)
+			}
+			sort.Slice(order, func(i, j int) bool {
+				fi := freq[int(order[i])]
+				fj := freq[int(order[j])]
+				if fi != fj {
+					return fi > fj
+				}
+				return order[i] < order[j]
+			})
+			dst.Write(order)
+			encodeRawIndexTreeFreq(pixelIdx, order, dst)
+			_ = canvasIdx
+			return
+		}
 		if rawTop16 && rawTree {
 			rawStream := rawBuf.Bytes()
 			bestShift := 0
@@ -3195,6 +3219,30 @@ func decodePaletteToRGBA(dst *image.RGBA, data []byte, bitDepth int, yStorageMod
 		_, _, _ = bitDepth, patternW, patternH
 		return nil
 	}
+	if submode == 9 {
+		if len(data)-pos < paletteSize {
+			return fmt.Errorf("decode: truncated raw treeadapt order")
+		}
+		order := append([]byte(nil), data[pos:pos+paletteSize]...)
+		pos += paletteSize
+		values, err := decodeRawIndexTreeFreq(data, &pos, w*h, order)
+		if err != nil {
+			return err
+		}
+		for i, idx := range values {
+			if idx < 0 || idx >= paletteSize {
+				return fmt.Errorf("decode: raw treeadapt palette index out of range")
+			}
+			p := idx * 3
+			off := (i/w)*dst.Stride + (i%w)*4
+			dst.Pix[off+0] = palette[p+0]
+			dst.Pix[off+1] = palette[p+1]
+			dst.Pix[off+2] = palette[p+2]
+			dst.Pix[off+3] = 255
+		}
+		_, _, _ = bitDepth, patternW, patternH
+		return nil
+	}
 	if submode == 3 {
 		if len(data)-pos < 2 {
 			return fmt.Errorf("decode: truncated reconstruct palette header")
@@ -3808,6 +3856,89 @@ func decodeRawIndexTree(data []byte, pos *int, count, lo, hi int) ([]int, error)
 		}
 	}
 	return out, nil
+}
+
+func encodeRawIndexTreeFreq(values []int, symbols []byte, dst *bytes.Buffer) {
+	if len(values) == 0 || len(symbols) <= 1 {
+		return
+	}
+	leftSyms, rightSyms := splitSymbolsBalanced(symbols)
+	rightSet := make(map[int]struct{}, len(rightSyms))
+	for _, s := range rightSyms {
+		rightSet[int(s)] = struct{}{}
+	}
+	plane := make([]byte, (len(values)+7)>>3)
+	leftVals := make([]int, 0, len(values))
+	rightVals := make([]int, 0, len(values))
+	for i, v := range values {
+		if _, ok := rightSet[v]; ok {
+			monoBitSet(plane, i)
+			rightVals = append(rightVals, v)
+		} else {
+			leftVals = append(leftVals, v)
+		}
+	}
+	dst.Write(plane)
+	encodeRawIndexTreeFreq(leftVals, leftSyms, dst)
+	encodeRawIndexTreeFreq(rightVals, rightSyms, dst)
+}
+
+func decodeRawIndexTreeFreq(data []byte, pos *int, count int, symbols []byte) ([]int, error) {
+	if count == 0 {
+		return nil, nil
+	}
+	if len(symbols) <= 1 {
+		out := make([]int, count)
+		for i := range out {
+			out[i] = int(symbols[0])
+		}
+		return out, nil
+	}
+	planeLen := (count + 7) >> 3
+	if len(data)-*pos < planeLen {
+		return nil, fmt.Errorf("decode: truncated raw treeadapt plane")
+	}
+	plane := data[*pos : *pos+planeLen]
+	*pos += planeLen
+	rightCount := countMonoBitsPrefix(plane, count)
+	leftCount := count - rightCount
+	leftSyms, rightSyms := splitSymbolsBalanced(symbols)
+	left, err := decodeRawIndexTreeFreq(data, pos, leftCount, leftSyms)
+	if err != nil {
+		return nil, err
+	}
+	right, err := decodeRawIndexTreeFreq(data, pos, rightCount, rightSyms)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]int, count)
+	leftPos, rightPos := 0, 0
+	for i := 0; i < count; i++ {
+		if monoBitAt(plane, i) {
+			out[i] = right[rightPos]
+			rightPos++
+		} else {
+			out[i] = left[leftPos]
+			leftPos++
+		}
+	}
+	return out, nil
+}
+
+func splitSymbolsBalanced(symbols []byte) ([]byte, []byte) {
+	if len(symbols) <= 1 {
+		return append([]byte(nil), symbols...), nil
+	}
+	split := len(symbols) / 2
+	if split <= 0 {
+		split = 1
+	}
+	if split >= len(symbols) {
+		split = len(symbols) - 1
+	}
+	left := append([]byte(nil), symbols[:split]...)
+	right := append([]byte(nil), symbols[split:]...)
+	return left, right
 }
 
 func countMonoBitsPrefix(src []byte, n int) int {
