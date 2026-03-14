@@ -152,12 +152,28 @@ func main() {
 			}
 			if strings.EqualFold(a, "adaptive") {
 				if i+1 >= len(rawArgs) {
-					fmt.Fprintln(os.Stderr, "adaptive mode requires a palette size, for example: adaptive 16")
+					fmt.Fprintln(os.Stderr, "adaptive mode requires a palette size, for example: adaptive 16 or adaptive auto [0..100]")
 					os.Exit(1)
+				}
+				if strings.EqualFold(rawArgs[i+1], "auto") {
+					paletteName = "adaptive:auto"
+					if i+2 < len(rawArgs) {
+						if pct, err := strconv.Atoi(rawArgs[i+2]); err == nil {
+							if pct < 0 || pct > 100 {
+								fmt.Fprintln(os.Stderr, "adaptive auto quality must be an integer between 0 and 100")
+								os.Exit(1)
+							}
+							paletteName = fmt.Sprintf("adaptive:auto:%d", pct)
+							i += 2
+							continue
+						}
+					}
+					i++
+					continue
 				}
 				n, err := strconv.Atoi(rawArgs[i+1])
 				if err != nil || n < 2 || n > 256 {
-					fmt.Fprintln(os.Stderr, "adaptive palette size must be an integer between 2 and 256")
+					fmt.Fprintln(os.Stderr, "adaptive palette size must be an integer between 2 and 256, or 'auto'")
 					os.Exit(1)
 				}
 				paletteName = fmt.Sprintf("adaptive:%d", n)
@@ -349,6 +365,22 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, bwBits, yBit
 	if err != nil {
 		return err
 	}
+	paletteLabel := paletteName
+	if strings.HasPrefix(strings.ToLower(paletteName), "adaptive:auto") {
+		b := img.Bounds()
+		w := b.Dx()
+		h := b.Dy()
+		rPlane := make([]uint8, w*h)
+		gPlane := make([]uint8, w*h)
+		bPlane := make([]uint8, w*h)
+		extractRGBPlanes(img, rPlane, gPlane, bPlane, true)
+		size := chooseAdaptivePaletteSizeForName(paletteName, rPlane, gPlane, bPlane, w, h)
+		if pct := adaptiveAutoPercent(paletteName); pct >= 0 && pct < 100 {
+			paletteLabel = fmt.Sprintf("adaptive:auto:%d(%d)", pct, size)
+		} else {
+			paletteLabel = fmt.Sprintf("adaptive:auto(%d)", size)
+		}
+	}
 
 	start := time.Now()
 	var enc []byte
@@ -431,9 +463,9 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, bwBits, yBit
 	} else {
 		if paletteName != "" {
 			if tileSize > 0 {
-				fmt.Printf("quality=%d, mode=%s, tile=%d, block=%d, subset=%t, raw=%t, top16=%t, shift=%d, reconstruct=%t, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, paletteName, tileSize, blockSize, blockSubset, rawPalette, rawTop16, rawShift, reconstructPalette, useZstd, useShuffle, ratio, finish)
+				fmt.Printf("quality=%d, mode=%s, tile=%d, block=%d, subset=%t, raw=%t, top16=%t, shift=%d, reconstruct=%t, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, paletteLabel, tileSize, blockSize, blockSubset, rawPalette, rawTop16, rawShift, reconstructPalette, useZstd, useShuffle, ratio, finish)
 			} else {
-				fmt.Printf("quality=%d, mode=%s, block=%d, subset=%t, raw=%t, top16=%t, shift=%d, reconstruct=%t, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, paletteName, blockSize, blockSubset, rawPalette, rawTop16, rawShift, reconstructPalette, useZstd, useShuffle, ratio, finish)
+				fmt.Printf("quality=%d, mode=%s, block=%d, subset=%t, raw=%t, top16=%t, shift=%d, reconstruct=%t, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, paletteLabel, blockSize, blockSubset, rawPalette, rawTop16, rawShift, reconstructPalette, useZstd, useShuffle, ratio, finish)
 			}
 		} else if zxMode {
 			if tileSize > 0 {

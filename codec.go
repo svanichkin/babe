@@ -1016,7 +1016,7 @@ func quantizeColorToPalette(yPlane, cbPlane, crPlane []uint8, w, h, quality, yBi
 		if specPalette := paletteFromSpec(paletteName); len(specPalette) > 0 {
 			palette = specPalette
 		} else if strings.HasPrefix(paletteName, "adaptive:") {
-			palette = buildAdaptivePalette(yPlane, cbPlane, crPlane, w, h, adaptivePaletteSize(paletteName))
+			palette = adaptivePaletteForImage(paletteName, yPlane, cbPlane, crPlane, w, h)
 		} else {
 			palette = buildCoveredPalette(paletteName, yPlane, cbPlane, crPlane, w, h)
 		}
@@ -1133,7 +1133,7 @@ func paletteFromMode(zxMode bool, paletteName string, rPlane, gPlane, bPlane []u
 		return specPalette
 	}
 	if strings.HasPrefix(paletteName, "adaptive:") {
-		return buildAdaptivePalette(rPlane, gPlane, bPlane, w, h, adaptivePaletteSize(paletteName))
+		return adaptivePaletteForImage(paletteName, rPlane, gPlane, bPlane, w, h)
 	}
 	if paletteName != "" {
 		return buildCoveredPalette(paletteName, rPlane, gPlane, bPlane, w, h)
@@ -1835,6 +1835,9 @@ func adaptivePaletteSize(name string) int {
 	if !strings.HasPrefix(name, "adaptive:") {
 		return 16
 	}
+	if strings.EqualFold(strings.TrimPrefix(name, "adaptive:"), "auto") {
+		return 16
+	}
 	n, err := strconv.Atoi(strings.TrimPrefix(name, "adaptive:"))
 	if err != nil || n < 2 {
 		return 16
@@ -1843,6 +1846,98 @@ func adaptivePaletteSize(name string) int {
 		return 256
 	}
 	return n
+}
+
+func adaptivePaletteForImage(name string, rPlane, gPlane, bPlane []uint8, w, h int) [][3]uint8 {
+	if strings.HasPrefix(strings.ToLower(strings.TrimPrefix(name, "adaptive:")), "auto") {
+		size := chooseAdaptivePaletteSizeForName(name, rPlane, gPlane, bPlane, w, h)
+		return buildAdaptivePalette(rPlane, gPlane, bPlane, w, h, size)
+	}
+	return buildAdaptivePalette(rPlane, gPlane, bPlane, w, h, adaptivePaletteSize(name))
+}
+
+func chooseAdaptivePaletteSizeForName(name string, rPlane, gPlane, bPlane []uint8, w, h int) int {
+	base := chooseAdaptivePaletteSize(rPlane, gPlane, bPlane, w, h)
+	pct := adaptiveAutoPercent(name)
+	if pct >= 100 {
+		return base
+	}
+	if pct <= 0 {
+		return 2
+	}
+	size := 2 + int(math.Round(float64(base-2)*float64(pct)/100.0))
+	if size < 2 {
+		size = 2
+	}
+	if size > base {
+		size = base
+	}
+	return size
+}
+
+func adaptiveAutoPercent(name string) int {
+	if !strings.HasPrefix(strings.ToLower(name), "adaptive:auto") {
+		return 100
+	}
+	parts := strings.Split(name, ":")
+	if len(parts) < 3 {
+		return 100
+	}
+	if len(parts) == 2 {
+		return 100
+	}
+	pct, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return 100
+	}
+	if pct < 0 {
+		return 0
+	}
+	if pct > 100 {
+		return 100
+	}
+	return pct
+}
+
+func chooseAdaptivePaletteSize(rPlane, gPlane, bPlane []uint8, w, h int) int {
+	candidates := []int{8, 12, 16, 24, 32}
+	samples := sampleImageColors(rPlane, gPlane, bPlane, w, h, 512)
+	if len(samples) == 0 {
+		return 16
+	}
+	chosen := candidates[0]
+	prevErr := math.MaxFloat64
+	for i, size := range candidates {
+		palette := buildAdaptivePalette(rPlane, gPlane, bPlane, w, h, size)
+		err := averagePaletteError(samples, palette)
+		if i == 0 {
+			chosen = size
+			prevErr = err
+			continue
+		}
+		if prevErr <= 0 {
+			break
+		}
+		improvement := (prevErr - err) / prevErr
+		if improvement >= 0.10 {
+			chosen = size
+			prevErr = err
+			continue
+		}
+		break
+	}
+	return chosen
+}
+
+func averagePaletteError(samples [][3]uint8, palette [][3]uint8) float64 {
+	if len(samples) == 0 || len(palette) == 0 {
+		return 0
+	}
+	total := 0.0
+	for _, c := range samples {
+		total += float64(nearestPaletteRGBDist2(c, palette))
+	}
+	return total / float64(len(samples))
 }
 
 func buildAdaptivePalette(rPlane, gPlane, bPlane []uint8, w, h, size int) [][3]uint8 {
