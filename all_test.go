@@ -56,6 +56,7 @@ func TestEncodeDecode_RoundTrip(t *testing.T) {
 		{name: "color_palette_spec_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
 		{name: "color_palette_spec_multi_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
 		{name: "color_adaptive_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
+		{name: "color_gray_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
 		{name: "color_ega_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
 		{name: "color_vga_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
 		{name: "color_sunset_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
@@ -126,6 +127,13 @@ func TestEncodeDecode_RoundTrip(t *testing.T) {
 					CrBits:  1,
 					Palette: "adaptive:16",
 				})
+			} else if tc.name == "color_gray_mode" {
+				comp, err = NewEncoder().EncodeWithOptions(src, tc.quality, EncodeOptions{
+					YBits:   1,
+					CbBits:  1,
+					CrBits:  1,
+					Palette: "gray:16",
+				})
 			} else if tc.name == "color_ega_mode" {
 				comp, err = NewEncoder().EncodeWithOptions(src, tc.quality, EncodeOptions{
 					YBits:   1,
@@ -174,6 +182,44 @@ func TestEncode_ImageTooSmall(t *testing.T) {
 	img := makeTestImage(1, 1)
 	if _, err := Encode(img, 0, false, 1); err != nil {
 		t.Fatalf("unexpected error for 1x1 image: %v", err)
+	}
+}
+
+func TestBuildGrayPalette(t *testing.T) {
+	palette := buildGrayPalette(4)
+	want := [][3]uint8{
+		{0, 0, 0},
+		{85, 85, 85},
+		{170, 170, 170},
+		{255, 255, 255},
+	}
+	if len(palette) != len(want) {
+		t.Fatalf("palette size mismatch: got %d want %d", len(palette), len(want))
+	}
+	for i := range want {
+		if palette[i] != want[i] {
+			t.Fatalf("palette[%d] = %v want %v", i, palette[i], want[i])
+		}
+	}
+}
+
+func TestGrayPaletteFromMode_DoesNotAddImageColors(t *testing.T) {
+	r := []uint8{255, 0, 0, 0}
+	g := []uint8{0, 255, 0, 0}
+	b := []uint8{0, 0, 255, 255}
+
+	palette := paletteFromMode(false, "gray:2", r, g, b, 2, 2)
+	want := [][3]uint8{
+		{0, 0, 0},
+		{255, 255, 255},
+	}
+	if len(palette) != len(want) {
+		t.Fatalf("palette size mismatch: got %d want %d", len(palette), len(want))
+	}
+	for i := range want {
+		if palette[i] != want[i] {
+			t.Fatalf("palette[%d] = %v want %v", i, palette[i], want[i])
+		}
 	}
 }
 

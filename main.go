@@ -18,7 +18,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 || len(os.Args) > 16 {
-		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [pattern] [decoded.png] [-z] [shuffle]\n  babe <input-image> [quality] [bright] [decoded.png] [-z] [shuffle]\n  babe <input-image> [quality] [adaptive N] [decoded.png] [-z] [-tile N] [-block] [-raw] [-top16] [-shift N] [-tree] [-treeadapt] [-reconstruct] [shuffle]\n  babe <input-image> [quality] [zx|cga|ega|vga|c64|gameboy|pico8|db16|nes|sunset|pastel|ocean|forest|<palette-spec> ...] [decoded.png] [-z] [-tile N] [-block] [-raw] [-top16] [-shift N] [-tree] [-treeadapt] [-reconstruct] [shuffle]\n  babe <input.babe> [-postfilter]\n")
+		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [pattern] [decoded.png] [-z] [shuffle]\n  babe <input-image> [quality] [bright] [decoded.png] [-z] [shuffle]\n  babe <input-image> [quality] [-adaptive N] [decoded.png] [-z] [-tile N] [-block] [-raw] [-top16] [-shift N] [-tree] [-treeadapt] [-reconstruct] [shuffle]\n  babe <input-image> [quality] [-adaptive auto [P]] [decoded.png] [-z] [-tile N] [-block] [-raw] [-top16] [-shift N] [-tree] [-treeadapt] [-reconstruct] [shuffle]\n  babe <input-image> [quality] [-gray N] [decoded.png] [-z] [-tile N] [-block] [-raw] [-top16] [-shift N] [-tree] [-treeadapt] [-reconstruct] [shuffle]\n  babe <input-image> [quality] [zx|cga|ega|vga|c64|gameboy|pico8|db16|nes|sunset|pastel|ocean|forest|<palette-spec> ...] [decoded.png] [-z] [-tile N] [-block] [-raw] [-top16] [-shift N] [-tree] [-treeadapt] [-reconstruct] [shuffle]\n  babe <input.babe> [-postfilter]\n")
 		os.Exit(1)
 	}
 
@@ -162,9 +162,9 @@ func main() {
 				zxMode = true
 				continue
 			}
-			if strings.EqualFold(a, "adaptive") {
+			if strings.EqualFold(a, "-adaptive") {
 				if i+1 >= len(rawArgs) {
-					fmt.Fprintln(os.Stderr, "adaptive mode requires a palette size, for example: adaptive 16 or adaptive auto [0..100]")
+					fmt.Fprintln(os.Stderr, "adaptive mode requires a palette size, for example: -adaptive 16 or -adaptive auto [0..100]")
 					os.Exit(1)
 				}
 				if strings.EqualFold(rawArgs[i+1], "auto") {
@@ -189,6 +189,20 @@ func main() {
 					os.Exit(1)
 				}
 				paletteName = fmt.Sprintf("adaptive:%d", n)
+				i++
+				continue
+			}
+			if strings.EqualFold(a, "-gray") {
+				if i+1 >= len(rawArgs) {
+					fmt.Fprintln(os.Stderr, "gray mode requires a palette size, for example: -gray 16")
+					os.Exit(1)
+				}
+				n, err := strconv.Atoi(rawArgs[i+1])
+				if err != nil || n < 1 || n > 256 {
+					fmt.Fprintln(os.Stderr, "gray palette size must be an integer between 1 and 256")
+					os.Exit(1)
+				}
+				paletteName = fmt.Sprintf("gray:%d", n)
 				i++
 				continue
 			}

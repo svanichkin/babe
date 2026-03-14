@@ -1134,6 +1134,9 @@ func paletteFromMode(zxMode bool, paletteName string, rPlane, gPlane, bPlane []u
 	if specPalette := paletteFromSpec(paletteName); len(specPalette) > 0 {
 		return specPalette
 	}
+	if graySize := grayPaletteSize(paletteName); graySize > 0 {
+		return buildGrayPalette(graySize)
+	}
 	if strings.HasPrefix(paletteName, "adaptive:") {
 		return adaptivePaletteForImage(paletteName, rPlane, gPlane, bPlane, w, h)
 	}
@@ -1789,6 +1792,9 @@ func namedPaletteRGB(name string) [][3]uint8 {
 	if p := paletteFromSpec(name); len(p) > 0 {
 		return p
 	}
+	if graySize := grayPaletteSize(name); graySize > 0 {
+		return buildGrayPalette(graySize)
+	}
 	switch name {
 	case "cga":
 		return cgaPalette
@@ -1821,6 +1827,34 @@ func namedPaletteRGB(name string) [][3]uint8 {
 	default:
 		return rgbPrimaryPalette
 	}
+}
+
+func grayPaletteSize(name string) int {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if !strings.HasPrefix(name, "gray:") {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimPrefix(name, "gray:"))
+	if err != nil || n < 1 || n > 256 {
+		return 0
+	}
+	return n
+}
+
+func buildGrayPalette(size int) [][3]uint8 {
+	if size < 1 {
+		size = 1
+	}
+	palette := make([][3]uint8, size)
+	if size == 1 {
+		palette[0] = [3]uint8{128, 128, 128}
+		return palette
+	}
+	for i := 0; i < size; i++ {
+		v := uint8(math.Round(float64(i) * 255.0 / float64(size-1)))
+		palette[i] = [3]uint8{v, v, v}
+	}
+	return palette
 }
 
 func paletteFromSpec(spec string) [][3]uint8 {

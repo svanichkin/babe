@@ -35,13 +35,14 @@ babe input.png 85
 babe input.png 70 3
 babe input.png 100 4:4:4
 babe input.png 100 3 1 1
-babe input.png 100 adaptive 16 out.png -z
-babe input.png 100 adaptive auto out.png -z
-babe input.png 100 adaptive auto 70 out.png -z
-babe input.png 100 adaptive 16 out.png -raw -z
-babe input.png 100 adaptive 16 out.png -raw -top16 -z
-babe input.png 100 adaptive 16 out.png -raw -tree -z
-babe input.png 100 adaptive 16 out.png -reconstruct -z
+babe input.png 100 -adaptive 16 out.png -z
+babe input.png 100 -adaptive auto out.png -z
+babe input.png 100 -adaptive auto 70 out.png -z
+babe input.png 100 -adaptive 16 out.png -raw -z
+babe input.png 100 -adaptive 16 out.png -raw -top16 -z
+babe input.png 100 -adaptive 16 out.png -raw -tree -z
+babe input.png 100 -adaptive 16 out.png -reconstruct -z
+babe input.png 100 -gray 16 out.png -z
 ```
 
 Rules:
@@ -49,9 +50,10 @@ Rules:
 - one numeric bit depth after `quality` means monochrome `bw`
 - a triplet means color `Y:Cb:Cr`
 - color triplet can be passed either as `4:4:4` or as `4 4 4`
-- `adaptive N` builds an adaptive palette with `N` colors
-- `adaptive auto` chooses the adaptive palette size automatically
-- `adaptive auto P` keeps the automatic choice but pulls it toward `2` colors, where `P=100` keeps full auto and `P=0` forces `2` colors
+- `-adaptive N` builds an adaptive palette with `N` colors
+- `-adaptive auto` chooses the adaptive palette size automatically
+- `-adaptive auto P` keeps the automatic choice but pulls it toward `2` colors, where `P=100` keeps full auto and `P=0` forces `2` colors
+- `-gray N` builds a grayscale palette with `N` shades, where `N` is in `[1..256]`
 
 Decode:
 
