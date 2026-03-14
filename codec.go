@@ -28,6 +28,11 @@ var (
 	smallBlock = 1
 	// size of the macroblock (in pixels)
 	macroBlock = 2
+
+	// codecStateMu serializes access to global codec configuration/state.
+	// The current codec implementation still uses package-level block settings
+	// and mode flags during encode/decode.
+	codecStateMu sync.Mutex
 )
 
 // current encode quality in [0..100]; used to drive macro/small decisions.
@@ -1546,6 +1551,9 @@ func (e *Encoder) encodeChannelReuse(plane []uint8, stride, w4, h4, fullW, fullH
 }
 
 func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, error) {
+	codecStateMu.Lock()
+	defer codecStateMu.Unlock()
+
 	encodeBW = bwmode
 
 	if err := setBlocksForQuality(quality); err != nil {
@@ -1748,168 +1756,8 @@ func (e *Encoder) EncodeTo(w io.Writer, img image.Image, quality int, bwmode boo
 // Encode runs the BABE encoder with three fully independent channel streams (Y, Cb, Cr).
 // Each channel has its own block list, size stream, pattern stream, and FG/BG levels.
 func Encode(img image.Image, quality int, bwmode bool) ([]byte, error) {
-	encodeBW = bwmode
-
-	if err := setBlocksForQuality(quality); err != nil {
-		return nil, err
-	}
-
-	yPlane, cbPlane, crPlane, w, h := extractYCbCrPlanes(img)
-
-	// Decide which channels will be stored. Y is always present; Cb/Cr
-	// may be omitted in grayscale mode.
-	channelsMask := byte(channelFlagY)
-	if !encodeBW {
-		channelsMask |= channelFlagCb | channelFlagCr
-	}
-
-	var raw bytes.Buffer
-	bw := bufio.NewWriter(&raw)
-
-	w4 := (w / smallBlock) * smallBlock
-	h4 := (h / smallBlock) * smallBlock
-	if w4 == 0 || h4 == 0 {
-		return nil, fmt.Errorf("image too small for %dx%d blocks: %dx%d", smallBlock, smallBlock, w, h)
-	}
-	fullW := (w4 / macroBlock) * macroBlock
-	fullH := (h4 / macroBlock) * macroBlock
-
-	if macroBlock < smallBlock || macroBlock%smallBlock != 0 {
-		return nil, fmt.Errorf("macroBlock (%d) must be >= smallBlock (%d) and a multiple of it",
-			macroBlock, smallBlock)
-	}
-	useMacro := macroBlock > smallBlock
-
-	// --- Write header ---
-	if _, err := bw.WriteString(codec); err != nil {
-		return nil, err
-	}
-	if err := writeU16BE(bw, uint16(smallBlock)); err != nil {
-		return nil, err
-	}
-	if err := writeU16BE(bw, uint16(macroBlock)); err != nil {
-		return nil, err
-	}
-	// channels mask: which Y/Cb/Cr planes are stored.
-	if err := bw.WriteByte(channelsMask); err != nil {
-		return nil, err
-	}
-	if err := writeU32BE(bw, uint32(w)); err != nil {
-		return nil, err
-	}
-	if err := writeU32BE(bw, uint32(h)); err != nil {
-		return nil, err
-	}
-
-	// --- Encode channel(s) depending on grayscale mode ---
-	type channelResult struct {
-		blockCount   uint32
-		sizeBytes    []byte
-		typeBytes    []byte
-		patternBytes []byte
-		fgVals       []uint8
-		bgVals       []uint8
-		err          error
-	}
-
-	var wg sync.WaitGroup
-
-	type channelSpec struct {
-		id    int
-		plane []uint8
-	}
-
-	var channels []channelSpec
-	// Y is always present.
-	channels = append(channels, channelSpec{id: chY, plane: yPlane})
-	// Cb/Cr are stored only if not in grayscale mode.
-	if !encodeBW {
-		channels = append(channels, channelSpec{id: chCb, plane: cbPlane})
-		channels = append(channels, channelSpec{id: chCr, plane: crPlane})
-	}
-
-	results := make([]channelResult, len(channels))
-
-	for i := range channels {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			ch := channels[i]
-			blockCount, sizeBytes, typeBytes, patternBytes, fgVals, bgVals, err := encodeChannel(ch.plane, w, w4, h4, fullW, fullH, useMacro)
-			results[i] = channelResult{
-				blockCount:   blockCount,
-				sizeBytes:    sizeBytes,
-				typeBytes:    typeBytes,
-				patternBytes: patternBytes,
-				fgVals:       fgVals,
-				bgVals:       bgVals,
-				err:          err,
-			}
-		}(i)
-	}
-
-	wg.Wait()
-
-	// Write channels in fixed order of IDs: always Y first, then optional Cb/Cr.
-	// Solid blocks store only FG; BG is implicit == FG. Pattern blocks store both FG and BG.
-	for i := range channels {
-		res := results[i]
-		if res.err != nil {
-			return nil, res.err
-		}
-		blockCount := res.blockCount
-		// number of blocks for this channel
-		if err := writeU32BE(bw, blockCount); err != nil {
-			return nil, err
-		}
-		// write size stream for this channel
-		if err := writeU32BE(bw, uint32(len(res.sizeBytes))); err != nil {
-			return nil, err
-		}
-		if _, err := bw.Write(res.sizeBytes); err != nil {
-			return nil, err
-		}
-		// write type stream for this channel
-		if err := writeU32BE(bw, uint32(len(res.typeBytes))); err != nil {
-			return nil, err
-		}
-		if _, err := bw.Write(res.typeBytes); err != nil {
-			return nil, err
-		}
-		// write pattern stream for this channel
-		if err := writeU32BE(bw, uint32(len(res.patternBytes))); err != nil {
-			return nil, err
-		}
-		if _, err := bw.Write(res.patternBytes); err != nil {
-			return nil, err
-		}
-		fgLen := uint32(len(res.fgVals))
-		if err := writeU32BE(bw, fgLen); err != nil {
-			return nil, err
-		}
-		if err := writeDeltaPackedBytes(bw, res.fgVals); err != nil {
-			return nil, err
-		}
-
-		bgLen := uint32(len(res.bgVals))
-		if err := writeU32BE(bw, bgLen); err != nil {
-			return nil, err
-		}
-		if err := writeDeltaPackedBytes(bw, res.bgVals); err != nil {
-			return nil, err
-		}
-	}
-
-	if err := bw.Flush(); err != nil {
-		return nil, err
-	}
-	rawBytes := raw.Bytes()
-	comp, err := compressZstd(rawBytes)
-	if err != nil {
-		return nil, fmt.Errorf("zstd encode: %w", err)
-	}
-
-	return comp, nil
+	e := NewEncoder()
+	return e.Encode(img, quality, bwmode)
 }
 
 func readPatternComposite(br *bitReader, bw, bh int) (uint64, error) {
@@ -3303,6 +3151,9 @@ func (d *Decoder) decodeChannelInto(data []byte, imgW, imgH int, scratch *decode
 }
 
 func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) {
+	codecStateMu.Lock()
+	defer codecStateMu.Unlock()
+
 	if d.zdec == nil {
 		d.zdec = mustNewZstdDecoder()
 	}
