@@ -423,6 +423,7 @@ type EncodeOptions struct {
 	Palette            string
 	RawPalette         bool
 	RawTop16           bool
+	RawTree            bool
 	RawShift           int
 	ReconstructPalette bool
 	BlockSubset        bool
@@ -550,7 +551,7 @@ func (e *Encoder) EncodeWithOptions(img image.Image, quality int, opts EncodeOpt
 			yBits = max(1, bitsNeeded(len(chosenPalette)-1))
 			cbBits = 0
 			crBits = 0
-			quantizePaletteIndices(e.yPlane, e.cbPlane, e.crPlane, w, h, quality, chosenPalette, yPhaseX, yPhaseY, cbPhaseX, cbPhaseY, crPhaseX, crPhaseY, opts.Shuffle, true, opts.TileSize, opts.BlockSize, opts.RawPalette, opts.RawTop16, opts.RawShift, opts.ReconstructPalette, opts.BlockSubset, &e.yBits)
+			quantizePaletteIndices(e.yPlane, e.cbPlane, e.crPlane, w, h, quality, chosenPalette, yPhaseX, yPhaseY, cbPhaseX, cbPhaseY, crPhaseX, crPhaseY, opts.Shuffle, true, opts.TileSize, opts.BlockSize, opts.RawPalette, opts.RawTop16, opts.RawTree, opts.RawShift, opts.ReconstructPalette, opts.BlockSubset, &e.yBits)
 		} else {
 			if cbBits > 0 {
 				channelsMask |= channelFlagCb
@@ -1141,7 +1142,7 @@ func paletteFromMode(zxMode bool, paletteName string, rPlane, gPlane, bPlane []u
 	return rgbPrimaryPalette
 }
 
-func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, palette [][3]uint8, rPhaseX, rPhaseY, gPhaseX, gPhaseY, bPhaseX, bPhaseY int, shuffle, adaptive bool, tileSize, blockSize int, rawMode, rawTop16 bool, rawShift int, reconstructMode, blockSubset bool, dst *bytes.Buffer) {
+func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, palette [][3]uint8, rPhaseX, rPhaseY, gPhaseX, gPhaseY, bPhaseX, bPhaseY int, shuffle, adaptive bool, tileSize, blockSize int, rawMode, rawTop16, rawTree bool, rawShift int, reconstructMode, blockSubset bool, dst *bytes.Buffer) {
 	dst.Reset()
 	if len(palette) < 1 {
 		palette = rgbPrimaryPalette
@@ -1312,6 +1313,61 @@ func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, p
 			bw.writeBits(uint64(idx), uint8(indexBits))
 		}
 		bw.flush()
+		if rawTop16 && rawTree {
+			rawStream := rawBuf.Bytes()
+			bestShift := 0
+			bestSize := int(^uint(0) >> 1)
+			var bestTopA [16]byte
+			var bestPrefix byte
+			var bestSuffix byte
+			var bestMaskA []byte
+			var bestIDsA []byte
+			var bestTree []byte
+			startShift := 0
+			endShift := 7
+			if rawShift >= 0 {
+				startShift = rawShift
+				endShift = rawShift
+			}
+			for shift := startShift; shift <= endShift; shift++ {
+				byteStream := packShiftedBytes(rawStream, w*h*indexBits, shift)
+				topA, maskA, idsA, otherA := splitTop16Stream(byteStream)
+				otherVals := make([]int, len(otherA))
+				for i, b := range otherA {
+					otherVals[i] = int(b)
+				}
+				var tree bytes.Buffer
+				encodeRawIndexTree(otherVals, 0, 256, &tree)
+				size := len(maskA) + len(idsA) + tree.Len()
+				if size < bestSize {
+					bestSize = size
+					bestShift = shift
+					bestTopA = topA
+					bestPrefix = gatherPackedBits(rawStream, 0, shift)
+					suffixCount := (w*h*indexBits - shift) & 7
+					bestSuffix = gatherPackedBits(rawStream, w*h*indexBits-suffixCount, suffixCount)
+					bestMaskA = append(bestMaskA[:0], maskA...)
+					bestIDsA = append(bestIDsA[:0], idsA...)
+					bestTree = append(bestTree[:0], tree.Bytes()...)
+				}
+			}
+			dst.WriteByte(8) // raw shifted top16 + tree residual
+			dst.WriteByte(byte(bestShift))
+			dst.WriteByte(bestPrefix)
+			dst.WriteByte(bestSuffix)
+			dst.Write(bestTopA[:])
+			dst.Write(bestMaskA)
+			dst.Write(bestIDsA)
+			dst.Write(bestTree)
+			_ = canvasIdx
+			return
+		}
+		if rawTree {
+			dst.WriteByte(7) // raw palette indices as binary range tree
+			encodeRawIndexTree(pixelIdx, 0, len(palette), dst)
+			_ = canvasIdx
+			return
+		}
 		if rawTop16 {
 			rawStream := rawBuf.Bytes()
 			shift, topA, prefixBits, suffixBits, stream := encodeShiftedTop16Stream(rawStream, w*h*indexBits, rawShift)
@@ -3017,6 +3073,128 @@ func decodePaletteToRGBA(dst *image.RGBA, data []byte, bitDepth int, yStorageMod
 		_, _, _ = bitDepth, patternW, patternH
 		return nil
 	}
+	if submode == 7 {
+		values, err := decodeRawIndexTree(data, &pos, w*h, 0, paletteSize)
+		if err != nil {
+			return err
+		}
+		for i, idx := range values {
+			if idx < 0 || idx >= paletteSize {
+				return fmt.Errorf("decode: raw tree palette index out of range")
+			}
+			p := idx * 3
+			off := (i/w)*dst.Stride + (i%w)*4
+			dst.Pix[off+0] = palette[p+0]
+			dst.Pix[off+1] = palette[p+1]
+			dst.Pix[off+2] = palette[p+2]
+			dst.Pix[off+3] = 255
+		}
+		_, _, _ = bitDepth, patternW, patternH
+		return nil
+	}
+	if submode == 8 {
+		indexBits := bitsNeeded(paletteSize - 1)
+		if indexBits < 1 {
+			indexBits = 1
+		}
+		totalBits := w * h * indexBits
+		if len(data)-pos < 19 {
+			return fmt.Errorf("decode: truncated raw top16 tree header")
+		}
+		shift := int(data[pos])
+		pos++
+		prefixBits := data[pos]
+		pos++
+		suffixBits := data[pos]
+		pos++
+		if shift < 0 || shift > 7 {
+			return fmt.Errorf("decode: invalid raw top16 tree shift")
+		}
+		var topA [16]byte
+		copy(topA[:], data[pos:pos+16])
+		pos += 16
+		byteCount := 0
+		if totalBits > shift {
+			byteCount = (totalBits - shift) / 8
+		}
+		maskBytes := (byteCount + 7) >> 3
+		if len(data)-pos < maskBytes {
+			return fmt.Errorf("decode: truncated raw top16 tree mask")
+		}
+		maskA := data[pos : pos+maskBytes]
+		pos += maskBytes
+		topCountA := 0
+		for i := 0; i < byteCount; i++ {
+			if monoBitAt(maskA, i) {
+				topCountA++
+			}
+		}
+		idBytesA := (topCountA*4 + 7) >> 3
+		if len(data)-pos < idBytesA {
+			return fmt.Errorf("decode: truncated raw top16 tree id stream")
+		}
+		idReaderA := newBitReader(data[pos : pos+idBytesA])
+		pos += idBytesA
+		otherCountA := byteCount - topCountA
+		otherVals, err := decodeRawIndexTree(data, &pos, otherCountA, 0, 256)
+		if err != nil {
+			return err
+		}
+		byteStream := make([]byte, byteCount)
+		otherPos := 0
+		for i := 0; i < byteCount; i++ {
+			if monoBitAt(maskA, i) {
+				v, err := idReaderA.readBits(4)
+				if err != nil {
+					return fmt.Errorf("decode: truncated raw top16 tree symbol")
+				}
+				byteStream[i] = topA[int(v)]
+			} else {
+				byteStream[i] = byte(otherVals[otherPos])
+				otherPos++
+			}
+		}
+		rawBits := make([]byte, (totalBits+7)>>3)
+		for i := 0; i < shift; i++ {
+			if (prefixBits & (1 << (7 - i))) != 0 {
+				monoBitSet(rawBits, i)
+			}
+		}
+		for i, b := range byteStream {
+			base := shift + i*8
+			for j := 0; j < 8; j++ {
+				if (b & (1 << (7 - j))) != 0 {
+					monoBitSet(rawBits, base+j)
+				}
+			}
+		}
+		suffixCount := (totalBits - shift) & 7
+		suffixStart := totalBits - suffixCount
+		for i := 0; i < suffixCount; i++ {
+			if (suffixBits & (1 << (7 - i))) != 0 {
+				monoBitSet(rawBits, suffixStart+i)
+			}
+		}
+		br := newBitReader(rawBits)
+		pixels := w * h
+		for i := 0; i < pixels; i++ {
+			idx, err := br.readBits(uint8(indexBits))
+			if err != nil {
+				return fmt.Errorf("decode: truncated raw palette index stream")
+			}
+			if int(idx) >= paletteSize {
+				return fmt.Errorf("decode: raw palette index out of range")
+			}
+			p := int(idx) * 3
+			off := (i/w)*dst.Stride + (i%w)*4
+			dst.Pix[off+0] = palette[p+0]
+			dst.Pix[off+1] = palette[p+1]
+			dst.Pix[off+2] = palette[p+2]
+			dst.Pix[off+3] = 255
+		}
+		_, _, _ = bitDepth, patternW, patternH
+		return nil
+	}
 	if submode == 3 {
 		if len(data)-pos < 2 {
 			return fmt.Errorf("decode: truncated reconstruct palette header")
@@ -3567,6 +3745,79 @@ func monoBitSet(dst []byte, idx int) {
 	byteIdx := idx >> 3
 	shift := 7 - uint(idx&7)
 	dst[byteIdx] |= 1 << shift
+}
+
+func encodeRawIndexTree(values []int, lo, hi int, dst *bytes.Buffer) {
+	if len(values) == 0 || hi-lo <= 1 {
+		return
+	}
+	mid := lo + (hi-lo)/2
+	plane := make([]byte, (len(values)+7)>>3)
+	left := make([]int, 0, len(values))
+	right := make([]int, 0, len(values))
+	for i, v := range values {
+		if v >= mid {
+			monoBitSet(plane, i)
+			right = append(right, v)
+		} else {
+			left = append(left, v)
+		}
+	}
+	dst.Write(plane)
+	encodeRawIndexTree(left, lo, mid, dst)
+	encodeRawIndexTree(right, mid, hi, dst)
+}
+
+func decodeRawIndexTree(data []byte, pos *int, count, lo, hi int) ([]int, error) {
+	if count == 0 {
+		return nil, nil
+	}
+	if hi-lo <= 1 {
+		out := make([]int, count)
+		for i := range out {
+			out[i] = lo
+		}
+		return out, nil
+	}
+	planeLen := (count + 7) >> 3
+	if len(data)-*pos < planeLen {
+		return nil, fmt.Errorf("decode: truncated raw tree plane")
+	}
+	plane := data[*pos : *pos+planeLen]
+	*pos += planeLen
+	mid := lo + (hi-lo)/2
+	rightCount := countMonoBitsPrefix(plane, count)
+	leftCount := count - rightCount
+	left, err := decodeRawIndexTree(data, pos, leftCount, lo, mid)
+	if err != nil {
+		return nil, err
+	}
+	right, err := decodeRawIndexTree(data, pos, rightCount, mid, hi)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]int, count)
+	leftPos, rightPos := 0, 0
+	for i := 0; i < count; i++ {
+		if monoBitAt(plane, i) {
+			out[i] = right[rightPos]
+			rightPos++
+		} else {
+			out[i] = left[leftPos]
+			leftPos++
+		}
+	}
+	return out, nil
+}
+
+func countMonoBitsPrefix(src []byte, n int) int {
+	c := 0
+	for i := 0; i < n; i++ {
+		if monoBitAt(src, i) {
+			c++
+		}
+	}
+	return c
 }
 
 func unpackMonoPatternGrid(data []byte, w, h, patternW, patternH int, low, high uint8) ([]uint8, error) {
