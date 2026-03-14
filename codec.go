@@ -791,6 +791,55 @@ func canUseBigBlockChannel(plane []uint8, stride, height, x0, y0 int, spread int
 // - computes FG/BG levels
 // - returns whether a bi-level pattern is actually needed (FG != BG)
 // - writes pattern bits to pw only when needed
+func writePatternComposite(pw *bitWriter, bits uint64, bw, bh int) {
+	if pw == nil {
+		return
+	}
+	if bw == 6 && bh == 6 && smallBlock == 3 && macroBlock == 6 {
+		const child = 3
+		for qy := 0; qy < 2; qy++ {
+			for qx := 0; qx < 2; qx++ {
+				var sub uint64
+				for yy := 0; yy < child; yy++ {
+					for xx := 0; xx < child; xx++ {
+						srcY := qy*child + yy
+						srcX := qx*child + xx
+						srcShift := 35 - (srcY*6 + srcX)
+						sub <<= 1
+						if ((bits >> srcShift) & 1) != 0 {
+							sub |= 1
+						}
+					}
+				}
+				pw.writeBits(sub, 9)
+			}
+		}
+		return
+	}
+	if bw == 8 && bh == 8 && smallBlock == 4 && macroBlock == 8 {
+		const child = 4
+		for qy := 0; qy < 2; qy++ {
+			for qx := 0; qx < 2; qx++ {
+				var sub uint64
+				for yy := 0; yy < child; yy++ {
+					for xx := 0; xx < child; xx++ {
+						srcY := qy*child + yy
+						srcX := qx*child + xx
+						srcShift := 63 - (srcY*8 + srcX)
+						sub <<= 1
+						if ((bits >> srcShift) & 1) != 0 {
+							sub |= 1
+						}
+					}
+				}
+				pw.writeBits(sub, 16)
+			}
+		}
+		return
+	}
+	pw.writeBits(bits, uint8(bw*bh))
+}
+
 func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh int, pw *bitWriter) (uint8, uint8, bool, error) {
 	total := bw * bh
 	if total <= 0 {
@@ -885,9 +934,7 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh int, pw *bit
 		if fg == bg {
 			return fg, bg, false, nil
 		}
-		if pw != nil {
-			pw.writeBits(bits, 4)
-		}
+		writePatternComposite(pw, bits, 2, 2)
 		return fg, bg, true, nil
 	}
 
@@ -937,9 +984,7 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh int, pw *bit
 	if fg == bg {
 		return fg, bg, false, nil
 	}
-	if pw != nil {
-		pw.writeBits(bits, uint8(total))
-	}
+	writePatternComposite(pw, bits, bw, bh)
 	return fg, bg, true, nil
 }
 
@@ -1867,16 +1912,90 @@ func Encode(img image.Image, quality int, bwmode bool) ([]byte, error) {
 	return comp, nil
 }
 
+func readPatternComposite(br *bitReader, bw, bh int) (uint64, error) {
+	if bw == 6 && bh == 6 && smallBlock == 3 && macroBlock == 6 {
+		var out uint64
+		for qy := 0; qy < 2; qy++ {
+			for qx := 0; qx < 2; qx++ {
+				subBits, err := br.readBits(9)
+				if err != nil {
+					return 0, err
+				}
+				for yy := 0; yy < 3; yy++ {
+					for xx := 0; xx < 3; xx++ {
+						srcShift := 8 - (yy*3 + xx)
+						dstY := qy*3 + yy
+						dstX := qx*3 + xx
+						dstShift := 35 - (dstY*6 + dstX)
+						if ((subBits >> srcShift) & 1) != 0 {
+							out |= uint64(1) << dstShift
+						}
+					}
+				}
+			}
+		}
+		return out, nil
+	}
+	if bw == 8 && bh == 8 && smallBlock == 4 && macroBlock == 8 {
+		var out uint64
+		for qy := 0; qy < 2; qy++ {
+			for qx := 0; qx < 2; qx++ {
+				sub, err := br.readBits(8)
+				if err != nil {
+					return 0, err
+				}
+				sub2, err := br.readBits(8)
+				if err != nil {
+					return 0, err
+				}
+				subBits := (uint16(sub) << 8) | uint16(sub2)
+				for yy := 0; yy < 4; yy++ {
+					for xx := 0; xx < 4; xx++ {
+						srcShift := 15 - (yy*4 + xx)
+						dstY := qy*4 + yy
+						dstX := qx*4 + xx
+						dstShift := 63 - (dstY*8 + dstX)
+						if ((subBits >> srcShift) & 1) != 0 {
+							out |= uint64(1) << dstShift
+						}
+					}
+				}
+			}
+		}
+		return out, nil
+	}
+	if bw*bh <= 8 {
+		v, err := br.readBits(uint8(bw * bh))
+		return uint64(v), err
+	}
+	var out uint64
+	remaining := bw * bh
+	for remaining > 0 {
+		chunk := 8
+		if remaining < chunk {
+			chunk = remaining
+		}
+		part, err := br.readBits(uint8(chunk))
+		if err != nil {
+			return 0, err
+		}
+		out = (out << chunk) | uint64(part)
+		remaining -= chunk
+	}
+	return out, nil
+}
+
 // drawBlockPlane decodes a single block for one channel into a planar buffer.
 func drawBlockPlane(plane []uint8, stride int, x0, y0, bw, bh int, br *bitReader, fg, bg uint8) error {
+	pattern, err := readPatternComposite(br, bw, bh)
+	if err != nil {
+		return err
+	}
 	for yy := 0; yy < bh; yy++ {
 		for xx := 0; xx < bw; xx++ {
-			bit, err := br.readBit()
-			if err != nil {
-				return err
-			}
 			val := bg
-			if bit {
+			shift := bw*bh - 1 - (yy*bw + xx)
+			if ((pattern >> shift) & 1) != 0 {
 				val = fg
 			}
 			idx := (y0+yy)*stride + (x0 + xx)
@@ -1904,16 +2023,16 @@ func fillBlockPlane(plane []uint8, stride int, x0, y0, bw, bh int, val uint8) er
 }
 
 func drawBlockPix(pix []byte, strideBytes int, x0, y0, bw, bh int, br *bitReader, fg, bg uint8, channelOffset int) error {
+	pattern, err := readPatternComposite(br, bw, bh)
+	if err != nil {
+		return err
+	}
 	if bw == 1 && bh == 1 {
-		bit, err := br.readBit()
-		if err != nil {
-			return err
-		}
 		o := y0*strideBytes + x0*4 + channelOffset
 		if o < 0 || o >= len(pix) {
 			return fmt.Errorf("drawBlockPix: index out of range")
 		}
-		if bit {
+		if pattern != 0 {
 			pix[o] = fg
 		} else {
 			pix[o] = bg
@@ -1922,10 +2041,7 @@ func drawBlockPix(pix []byte, strideBytes int, x0, y0, bw, bh int, br *bitReader
 	}
 
 	if bw == 2 && bh == 2 {
-		bits, err := br.readBits(4)
-		if err != nil {
-			return err
-		}
+		bits := uint8(pattern)
 
 		row0 := y0*strideBytes + x0*4 + channelOffset
 		row1 := row0 + strideBytes
@@ -1964,12 +2080,9 @@ func drawBlockPix(pix []byte, strideBytes int, x0, y0, bw, bh int, br *bitReader
 	for yy := 0; yy < bh; yy++ {
 		row := (y0+yy)*strideBytes + x0*4 + channelOffset
 		for xx := 0; xx < bw; xx++ {
-			bit, err := br.readBit()
-			if err != nil {
-				return err
-			}
 			val := bg
-			if bit {
+			shift := bw*bh - 1 - (yy*bw + xx)
+			if ((pattern >> shift) & 1) != 0 {
 				val = fg
 			}
 			o := row + xx*4
