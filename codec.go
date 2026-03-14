@@ -1599,10 +1599,15 @@ func readPatternComposite(br *bitReader, bw, bh int) (uint64, error) {
 		var out uint64
 		for qy := 0; qy < 2; qy++ {
 			for qx := 0; qx < 2; qx++ {
-				subBits, err := br.readBits(9)
+				hi, err := br.readBits(8)
 				if err != nil {
 					return 0, err
 				}
+				lo, err := br.readBits(1)
+				if err != nil {
+					return 0, err
+				}
+				subBits := (uint16(hi) << 1) | uint16(lo)
 				for yy := 0; yy < 3; yy++ {
 					for xx := 0; xx < 3; xx++ {
 						srcShift := 8 - (yy*3 + xx)

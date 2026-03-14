@@ -262,6 +262,63 @@ func BenchmarkCodecs(b *testing.B) {
 	})
 }
 
+func benchmarkBABEQuality(b *testing.B, quality int, bw bool) {
+	img := loadTestImage(b)
+	enc := NewEncoder()
+	dec := NewDecoder()
+	var buf bytes.Buffer
+
+	if testing.Verbose() {
+		b.Logf("quality=%d bw=%v cpus=%d gomaxprocs=%d goroutines=%d", quality, bw, runtime.NumCPU(), runtime.GOMAXPROCS(0), runtime.NumGoroutine())
+
+		startEnc := time.Now()
+		buf.Reset()
+		if err := enc.EncodeTo(&buf, img, quality, bw); err != nil {
+			b.Fatalf("encode failed: %v", err)
+		}
+		encBytes := buf.Bytes()
+		encTime := time.Since(startEnc)
+
+		startDec := time.Now()
+		if _, err := dec.Decode(encBytes, false); err != nil {
+			b.Fatalf("decode failed: %v", err)
+		}
+		decTime := time.Since(startDec)
+
+		b.Logf("encode=%v decode=%v size=%d bytes", encTime, decTime, len(encBytes))
+	}
+
+	benchmarkEncodeDecode(b,
+		func() ([]byte, error) {
+			buf.Reset()
+			if err := enc.EncodeTo(&buf, img, quality, bw); err != nil {
+				return nil, err
+			}
+			return buf.Bytes(), nil
+		},
+		func(encBytes []byte) error {
+			_, err := dec.Decode(encBytes, false)
+			return err
+		},
+	)
+}
+
+func BenchmarkBABEQualitySteps(b *testing.B) {
+	for _, quality := range []int{0, 20, 40, 60, 80} {
+		b.Run(fmt.Sprintf("Q%d", quality), func(b *testing.B) {
+			benchmarkBABEQuality(b, quality, false)
+		})
+	}
+}
+
+func BenchmarkBABEQualityStepsBW(b *testing.B) {
+	for _, quality := range []int{0, 20, 40, 60, 80} {
+		b.Run(fmt.Sprintf("Q%d_BW", quality), func(b *testing.B) {
+			benchmarkBABEQuality(b, quality, true)
+		})
+	}
+}
+
 // -----------------------------
 // Summary table (single output)
 // -----------------------------
