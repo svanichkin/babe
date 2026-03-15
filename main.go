@@ -16,8 +16,8 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 || len(os.Args) > 4 {
-		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw]\n  babe <input.babe> [-postfilter]\n  (bw flag can appear anywhere after the filename)\n")
+	if len(os.Args) < 2 || len(os.Args) > 5 {
+		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png]\n  babe <input.babe> [-postfilter]\n  (bw flag and decoded.png can appear anywhere after quality)\n")
 		os.Exit(1)
 	}
 
@@ -43,6 +43,7 @@ func main() {
 
 	// Otherwise: encode image → .babe with default or provided quality
 	quality := 70
+	encodeArgs := os.Args[2:]
 	if len(os.Args) >= 3 {
 		q, err := strconv.Atoi(os.Args[2])
 		if err != nil {
@@ -54,13 +55,18 @@ func main() {
 			os.Exit(1)
 		}
 		quality = q
+		encodeArgs = os.Args[3:]
 	}
 
 	bwmode := false
-	for _, a := range os.Args[2:] {
+	decodeOutPath := ""
+	for _, a := range encodeArgs {
 		if a == "bw" {
 			bwmode = true
-			break
+			continue
+		}
+		if strings.EqualFold(filepath.Ext(a), ".png") {
+			decodeOutPath = a
 		}
 	}
 
@@ -68,6 +74,12 @@ func main() {
 	if err := encodeToBabe(inputPath, outPath, quality, bwmode); err != nil {
 		fmt.Fprintln(os.Stderr, "encode error:", err)
 		os.Exit(1)
+	}
+	if decodeOutPath != "" {
+		if err := decodeBabe(outPath, decodeOutPath, false, false); err != nil {
+			fmt.Fprintln(os.Stderr, "decode error:", err)
+			os.Exit(1)
+		}
 	}
 }
 
