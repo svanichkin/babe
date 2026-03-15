@@ -18,7 +18,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 || len(os.Args) > 16 {
-		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [pattern] [decoded.png] [-z] [shuffle]\n  babe <input-image> [quality] [bright] [decoded.png] [-z] [shuffle]\n  babe <input-image> [quality] [-adaptive N] [decoded.png] [-z] [-tile N] [-block] [-raw] [-top16] [-shift N] [-tree] [-treeadapt] [-reconstruct] [shuffle]\n  babe <input-image> [quality] [-adaptive auto [P]] [decoded.png] [-z] [-tile N] [-block] [-raw] [-top16] [-shift N] [-tree] [-treeadapt] [-reconstruct] [shuffle]\n  babe <input-image> [quality] [-gray N] [decoded.png] [-z] [-tile N] [-block] [-raw] [-top16] [-shift N] [-tree] [-treeadapt] [-reconstruct] [shuffle]\n  babe <input-image> [quality] [zx|cga|ega|vga|c64|gameboy|pico8|db16|nes|sunset|pastel|ocean|forest|<palette-spec> ...] [decoded.png] [-z] [-tile N] [-block] [-raw] [-top16] [-shift N] [-tree] [-treeadapt] [-reconstruct] [shuffle]\n  babe <input.babe> [-postfilter]\n")
+		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [pattern] [decoded.png] [-z] [shuffle]\n  babe <input-image> [quality] [bright] [decoded.png] [-z] [shuffle]\n  babe <input-image> [quality] [-color N] [decoded.png] [-z] [-tile N] [-block] [-raw] [-top16] [-shift N] [-tree] [-treeadapt] [-reconstruct] [shuffle]\n  babe <input-image> [quality] [-color auto [P]] [decoded.png] [-z] [-tile N] [-block] [-raw] [-top16] [-shift N] [-tree] [-treeadapt] [-reconstruct] [shuffle]\n  babe <input-image> [quality] [-gray N] [decoded.png] [-z] [-tile N] [-block] [-raw] [-top16] [-shift N] [-tree] [-treeadapt] [-reconstruct] [shuffle]\n  babe <input-image> [quality] [zx|cga|ega|vga|c64|gameboy|pico8|db16|nes|sunset|pastel|ocean|forest|<palette-spec> ...] [decoded.png] [-z] [-tile N] [-block] [-raw] [-top16] [-shift N] [-tree] [-treeadapt] [-reconstruct] [shuffle]\n  babe <input.babe> [-postfilter]\n")
 		os.Exit(1)
 	}
 
@@ -162,9 +162,9 @@ func main() {
 				zxMode = true
 				continue
 			}
-			if strings.EqualFold(a, "-adaptive") {
+			if strings.EqualFold(a, "-color") || strings.EqualFold(a, "-adaptive") {
 				if i+1 >= len(rawArgs) {
-					fmt.Fprintln(os.Stderr, "adaptive mode requires a palette size, for example: -adaptive 16 or -adaptive auto [0..100]")
+					fmt.Fprintln(os.Stderr, "color mode requires a palette size, for example: -color 16 or -color auto [0..100]")
 					os.Exit(1)
 				}
 				if strings.EqualFold(rawArgs[i+1], "auto") {
@@ -172,7 +172,7 @@ func main() {
 					if i+2 < len(rawArgs) {
 						if pct, err := strconv.Atoi(rawArgs[i+2]); err == nil {
 							if pct < 0 || pct > 100 {
-								fmt.Fprintln(os.Stderr, "adaptive auto quality must be an integer between 0 and 100")
+								fmt.Fprintln(os.Stderr, "color auto quality must be an integer between 0 and 100")
 								os.Exit(1)
 							}
 							paletteName = fmt.Sprintf("adaptive:auto:%d", pct)
@@ -185,7 +185,7 @@ func main() {
 				}
 				n, err := strconv.Atoi(rawArgs[i+1])
 				if err != nil || n < 2 || n > 256 {
-					fmt.Fprintln(os.Stderr, "adaptive palette size must be an integer between 2 and 256, or 'auto'")
+					fmt.Fprintln(os.Stderr, "color palette size must be an integer between 2 and 256, or 'auto'")
 					os.Exit(1)
 				}
 				paletteName = fmt.Sprintf("adaptive:%d", n)
@@ -465,6 +465,12 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, bwBits, yBit
 			patternCount = count
 		}
 	}
+	colorCount := 0
+	if !bwmode && paletteName == "" && !zxMode {
+		if count, err := inspectImageColorCount(enc); err == nil {
+			colorCount = count
+		}
+	}
 
 	encSize := int64(len(enc))
 	ratio := float64(encSize) / float64(inSize)
@@ -502,9 +508,17 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, bwBits, yBit
 				fmt.Printf("quality=%d, mode=zx, block=%d, subset=%t, raw=%t, top16=%t, tree=%t, treeadapt=%t, shift=%d, reconstruct=%t, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, blockSize, blockSubset, rawPalette, rawTop16, rawTree, rawTreeAdapt, rawShift, reconstructPalette, useZstd, useShuffle, ratio, finish)
 			}
 		} else if yBits == 1 && cbBits == 1 && crBits == 1 {
-			fmt.Printf("quality=%d, mode=ycb, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, useZstd, useShuffle, ratio, finish)
+			if colorCount > 0 {
+				fmt.Printf("quality=%d, mode=ycb, colors=%d, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, colorCount, useZstd, useShuffle, ratio, finish)
+			} else {
+				fmt.Printf("quality=%d, mode=ycb, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, useZstd, useShuffle, ratio, finish)
+			}
 		} else {
-			fmt.Printf("quality=%d, y_bits=%d, cb_bits=%d, cr_bits=%d, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, yBits, cbBits, crBits, useZstd, useShuffle, ratio, finish)
+			if colorCount > 0 {
+				fmt.Printf("quality=%d, y_bits=%d, cb_bits=%d, cr_bits=%d, colors=%d, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, yBits, cbBits, crBits, colorCount, useZstd, useShuffle, ratio, finish)
+			} else {
+				fmt.Printf("quality=%d, y_bits=%d, cb_bits=%d, cr_bits=%d, zstd=%t, shuffle=%t, ratio=%.3f, time=%s\n", quality, yBits, cbBits, crBits, useZstd, useShuffle, ratio, finish)
+			}
 		}
 	}
 
@@ -567,6 +581,23 @@ func inspectBWPatternPalette(comp []byte) (int, int, int, error) {
 
 func inspectColorPatternPalette(comp []byte) (int, int, int, error) {
 	return 0, 0, 0, nil
+}
+
+func inspectImageColorCount(comp []byte) (int, error) {
+	img, err := Decode(comp, false)
+	if err != nil {
+		return 0, err
+	}
+	b := img.Bounds()
+	colors := make(map[[4]uint8]struct{}, min(b.Dx()*b.Dy(), 1<<16))
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			r, g, b8, a := img.At(x, y).RGBA()
+			key := [4]uint8{uint8(r >> 8), uint8(g >> 8), uint8(b8 >> 8), uint8(a >> 8)}
+			colors[key] = struct{}{}
+		}
+	}
+	return len(colors), nil
 }
 
 func decodeBabe(inPath, outPath string, splitChannels, postfilter bool) error {

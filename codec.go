@@ -1043,7 +1043,7 @@ func quantizeColorToPalette(yPlane, cbPlane, crPlane []uint8, w, h, quality, yBi
 		if y&1 == 0 {
 			for x := 0; x < w; x++ {
 				i := row + x
-				targetY := clamp255(float64(yPlane[i]) + errYCurr[x+1] + noiseBias(x, y, yPhaseX, yPhaseY, yAmp, shuffle))
+				targetY := clamp255(applyQualityExposure(float64(yPlane[i]), quality) + errYCurr[x+1] + noiseBias(x, y, yPhaseX, yPhaseY, yAmp, shuffle))
 				targetCb := 128.0
 				targetCr := 128.0
 				if rgbMode {
@@ -1051,10 +1051,10 @@ func quantizeColorToPalette(yPlane, cbPlane, crPlane []uint8, w, h, quality, yBi
 					targetCr = 0
 				}
 				if cbBits > 0 {
-					targetCb = clamp255(float64(cbPlane[i]) + errCbCurr[x+1] + noiseBias(x, y, cbPhaseX, cbPhaseY, cbAmp, shuffle))
+					targetCb = clamp255(applyQualityExposure(float64(cbPlane[i]), quality) + errCbCurr[x+1] + noiseBias(x, y, cbPhaseX, cbPhaseY, cbAmp, shuffle))
 				}
 				if crBits > 0 {
-					targetCr = clamp255(float64(crPlane[i]) + errCrCurr[x+1] + noiseBias(x, y, crPhaseX, crPhaseY, crAmp, shuffle))
+					targetCr = clamp255(applyQualityExposure(float64(crPlane[i]), quality) + errCrCurr[x+1] + noiseBias(x, y, crPhaseX, crPhaseY, crAmp, shuffle))
 				}
 				upLeftY, upLeftCb, upLeftCr := sampleNeighbor(prevOutY, prevOutCb, prevOutCr, x-1)
 				upRightY, upRightCb, upRightCr := sampleNeighbor(prevOutY, prevOutCb, prevOutCr, x+1)
@@ -1072,7 +1072,7 @@ func quantizeColorToPalette(yPlane, cbPlane, crPlane []uint8, w, h, quality, yBi
 		} else {
 			for x := w - 1; x >= 0; x-- {
 				i := row + x
-				targetY := clamp255(float64(yPlane[i]) + errYCurr[x+1] + noiseBias(x, y, yPhaseX, yPhaseY, yAmp, shuffle))
+				targetY := clamp255(applyQualityExposure(float64(yPlane[i]), quality) + errYCurr[x+1] + noiseBias(x, y, yPhaseX, yPhaseY, yAmp, shuffle))
 				targetCb := 128.0
 				targetCr := 128.0
 				if rgbMode {
@@ -1080,10 +1080,10 @@ func quantizeColorToPalette(yPlane, cbPlane, crPlane []uint8, w, h, quality, yBi
 					targetCr = 0
 				}
 				if cbBits > 0 {
-					targetCb = clamp255(float64(cbPlane[i]) + errCbCurr[x+1] + noiseBias(x, y, cbPhaseX, cbPhaseY, cbAmp, shuffle))
+					targetCb = clamp255(applyQualityExposure(float64(cbPlane[i]), quality) + errCbCurr[x+1] + noiseBias(x, y, cbPhaseX, cbPhaseY, cbAmp, shuffle))
 				}
 				if crBits > 0 {
-					targetCr = clamp255(float64(crPlane[i]) + errCrCurr[x+1] + noiseBias(x, y, crPhaseX, crPhaseY, crAmp, shuffle))
+					targetCr = clamp255(applyQualityExposure(float64(crPlane[i]), quality) + errCrCurr[x+1] + noiseBias(x, y, crPhaseX, crPhaseY, crAmp, shuffle))
 				}
 				upLeftY, upLeftCb, upLeftCr := sampleNeighbor(prevOutY, prevOutCb, prevOutCr, x-1)
 				upRightY, upRightCb, upRightCr := sampleNeighbor(prevOutY, prevOutCb, prevOutCr, x+1)
@@ -1181,9 +1181,9 @@ func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, p
 		if y&1 == 0 {
 			for x := 0; x < w; x++ {
 				i := row + x
-				targetR := clamp255(float64(rPlane[i]) + errRCurr[x+1] + noiseBias(x, y, rPhaseX, rPhaseY, rAmp, shuffle))
-				targetG := clamp255(float64(gPlane[i]) + errGCurr[x+1] + noiseBias(x, y, gPhaseX, gPhaseY, gAmp, shuffle))
-				targetB := clamp255(float64(bPlane[i]) + errBCurr[x+1] + noiseBias(x, y, bPhaseX, bPhaseY, bAmp, shuffle))
+				targetR := clamp255(applyQualityExposure(float64(rPlane[i]), quality) + errRCurr[x+1] + noiseBias(x, y, rPhaseX, rPhaseY, rAmp, shuffle))
+				targetG := clamp255(applyQualityExposure(float64(gPlane[i]), quality) + errGCurr[x+1] + noiseBias(x, y, gPhaseX, gPhaseY, gAmp, shuffle))
+				targetB := clamp255(applyQualityExposure(float64(bPlane[i]), quality) + errBCurr[x+1] + noiseBias(x, y, bPhaseX, bPhaseY, bAmp, shuffle))
 				if adaptive {
 					targetR, targetG, targetB = adaptivePaletteTarget(rPlane, gPlane, bPlane, w, h, x, y, targetR, targetG, targetB)
 				}
@@ -1194,9 +1194,9 @@ func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, p
 		} else {
 			for x := w - 1; x >= 0; x-- {
 				i := row + x
-				targetR := clamp255(float64(rPlane[i]) + errRCurr[x+1] + noiseBias(x, y, rPhaseX, rPhaseY, rAmp, shuffle))
-				targetG := clamp255(float64(gPlane[i]) + errGCurr[x+1] + noiseBias(x, y, gPhaseX, gPhaseY, gAmp, shuffle))
-				targetB := clamp255(float64(bPlane[i]) + errBCurr[x+1] + noiseBias(x, y, bPhaseX, bPhaseY, bAmp, shuffle))
+				targetR := clamp255(applyQualityExposure(float64(rPlane[i]), quality) + errRCurr[x+1] + noiseBias(x, y, rPhaseX, rPhaseY, rAmp, shuffle))
+				targetG := clamp255(applyQualityExposure(float64(gPlane[i]), quality) + errGCurr[x+1] + noiseBias(x, y, gPhaseX, gPhaseY, gAmp, shuffle))
+				targetB := clamp255(applyQualityExposure(float64(bPlane[i]), quality) + errBCurr[x+1] + noiseBias(x, y, bPhaseX, bPhaseY, bAmp, shuffle))
 				if adaptive {
 					targetR, targetG, targetB = adaptivePaletteTarget(rPlane, gPlane, bPlane, w, h, x, y, targetR, targetG, targetB)
 				}
@@ -1822,7 +1822,7 @@ func namedPaletteRGB(name string) [][3]uint8 {
 		return forestPalette
 	case "ymc":
 		return ymcPalette
-	case "ymcrgb":
+	case "ymcrgb", "bwrgbymc":
 		return ymcRGBPalette
 	default:
 		return rgbPrimaryPalette
@@ -1861,6 +1861,9 @@ func paletteFromSpec(spec string) [][3]uint8 {
 	spec = strings.ToLower(strings.TrimSpace(spec))
 	if spec == "" {
 		return nil
+	}
+	if spec == "bwrgbymc" || spec == "bwymcrgb" {
+		return append([][3]uint8(nil), ymcRGBPalette...)
 	}
 	var palette [][3]uint8
 	for _, chunk := range strings.Split(spec, "+") {
@@ -2309,6 +2312,11 @@ func clamp255(v float64) float64 {
 	return v
 }
 
+func applyQualityExposure(v float64, quality int) float64 {
+	_ = quality
+	return clamp255(v)
+}
+
 func quantizePhotoLumaToBits(plane []uint8, w, h, quality, bwBits, phaseX, phaseY int, shuffle bool, dst *bytes.Buffer, errCurr, errNext []float64) {
 	for i := range errCurr {
 		errCurr[i] = 0
@@ -2326,7 +2334,7 @@ func quantizePhotoLumaToBits(plane []uint8, w, h, quality, bwBits, phaseX, phase
 	for y := 0; y < h; y++ {
 		if y&1 == 0 {
 			for x := 0; x < w; x++ {
-				target := bwPhotoTarget(plane, w, h, x, y, gamma, detailStrength)*255.0 + errCurr[x+1]
+				target := applyQualityExposure(bwPhotoTarget(plane, w, h, x, y, gamma, detailStrength)*255.0, quality) + errCurr[x+1]
 				target = clamp255(target + noiseBias(x, y, phaseX, phaseY, adaptivePhotoAmplitude(plane, w, h, x, y, baseAmp), shuffle))
 				level, out := nearestGrayLevel(target, levels)
 				rowLevels[x] = level
@@ -2339,7 +2347,7 @@ func quantizePhotoLumaToBits(plane []uint8, w, h, quality, bwBits, phaseX, phase
 			}
 		} else {
 			for x := w - 1; x >= 0; x-- {
-				target := bwPhotoTarget(plane, w, h, x, y, gamma, detailStrength)*255.0 + errCurr[x+1]
+				target := applyQualityExposure(bwPhotoTarget(plane, w, h, x, y, gamma, detailStrength)*255.0, quality) + errCurr[x+1]
 				target = clamp255(target + noiseBias(x, y, phaseX, phaseY, adaptivePhotoAmplitude(plane, w, h, x, y, baseAmp), shuffle))
 				level, out := nearestGrayLevel(target, levels)
 				rowLevels[x] = level
