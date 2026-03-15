@@ -39,30 +39,28 @@ func TestEncodeDecode_RoundTrip(t *testing.T) {
 	src := makeTestImage(64, 48)
 
 	for _, tc := range []struct {
-		name       string
-		quality    int
-		bw         bool
-		bwBits     int
-		postfilter bool
+		name    string
+		quality int
+		bw      bool
+		bwBits  int
 	}{
-		{name: "color_no_postfilter", quality: 70, bw: false, bwBits: 1, postfilter: false},
-		{name: "color_postfilter", quality: 70, bw: false, bwBits: 1, postfilter: true},
-		{name: "color_no_postfilter_q80", quality: 80, bw: false, bwBits: 1, postfilter: false},
-		{name: "color_custom_bits", quality: 80, bw: false, bwBits: 1, postfilter: false},
-		{name: "color_rgb_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
-		{name: "color_zx_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
-		{name: "color_ymc_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
-		{name: "color_ymcrgb_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
-		{name: "color_palette_spec_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
-		{name: "color_palette_spec_multi_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
-		{name: "color_adaptive_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
-		{name: "color_gray_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
-		{name: "color_ega_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
-		{name: "color_vga_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
-		{name: "color_sunset_mode", quality: 80, bw: false, bwBits: 1, postfilter: false},
-		{name: "bw_no_postfilter", quality: 70, bw: true, bwBits: 1, postfilter: false},
-		{name: "bw_3bit", quality: 70, bw: true, bwBits: 3, postfilter: false},
-		{name: "bw_2bit_pattern", quality: 70, bw: true, bwBits: 2, postfilter: false},
+		{name: "color", quality: 70, bw: false, bwBits: 1},
+		{name: "color_q80", quality: 80, bw: false, bwBits: 1},
+		{name: "color_custom_bits", quality: 80, bw: false, bwBits: 1},
+		{name: "color_rgb_mode", quality: 80, bw: false, bwBits: 1},
+		{name: "color_zx_mode", quality: 80, bw: false, bwBits: 1},
+		{name: "color_ymc_mode", quality: 80, bw: false, bwBits: 1},
+		{name: "color_ymcrgb_mode", quality: 80, bw: false, bwBits: 1},
+		{name: "color_palette_spec_mode", quality: 80, bw: false, bwBits: 1},
+		{name: "color_palette_spec_multi_mode", quality: 80, bw: false, bwBits: 1},
+		{name: "color_adaptive_mode", quality: 80, bw: false, bwBits: 1},
+		{name: "color_gray_mode", quality: 80, bw: false, bwBits: 1},
+		{name: "color_ega_mode", quality: 80, bw: false, bwBits: 1},
+		{name: "color_vga_mode", quality: 80, bw: false, bwBits: 1},
+		{name: "color_sunset_mode", quality: 80, bw: false, bwBits: 1},
+		{name: "bw", quality: 70, bw: true, bwBits: 1},
+		{name: "bw_3bit", quality: 70, bw: true, bwBits: 3},
+		{name: "bw_2bit_pattern", quality: 70, bw: true, bwBits: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var (
@@ -164,7 +162,7 @@ func TestEncodeDecode_RoundTrip(t *testing.T) {
 				t.Fatalf("Encode returned empty payload")
 			}
 
-			dec, err := Decode(comp, tc.postfilter)
+			dec, err := Decode(comp)
 			if err != nil {
 				t.Fatalf("Decode: %v", err)
 			}
@@ -340,7 +338,7 @@ func BenchmarkCodecs(b *testing.B) {
 			encTime := time.Since(startEnc)
 
 			startDec := time.Now()
-			if _, err := dec.Decode(encBytes, false); err != nil {
+			if _, err := dec.Decode(encBytes); err != nil {
 				b.Fatalf("decode failed: %v", err)
 			}
 			decTime := time.Since(startDec)
@@ -357,7 +355,7 @@ func BenchmarkCodecs(b *testing.B) {
 				return buf.Bytes(), nil
 			},
 			func(encBytes []byte) error {
-				_, err := dec.Decode(encBytes, false)
+				_, err := dec.Decode(encBytes)
 				return err
 			},
 		)
@@ -519,7 +517,7 @@ func benchBABE(img image.Image) summaryBenchFn {
 			b.Fatalf("encode failed: %v", err)
 		}
 		encBytes := buf.Bytes()
-		if _, err := dec.Decode(encBytes, false); err != nil {
+		if _, err := dec.Decode(encBytes); err != nil {
 			b.Fatalf("decode failed: %v", err)
 		}
 		b.ResetTimer()
@@ -535,7 +533,7 @@ func benchBABE(img image.Image) summaryBenchFn {
 			sizeB = len(encBytes)
 
 			startDec := time.Now()
-			if _, err := dec.Decode(encBytes, false); err != nil {
+			if _, err := dec.Decode(encBytes); err != nil {
 				b.Fatalf("decode failed: %v", err)
 			}
 			decTotal += time.Since(startDec)

@@ -409,25 +409,18 @@ type Encoder struct {
 }
 
 type EncodeOptions struct {
-	BW                 bool
-	YBits              int
-	CbBits             int
-	CrBits             int
-	Pattern            string
-	TileSize           int
-	BlockSize          int
-	UseZstd            bool
-	Shuffle            bool
-	RGBMode            bool
-	ZXMode             bool
-	Palette            string
-	RawPalette         bool
-	RawTop16           bool
-	RawTree            bool
-	RawTreeAdapt       bool
-	RawShift           int
-	ReconstructPalette bool
-	BlockSubset        bool
+	BW          bool
+	YBits       int
+	CbBits      int
+	CrBits      int
+	Pattern     string
+	TileSize    int
+	BlockSize   int
+	UseZstd     bool
+	RGBMode     bool
+	ZXMode      bool
+	Palette     string
+	BlockSubset bool
 
 	PatternW int
 	PatternH int
@@ -500,6 +493,23 @@ func normalizeEncodeOptions(opts EncodeOptions) (EncodeOptions, error) {
 	return opts, nil
 }
 
+func parsePatternDims(s string) (int, int, error) {
+	r := strings.NewReplacer("X", "x", "Х", "x", "х", "x")
+	parts := strings.Split(strings.ToLower(r.Replace(s)), "x")
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("pattern must look like WxH, for example 2x4")
+	}
+	w, err := strconv.Atoi(parts[0])
+	if err != nil || w < 1 {
+		return 0, 0, fmt.Errorf("invalid pattern width %q", parts[0])
+	}
+	h, err := strconv.Atoi(parts[1])
+	if err != nil || h < 1 {
+		return 0, 0, fmt.Errorf("invalid pattern height %q", parts[1])
+	}
+	return w, h, nil
+}
+
 func (e *Encoder) EncodeWithOptions(img image.Image, quality int, opts EncodeOptions) ([]byte, error) {
 	if quality < 0 {
 		quality = 0
@@ -543,7 +553,7 @@ func (e *Encoder) EncodeWithOptions(img image.Image, quality int, opts EncodeOpt
 	crPhaseX, crPhaseY := planeBlueNoisePhase(e.crPlane, w, h, 0xC7)
 	if opts.BW {
 		e.ensureErrorBuffers(w)
-		quantizePhotoLumaToBits(e.yPlane, w, h, quality, yBits, yPhaseX, yPhaseY, opts.Shuffle, &e.yBits, e.errCurr, e.errNext)
+		quantizePhotoLumaToBits(e.yPlane, w, h, quality, yBits, yPhaseX, yPhaseY, &e.yBits, e.errCurr, e.errNext)
 	} else {
 		if paletteMode {
 			e.cbBits.Reset()
@@ -552,7 +562,7 @@ func (e *Encoder) EncodeWithOptions(img image.Image, quality int, opts EncodeOpt
 			yBits = max(1, bitsNeeded(len(chosenPalette)-1))
 			cbBits = 0
 			crBits = 0
-			quantizePaletteIndices(e.yPlane, e.cbPlane, e.crPlane, w, h, quality, chosenPalette, yPhaseX, yPhaseY, cbPhaseX, cbPhaseY, crPhaseX, crPhaseY, opts.Shuffle, true, opts.TileSize, opts.BlockSize, opts.RawPalette, opts.RawTop16, opts.RawTree, opts.RawTreeAdapt, opts.RawShift, opts.ReconstructPalette, opts.BlockSubset, &e.yBits)
+			quantizePaletteIndices(e.yPlane, e.cbPlane, e.crPlane, w, h, quality, chosenPalette, yPhaseX, yPhaseY, cbPhaseX, cbPhaseY, crPhaseX, crPhaseY, true, opts.TileSize, &e.yBits)
 		} else {
 			if cbBits > 0 {
 				channelsMask |= channelFlagCb
@@ -560,7 +570,7 @@ func (e *Encoder) EncodeWithOptions(img image.Image, quality int, opts EncodeOpt
 			if crBits > 0 {
 				channelsMask |= channelFlagCr
 			}
-			quantizeColorToPalette(e.yPlane, e.cbPlane, e.crPlane, w, h, quality, yBits, cbBits, crBits, yPhaseX, yPhaseY, cbPhaseX, cbPhaseY, crPhaseX, crPhaseY, opts.Shuffle, opts.RGBMode, opts.ZXMode, opts.Palette, &e.yBits, &e.cbBits, &e.crBits)
+			quantizeColorToPalette(e.yPlane, e.cbPlane, e.crPlane, w, h, quality, yBits, cbBits, crBits, yPhaseX, yPhaseY, cbPhaseX, cbPhaseY, crPhaseX, crPhaseY, opts.RGBMode, opts.ZXMode, opts.Palette, &e.yBits, &e.cbBits, &e.crBits)
 		}
 	}
 
@@ -704,7 +714,7 @@ func NewDecoder() *Decoder {
 	return &Decoder{Parallel: true, zdec: mustNewZstdDecoder()}
 }
 
-func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) {
+func (d *Decoder) Decode(compData []byte) (*image.RGBA, error) {
 	payload := compData
 	if len(compData) < len(codec) || string(compData[:len(codec)]) != codec {
 		if d.zdec == nil {
@@ -815,22 +825,19 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 		return nil, err
 	}
 
-	if postfilter {
-		return smoothBlocks(d.dst), nil
-	}
 	return d.dst, nil
 }
 
-func (d *Decoder) DecodeFrom(r io.Reader, postfilter bool) (*image.RGBA, error) {
+func (d *Decoder) DecodeFrom(r io.Reader) (*image.RGBA, error) {
 	compData, err := io.ReadAll(r)
 	if err != nil {
 		return nil, err
 	}
-	return d.Decode(compData, postfilter)
+	return d.Decode(compData)
 }
 
-func Decode(compData []byte, postfilter bool) (image.Image, error) {
-	return NewDecoder().Decode(compData, postfilter)
+func Decode(compData []byte) (image.Image, error) {
+	return NewDecoder().Decode(compData)
 }
 
 func extractYCbCrPlanes(img image.Image, yPlane, cbPlane, crPlane []uint8, parallel bool) {
@@ -978,7 +985,7 @@ func quantizePlaneToBitsN(plane []uint8, w, h, quality, baseAmplitude int, low, 
 	bw.flush()
 }
 
-func quantizeColorToPalette(yPlane, cbPlane, crPlane []uint8, w, h, quality, yBits, cbBits, crBits, yPhaseX, yPhaseY, cbPhaseX, cbPhaseY, crPhaseX, crPhaseY int, shuffle, rgbMode, zxMode bool, paletteName string, yDst, cbDst, crDst *bytes.Buffer) {
+func quantizeColorToPalette(yPlane, cbPlane, crPlane []uint8, w, h, quality, yBits, cbBits, crBits, yPhaseX, yPhaseY, cbPhaseX, cbPhaseY, crPhaseX, crPhaseY int, rgbMode, zxMode bool, paletteName string, yDst, cbDst, crDst *bytes.Buffer) {
 	yw := newBitWriter(yDst)
 	cbw := newBitWriter(cbDst)
 	crw := newBitWriter(crDst)
@@ -1043,7 +1050,7 @@ func quantizeColorToPalette(yPlane, cbPlane, crPlane []uint8, w, h, quality, yBi
 		if y&1 == 0 {
 			for x := 0; x < w; x++ {
 				i := row + x
-				targetY := clamp255(applyQualityExposure(float64(yPlane[i]), quality) + errYCurr[x+1] + noiseBias(x, y, yPhaseX, yPhaseY, yAmp, shuffle))
+				targetY := clamp255(applyQualityExposure(float64(yPlane[i]), quality) + errYCurr[x+1] + noiseBias(x, y, yPhaseX, yPhaseY, yAmp))
 				targetCb := 128.0
 				targetCr := 128.0
 				if rgbMode {
@@ -1051,10 +1058,10 @@ func quantizeColorToPalette(yPlane, cbPlane, crPlane []uint8, w, h, quality, yBi
 					targetCr = 0
 				}
 				if cbBits > 0 {
-					targetCb = clamp255(applyQualityExposure(float64(cbPlane[i]), quality) + errCbCurr[x+1] + noiseBias(x, y, cbPhaseX, cbPhaseY, cbAmp, shuffle))
+					targetCb = clamp255(applyQualityExposure(float64(cbPlane[i]), quality) + errCbCurr[x+1] + noiseBias(x, y, cbPhaseX, cbPhaseY, cbAmp))
 				}
 				if crBits > 0 {
-					targetCr = clamp255(applyQualityExposure(float64(crPlane[i]), quality) + errCrCurr[x+1] + noiseBias(x, y, crPhaseX, crPhaseY, crAmp, shuffle))
+					targetCr = clamp255(applyQualityExposure(float64(crPlane[i]), quality) + errCrCurr[x+1] + noiseBias(x, y, crPhaseX, crPhaseY, crAmp))
 				}
 				upLeftY, upLeftCb, upLeftCr := sampleNeighbor(prevOutY, prevOutCb, prevOutCr, x-1)
 				upRightY, upRightCb, upRightCr := sampleNeighbor(prevOutY, prevOutCb, prevOutCr, x+1)
@@ -1072,7 +1079,7 @@ func quantizeColorToPalette(yPlane, cbPlane, crPlane []uint8, w, h, quality, yBi
 		} else {
 			for x := w - 1; x >= 0; x-- {
 				i := row + x
-				targetY := clamp255(applyQualityExposure(float64(yPlane[i]), quality) + errYCurr[x+1] + noiseBias(x, y, yPhaseX, yPhaseY, yAmp, shuffle))
+				targetY := clamp255(applyQualityExposure(float64(yPlane[i]), quality) + errYCurr[x+1] + noiseBias(x, y, yPhaseX, yPhaseY, yAmp))
 				targetCb := 128.0
 				targetCr := 128.0
 				if rgbMode {
@@ -1080,10 +1087,10 @@ func quantizeColorToPalette(yPlane, cbPlane, crPlane []uint8, w, h, quality, yBi
 					targetCr = 0
 				}
 				if cbBits > 0 {
-					targetCb = clamp255(applyQualityExposure(float64(cbPlane[i]), quality) + errCbCurr[x+1] + noiseBias(x, y, cbPhaseX, cbPhaseY, cbAmp, shuffle))
+					targetCb = clamp255(applyQualityExposure(float64(cbPlane[i]), quality) + errCbCurr[x+1] + noiseBias(x, y, cbPhaseX, cbPhaseY, cbAmp))
 				}
 				if crBits > 0 {
-					targetCr = clamp255(applyQualityExposure(float64(crPlane[i]), quality) + errCrCurr[x+1] + noiseBias(x, y, crPhaseX, crPhaseY, crAmp, shuffle))
+					targetCr = clamp255(applyQualityExposure(float64(crPlane[i]), quality) + errCrCurr[x+1] + noiseBias(x, y, crPhaseX, crPhaseY, crAmp))
 				}
 				upLeftY, upLeftCb, upLeftCr := sampleNeighbor(prevOutY, prevOutCb, prevOutCr, x-1)
 				upRightY, upRightCb, upRightCr := sampleNeighbor(prevOutY, prevOutCb, prevOutCr, x+1)
@@ -1146,7 +1153,7 @@ func paletteFromMode(zxMode bool, paletteName string, rPlane, gPlane, bPlane []u
 	return rgbPrimaryPalette
 }
 
-func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, palette [][3]uint8, rPhaseX, rPhaseY, gPhaseX, gPhaseY, bPhaseX, bPhaseY int, shuffle, adaptive bool, tileSize, blockSize int, rawMode, rawTop16, rawTree, rawTreeAdapt bool, rawShift int, reconstructMode, blockSubset bool, dst *bytes.Buffer) {
+func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, palette [][3]uint8, rPhaseX, rPhaseY, gPhaseX, gPhaseY, bPhaseX, bPhaseY int, adaptive bool, tileSize int, dst *bytes.Buffer) {
 	dst.Reset()
 	if len(palette) < 1 {
 		palette = rgbPrimaryPalette
@@ -1181,9 +1188,9 @@ func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, p
 		if y&1 == 0 {
 			for x := 0; x < w; x++ {
 				i := row + x
-				targetR := clamp255(applyQualityExposure(float64(rPlane[i]), quality) + errRCurr[x+1] + noiseBias(x, y, rPhaseX, rPhaseY, rAmp, shuffle))
-				targetG := clamp255(applyQualityExposure(float64(gPlane[i]), quality) + errGCurr[x+1] + noiseBias(x, y, gPhaseX, gPhaseY, gAmp, shuffle))
-				targetB := clamp255(applyQualityExposure(float64(bPlane[i]), quality) + errBCurr[x+1] + noiseBias(x, y, bPhaseX, bPhaseY, bAmp, shuffle))
+				targetR := clamp255(applyQualityExposure(float64(rPlane[i]), quality) + errRCurr[x+1] + noiseBias(x, y, rPhaseX, rPhaseY, rAmp))
+				targetG := clamp255(applyQualityExposure(float64(gPlane[i]), quality) + errGCurr[x+1] + noiseBias(x, y, gPhaseX, gPhaseY, gAmp))
+				targetB := clamp255(applyQualityExposure(float64(bPlane[i]), quality) + errBCurr[x+1] + noiseBias(x, y, bPhaseX, bPhaseY, bAmp))
 				if adaptive {
 					targetR, targetG, targetB = adaptivePaletteTarget(rPlane, gPlane, bPlane, w, h, x, y, targetR, targetG, targetB)
 				}
@@ -1194,9 +1201,9 @@ func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, p
 		} else {
 			for x := w - 1; x >= 0; x-- {
 				i := row + x
-				targetR := clamp255(applyQualityExposure(float64(rPlane[i]), quality) + errRCurr[x+1] + noiseBias(x, y, rPhaseX, rPhaseY, rAmp, shuffle))
-				targetG := clamp255(applyQualityExposure(float64(gPlane[i]), quality) + errGCurr[x+1] + noiseBias(x, y, gPhaseX, gPhaseY, gAmp, shuffle))
-				targetB := clamp255(applyQualityExposure(float64(bPlane[i]), quality) + errBCurr[x+1] + noiseBias(x, y, bPhaseX, bPhaseY, bAmp, shuffle))
+				targetR := clamp255(applyQualityExposure(float64(rPlane[i]), quality) + errRCurr[x+1] + noiseBias(x, y, rPhaseX, rPhaseY, rAmp))
+				targetG := clamp255(applyQualityExposure(float64(gPlane[i]), quality) + errGCurr[x+1] + noiseBias(x, y, gPhaseX, gPhaseY, gAmp))
+				targetB := clamp255(applyQualityExposure(float64(bPlane[i]), quality) + errBCurr[x+1] + noiseBias(x, y, bPhaseX, bPhaseY, bAmp))
 				if adaptive {
 					targetR, targetG, targetB = adaptivePaletteTarget(rPlane, gPlane, bPlane, w, h, x, y, targetR, targetG, targetB)
 				}
@@ -1222,257 +1229,6 @@ func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, p
 		if freq[i] > freq[canvasIdx] {
 			canvasIdx = i
 		}
-	}
-	if rawMode {
-		if blockSize > 0 && blockSubset {
-			dst.WriteByte(5) // raw palette indices with per-block subset
-			dst.WriteByte(byte(blockSize))
-			for by := 0; by < h; by += blockSize {
-				y1 := min(by+blockSize, h)
-				for bx := 0; bx < w; bx += blockSize {
-					x1 := min(bx+blockSize, w)
-					localFreq := make(map[int]int, len(palette))
-					for y := by; y < y1; y++ {
-						row := y * w
-						for x := bx; x < x1; x++ {
-							localFreq[pixelIdx[row+x]]++
-						}
-					}
-					subset := make([]int, 0, len(localFreq))
-					for idx := range localFreq {
-						subset = append(subset, idx)
-					}
-					sort.Slice(subset, func(i, j int) bool {
-						if localFreq[subset[i]] != localFreq[subset[j]] {
-							return localFreq[subset[i]] > localFreq[subset[j]]
-						}
-						return subset[i] < subset[j]
-					})
-					if len(subset) < 1 {
-						subset = append(subset, canvasIdx)
-					}
-					dst.WriteByte(byte(len(subset)))
-					for _, idx := range subset {
-						dst.WriteByte(byte(idx))
-					}
-					localBits := bitsNeeded(len(subset) - 1)
-					if localBits < 1 {
-						localBits = 1
-					}
-					inv := make([]int, len(palette))
-					for i := range inv {
-						inv[i] = -1
-					}
-					for i, idx := range subset {
-						inv[idx] = i
-					}
-					var block bytes.Buffer
-					bw := newBitWriter(&block)
-					for y := by; y < y1; y++ {
-						row := y * w
-						for x := bx; x < x1; x++ {
-							bw.writeBits(uint64(inv[pixelIdx[row+x]]), uint8(localBits))
-						}
-					}
-					bw.flush()
-					dst.Write(block.Bytes())
-				}
-			}
-			_ = canvasIdx
-			return
-		}
-		if blockSize > 0 {
-			dst.WriteByte(4) // raw packed palette indices, chunked by NxN blocks
-			dst.WriteByte(byte(blockSize))
-			indexBits := bitsNeeded(len(palette) - 1)
-			if indexBits < 1 {
-				indexBits = 1
-			}
-			for by := 0; by < h; by += blockSize {
-				y1 := min(by+blockSize, h)
-				for bx := 0; bx < w; bx += blockSize {
-					x1 := min(bx+blockSize, w)
-					var block bytes.Buffer
-					bw := newBitWriter(&block)
-					for y := by; y < y1; y++ {
-						row := y * w
-						for x := bx; x < x1; x++ {
-							bw.writeBits(uint64(pixelIdx[row+x]), uint8(indexBits))
-						}
-					}
-					bw.flush()
-					dst.Write(block.Bytes())
-				}
-			}
-			_ = canvasIdx
-			return
-		}
-		indexBits := bitsNeeded(len(palette) - 1)
-		if indexBits < 1 {
-			indexBits = 1
-		}
-		var rawBuf bytes.Buffer
-		bw := newBitWriter(&rawBuf)
-		for _, idx := range pixelIdx {
-			bw.writeBits(uint64(idx), uint8(indexBits))
-		}
-		bw.flush()
-		if rawTreeAdapt {
-			dst.WriteByte(9) // raw palette indices as frequency-adapted tree
-			freq := make([]int, len(palette))
-			for _, idx := range pixelIdx {
-				freq[idx]++
-			}
-			order := make([]byte, len(palette))
-			for i := range order {
-				order[i] = byte(i)
-			}
-			sort.Slice(order, func(i, j int) bool {
-				fi := freq[int(order[i])]
-				fj := freq[int(order[j])]
-				if fi != fj {
-					return fi > fj
-				}
-				return order[i] < order[j]
-			})
-			dst.Write(order)
-			encodeRawIndexTreeFreq(pixelIdx, order, dst)
-			_ = canvasIdx
-			return
-		}
-		if rawTop16 && rawTree {
-			rawStream := rawBuf.Bytes()
-			bestShift := 0
-			bestSize := int(^uint(0) >> 1)
-			var bestTopA [16]byte
-			var bestPrefix byte
-			var bestSuffix byte
-			var bestMaskA []byte
-			var bestIDsA []byte
-			var bestTree []byte
-			startShift := 0
-			endShift := 7
-			if rawShift >= 0 {
-				startShift = rawShift
-				endShift = rawShift
-			}
-			for shift := startShift; shift <= endShift; shift++ {
-				byteStream := packShiftedBytes(rawStream, w*h*indexBits, shift)
-				topA, maskA, idsA, otherA := splitTop16Stream(byteStream)
-				otherVals := make([]int, len(otherA))
-				for i, b := range otherA {
-					otherVals[i] = int(b)
-				}
-				var tree bytes.Buffer
-				encodeRawIndexTree(otherVals, 0, 256, &tree)
-				size := len(maskA) + len(idsA) + tree.Len()
-				if size < bestSize {
-					bestSize = size
-					bestShift = shift
-					bestTopA = topA
-					bestPrefix = gatherPackedBits(rawStream, 0, shift)
-					suffixCount := (w*h*indexBits - shift) & 7
-					bestSuffix = gatherPackedBits(rawStream, w*h*indexBits-suffixCount, suffixCount)
-					bestMaskA = append(bestMaskA[:0], maskA...)
-					bestIDsA = append(bestIDsA[:0], idsA...)
-					bestTree = append(bestTree[:0], tree.Bytes()...)
-				}
-			}
-			dst.WriteByte(8) // raw shifted top16 + tree residual
-			dst.WriteByte(byte(bestShift))
-			dst.WriteByte(bestPrefix)
-			dst.WriteByte(bestSuffix)
-			dst.Write(bestTopA[:])
-			dst.Write(bestMaskA)
-			dst.Write(bestIDsA)
-			dst.Write(bestTree)
-			_ = canvasIdx
-			return
-		}
-		if rawTree {
-			dst.WriteByte(7) // raw palette indices as binary range tree
-			encodeRawIndexTree(pixelIdx, 0, len(palette), dst)
-			_ = canvasIdx
-			return
-		}
-		if rawTop16 {
-			rawStream := rawBuf.Bytes()
-			shift, topA, prefixBits, suffixBits, stream := encodeShiftedTop16Stream(rawStream, w*h*indexBits, rawShift)
-			dst.WriteByte(6) // raw packed palette indices with shifted top16 byte coding
-			dst.WriteByte(byte(shift))
-			dst.WriteByte(prefixBits)
-			dst.WriteByte(suffixBits)
-			dst.Write(topA[:])
-			dst.Write(stream)
-			_ = canvasIdx
-			return
-		}
-		dst.WriteByte(1) // raw packed palette indices
-		dst.Write(rawBuf.Bytes())
-		_ = canvasIdx
-		return
-	}
-	if reconstructMode {
-		remaining := make([]int, len(pixelIdx))
-		copy(remaining, pixelIdx)
-		order := make([]int, 0, len(palette))
-		planes := make([][]byte, 0, max(0, len(palette)-1))
-		for {
-			currFreq := make([]int, len(palette))
-			for _, idx := range remaining {
-				currFreq[idx]++
-			}
-			chosen := -1
-			for i, c := range currFreq {
-				if c == 0 {
-					continue
-				}
-				if chosen < 0 || c > currFreq[chosen] {
-					chosen = i
-				}
-			}
-			if chosen < 0 {
-				break
-			}
-			order = append(order, chosen)
-			if len(remaining) == currFreq[chosen] {
-				break
-			}
-			hasOther := false
-			var planeBuf bytes.Buffer
-			bw := newBitWriter(&planeBuf)
-			nextRemaining := make([]int, 0, len(remaining)-currFreq[chosen])
-			for _, idx := range remaining {
-				match := idx == chosen
-				bw.writeBit(match)
-				if !match {
-					hasOther = true
-					nextRemaining = append(nextRemaining, idx)
-				}
-			}
-			bw.flush()
-			if hasOther {
-				plane := append([]byte(nil), planeBuf.Bytes()...)
-				planes = append(planes, plane)
-				remaining = nextRemaining
-				continue
-			}
-			break
-		}
-		if len(order) < 1 {
-			order = append(order, canvasIdx)
-		}
-		dst.WriteByte(3) // sequential peel planes
-		tmp := make([]byte, 2)
-		binary.BigEndian.PutUint16(tmp, uint16(len(order)))
-		dst.Write(tmp)
-		for _, idx := range order {
-			dst.WriteByte(byte(idx))
-		}
-		for _, plane := range planes {
-			dst.Write(plane)
-		}
-		return
 	}
 	if tileSize <= 0 {
 		tileSize = paletteTileSize
@@ -1546,114 +1302,6 @@ func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, p
 			dst.Write(tileBuf.Bytes())
 		}
 	}
-}
-
-func packShiftedBytes(src []byte, totalBits, shift int) []byte {
-	if totalBits <= shift {
-		return nil
-	}
-	byteCount := (totalBits - shift) / 8
-	out := make([]byte, byteCount)
-	for i := 0; i < byteCount; i++ {
-		base := shift + i*8
-		var v byte
-		for b := 0; b < 8; b++ {
-			if monoBitAt(src, base+b) {
-				v |= 1 << (7 - b)
-			}
-		}
-		out[i] = v
-	}
-	return out
-}
-
-func gatherPackedBits(src []byte, start, count int) byte {
-	var out byte
-	for i := 0; i < count; i++ {
-		if monoBitAt(src, start+i) {
-			out |= 1 << (7 - i)
-		}
-	}
-	return out
-}
-
-func splitTop16Stream(src []byte) ([16]byte, []byte, []byte, []byte) {
-	var top [16]byte
-	freq := make(map[byte]int, 256)
-	for _, b := range src {
-		freq[b]++
-	}
-	type kv struct {
-		b byte
-		c int
-	}
-	pairs := make([]kv, 0, len(freq))
-	for b, c := range freq {
-		pairs = append(pairs, kv{b: b, c: c})
-	}
-	sort.Slice(pairs, func(i, j int) bool {
-		if pairs[i].c != pairs[j].c {
-			return pairs[i].c > pairs[j].c
-		}
-		return pairs[i].b < pairs[j].b
-	})
-	index := make(map[byte]int, 16)
-	for i := 0; i < min(16, len(pairs)); i++ {
-		top[i] = pairs[i].b
-		index[pairs[i].b] = i
-	}
-	mask := make([]byte, (len(src)+7)>>3)
-	topIDs := make([]byte, 0, len(src))
-	others := make([]byte, 0, len(src))
-	for i, b := range src {
-		if idx, ok := index[b]; ok {
-			monoBitSet(mask, i)
-			topIDs = append(topIDs, byte(idx))
-		} else {
-			others = append(others, b)
-		}
-	}
-	var idsBuf bytes.Buffer
-	bw := newBitWriter(&idsBuf)
-	for _, id := range topIDs {
-		bw.writeBits(uint64(id), 4)
-	}
-	bw.flush()
-	return top, mask, idsBuf.Bytes(), others
-}
-
-func encodeShiftedTop16Stream(rawStream []byte, totalBits int, forcedShift int) (int, [16]byte, byte, byte, []byte) {
-	bestShift := 0
-	bestSize := int(^uint(0) >> 1)
-	var bestTopA [16]byte
-	var bestPrefix byte
-	var bestSuffix byte
-	var bestStream []byte
-	startShift := 0
-	endShift := 7
-	if forcedShift >= 0 {
-		startShift = forcedShift
-		endShift = forcedShift
-	}
-	for shift := startShift; shift <= endShift; shift++ {
-		byteStream := packShiftedBytes(rawStream, totalBits, shift)
-		topA, maskA, idsA, otherA := splitTop16Stream(byteStream)
-		var payload bytes.Buffer
-		payload.Write(maskA)
-		payload.Write(idsA)
-		payload.Write(otherA)
-		size := payload.Len()
-		if size < bestSize {
-			bestSize = size
-			bestShift = shift
-			bestTopA = topA
-			bestPrefix = gatherPackedBits(rawStream, 0, shift)
-			suffixCount := (totalBits - shift) & 7
-			bestSuffix = gatherPackedBits(rawStream, totalBits-suffixCount, suffixCount)
-			bestStream = append(bestStream[:0], payload.Bytes()...)
-		}
-	}
-	return bestShift, bestTopA, bestPrefix, bestSuffix, bestStream
 }
 
 func adaptivePaletteTarget(rPlane, gPlane, bPlane []uint8, w, h, x, y int, targetR, targetG, targetB float64) (float64, float64, float64) {
@@ -2317,7 +1965,7 @@ func applyQualityExposure(v float64, quality int) float64 {
 	return clamp255(v)
 }
 
-func quantizePhotoLumaToBits(plane []uint8, w, h, quality, bwBits, phaseX, phaseY int, shuffle bool, dst *bytes.Buffer, errCurr, errNext []float64) {
+func quantizePhotoLumaToBits(plane []uint8, w, h, quality, bwBits, phaseX, phaseY int, dst *bytes.Buffer, errCurr, errNext []float64) {
 	for i := range errCurr {
 		errCurr[i] = 0
 		errNext[i] = 0
@@ -2335,7 +1983,7 @@ func quantizePhotoLumaToBits(plane []uint8, w, h, quality, bwBits, phaseX, phase
 		if y&1 == 0 {
 			for x := 0; x < w; x++ {
 				target := applyQualityExposure(bwPhotoTarget(plane, w, h, x, y, gamma, detailStrength)*255.0, quality) + errCurr[x+1]
-				target = clamp255(target + noiseBias(x, y, phaseX, phaseY, adaptivePhotoAmplitude(plane, w, h, x, y, baseAmp), shuffle))
+				target = clamp255(target + noiseBias(x, y, phaseX, phaseY, adaptivePhotoAmplitude(plane, w, h, x, y, baseAmp)))
 				level, out := nearestGrayLevel(target, levels)
 				rowLevels[x] = level
 				diff := target - out
@@ -2348,7 +1996,7 @@ func quantizePhotoLumaToBits(plane []uint8, w, h, quality, bwBits, phaseX, phase
 		} else {
 			for x := w - 1; x >= 0; x-- {
 				target := applyQualityExposure(bwPhotoTarget(plane, w, h, x, y, gamma, detailStrength)*255.0, quality) + errCurr[x+1]
-				target = clamp255(target + noiseBias(x, y, phaseX, phaseY, adaptivePhotoAmplitude(plane, w, h, x, y, baseAmp), shuffle))
+				target = clamp255(target + noiseBias(x, y, phaseX, phaseY, adaptivePhotoAmplitude(plane, w, h, x, y, baseAmp)))
 				level, out := nearestGrayLevel(target, levels)
 				rowLevels[x] = level
 				diff := target - out
@@ -2491,24 +2139,8 @@ func blueNoiseBias(x, y, phaseX, phaseY int, amplitude float64) float64 {
 	return ((sample / maxRank) - 0.5) * amplitude
 }
 
-func shuffleBias(x, y, phaseX, phaseY int, amplitude float64) float64 {
-	v := splitmix64(uint64((x+phaseX)&0xffff) | (uint64((y+phaseY)&0xffff) << 16) | 0x9e3779b97f4a7c15)
-	norm := float64(v&0xffff) / 65535.0
-	return (norm - 0.5) * amplitude
-}
-
-func noiseBias(x, y, phaseX, phaseY int, amplitude float64, shuffle bool) float64 {
-	if shuffle {
-		return shuffleBias(x, y, phaseX, phaseY, amplitude)
-	}
+func noiseBias(x, y, phaseX, phaseY int, amplitude float64) float64 {
 	return blueNoiseBias(x, y, phaseX, phaseY, amplitude)
-}
-
-func splitmix64(x uint64) uint64 {
-	x += 0x9e3779b97f4a7c15
-	x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
-	x = (x ^ (x >> 27)) * 0x94d049bb133111eb
-	return x ^ (x >> 31)
 }
 
 func planeBlueNoisePhase(plane []uint8, w, h int, salt uint64) (int, int) {
@@ -4280,10 +3912,6 @@ func bitsNeeded(v int) int {
 		v >>= 1
 	}
 	return n
-}
-
-func smoothBlocks(img *image.RGBA) *image.RGBA {
-	return img
 }
 
 func min(a, b int) int {
