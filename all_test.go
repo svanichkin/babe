@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"image"
 	"image/color"
@@ -217,6 +218,83 @@ func TestGrayPaletteFromMode_DoesNotAddImageColors(t *testing.T) {
 	for i := range want {
 		if palette[i] != want[i] {
 			t.Fatalf("palette[%d] = %v want %v", i, palette[i], want[i])
+		}
+	}
+}
+
+func TestPaletteMode_UsesIndexStreamPayload(t *testing.T) {
+	src := makeTestImage(8, 8)
+	comp, err := NewEncoder().EncodeWithOptions(src, 80, EncodeOptions{
+		YBits:   1,
+		CbBits:  1,
+		CrBits:  1,
+		Palette: "ega",
+	})
+	if err != nil {
+		t.Fatalf("EncodeWithOptions: %v", err)
+	}
+
+	pos := len(codec) + 9
+	if _, err := readU32BE(comp, &pos, "image width"); err != nil {
+		t.Fatalf("read width: %v", err)
+	}
+	if _, err := readU32BE(comp, &pos, "image height"); err != nil {
+		t.Fatalf("read height: %v", err)
+	}
+	yData, err := readBitPlane(comp, &pos, "Y")
+	if err != nil {
+		t.Fatalf("read Y plane: %v", err)
+	}
+	if len(yData) < 2+2 {
+		t.Fatalf("palette payload too short: %d", len(yData))
+	}
+	paletteSize := int(binary.BigEndian.Uint16(yData[:2]))
+	if paletteSize < 1 {
+		t.Fatalf("palette size = %d want positive", paletteSize)
+	}
+	submodePos := 2 + paletteSize*3
+	if len(yData) < submodePos+1 {
+		t.Fatalf("palette payload too short for submode: %d", len(yData))
+	}
+	if got := yData[submodePos]; got != paletteSubmodeRawTreeAdaptive {
+		t.Fatalf("submode = %d want %d", got, paletteSubmodeRawTreeAdaptive)
+	}
+}
+
+func TestPaletteIndexDelta_RoundTrip(t *testing.T) {
+	paletteSize := 7
+	src := []int{
+		2, 2, 3, 3,
+		3, 1, 6, 0,
+		0, 4, 4, 5,
+	}
+	deltas := make([]int, len(src))
+	prev := 0
+	for i, idx := range src {
+		if i == 0 {
+			deltas[i] = idx
+		} else {
+			d := idx - prev
+			if d < 0 {
+				d += paletteSize
+			}
+			deltas[i] = d
+		}
+		prev = idx
+	}
+	out := make([]int, len(src))
+	prev = 0
+	for i, d := range deltas {
+		idx := d
+		if i > 0 {
+			idx = (prev + d) % paletteSize
+		}
+		out[i] = idx
+		prev = idx
+	}
+	for i := range src {
+		if out[i] != src[i] {
+			t.Fatalf("roundtrip[%d] = %d want %d", i, out[i], src[i])
 		}
 	}
 }

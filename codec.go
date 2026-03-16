@@ -9,6 +9,7 @@ import (
 	"image/color"
 	"io"
 	"math"
+	"math/bits"
 	"runtime"
 	"sort"
 	"strconv"
@@ -30,6 +31,22 @@ const (
 	colorModeYCbCr byte = iota
 	colorModeRGB
 	colorModePaletteRGB
+)
+
+const (
+	paletteSubmodeRawIndices      = 1
+	paletteSubmodeTileSubset      = 2
+	paletteSubmodeReconstruct     = 3
+	paletteSubmodeBlockRaw        = 4
+	paletteSubmodeBlockSubset     = 5
+	paletteSubmodeRawTop16        = 6
+	paletteSubmodeRawTree         = 7
+	paletteSubmodeRawTop16Tree    = 8
+	paletteSubmodeRawTreeAdaptive = 9
+	paletteSubmodeExtended        = 255
+	paletteSubmodeExtColorMasks   = 1
+	paletteSubmodeExtIndexStream  = 2
+	paletteSubmodeExtIndexDelta   = 3
 )
 
 const (
@@ -63,6 +80,7 @@ const (
 var (
 	blueNoiseTileOnce sync.Once
 	blueNoiseTile     []uint16
+	hilbertOrderCache sync.Map
 )
 
 var stylizedColorPalette = [][3]uint8{
@@ -562,7 +580,7 @@ func (e *Encoder) EncodeWithOptions(img image.Image, quality int, opts EncodeOpt
 			yBits = max(1, bitsNeeded(len(chosenPalette)-1))
 			cbBits = 0
 			crBits = 0
-			quantizePaletteIndices(e.yPlane, e.cbPlane, e.crPlane, w, h, quality, chosenPalette, yPhaseX, yPhaseY, cbPhaseX, cbPhaseY, crPhaseX, crPhaseY, true, opts.TileSize, &e.yBits)
+			quantizePaletteIndices(e.yPlane, e.cbPlane, e.crPlane, w, h, quality, chosenPalette, yPhaseX, yPhaseY, cbPhaseX, cbPhaseY, crPhaseX, crPhaseY, strings.HasPrefix(opts.Palette, "adaptive:"), opts.TileSize, &e.yBits)
 		} else {
 			if cbBits > 0 {
 				channelsMask |= channelFlagCb
@@ -1158,6 +1176,123 @@ func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, p
 	if len(palette) < 1 {
 		palette = rgbPrimaryPalette
 	}
+
+	rAmp := ditherAmplitude(44, quality)
+	gAmp := ditherAmplitude(28, quality)
+	bAmp := ditherAmplitude(28, quality)
+	fsStrength := fsDiffusionStrength(quality)
+	tile := getBlueNoiseTile()
+	tileMask := blueNoiseTileSize - 1
+	maxRank := float64(len(tile) - 1)
+	pixelIdx := make([]int, w*h)
+	freq := make([]int, len(palette))
+	errRCurr := make([]float64, w+2)
+	errRNext := make([]float64, w+2)
+	errGCurr := make([]float64, w+2)
+	errGNext := make([]float64, w+2)
+	errBCurr := make([]float64, w+2)
+	errBNext := make([]float64, w+2)
+	var rIntegral, gIntegral, bIntegral []uint32
+	var xLo, xHi, yLo, yHi []int
+	if adaptive {
+		rIntegral = buildIntegralU8(rPlane, w, h)
+		gIntegral = buildIntegralU8(gPlane, w, h)
+		bIntegral = buildIntegralU8(bPlane, w, h)
+		xLo = make([]int, w)
+		xHi = make([]int, w)
+		for x := 0; x < w; x++ {
+			xLo[x] = max(0, x-neighborhoodBackSpan)
+			xHi[x] = min(w-1, x+neighborhoodForwardSpan)
+		}
+		yLo = make([]int, h)
+		yHi = make([]int, h)
+		for y := 0; y < h; y++ {
+			yLo[y] = max(0, y-neighborhoodBackSpan)
+			yHi[y] = min(h-1, y+neighborhoodForwardSpan)
+		}
+	}
+
+	for y := 0; y < h; y++ {
+		row := y * w
+		errRRow := errRCurr
+		errRNextRow := errRNext
+		errGRow := errGCurr
+		errGNextRow := errGNext
+		errBRow := errBCurr
+		errBNextRow := errBNext
+		if y&1 == 0 {
+			for x := 0; x < w; x++ {
+				i := row + x
+				rXi := (x + rPhaseX) & tileMask
+				rYi := (y + rPhaseY) & tileMask
+				gXi := (x + gPhaseX) & tileMask
+				gYi := (y + gPhaseY) & tileMask
+				bXi := (x + bPhaseX) & tileMask
+				bYi := (y + bPhaseY) & tileMask
+				rBias := ((float64(tile[(rYi*blueNoiseTileSize)+rXi]) / maxRank) - 0.5) * rAmp
+				gBias := ((float64(tile[(gYi*blueNoiseTileSize)+gXi]) / maxRank) - 0.5) * gAmp
+				bBias := ((float64(tile[(bYi*blueNoiseTileSize)+bXi]) / maxRank) - 0.5) * bAmp
+				targetR := clamp255(float64(rPlane[i]) + errRRow[x+1] + rBias)
+				targetG := clamp255(float64(gPlane[i]) + errGRow[x+1] + gBias)
+				targetB := clamp255(float64(bPlane[i]) + errBRow[x+1] + bBias)
+				if adaptive {
+					targetR, targetG, targetB = adaptivePaletteTargetIntegral(rPlane, gPlane, bPlane, rIntegral, gIntegral, bIntegral, w, xLo[x], xHi[x], yLo[y], yHi[y], x, y, targetR, targetG, targetB)
+				}
+				idx := nearestPaletteEntry(targetR, targetG, targetB, palette)
+				out := palette[idx]
+				pixelIdx[i] = idx
+				freq[idx]++
+				diffuseColorError(targetR-float64(out[0]), targetG-float64(out[1]), targetB-float64(out[2]), x, errRRow, errRNextRow, errGRow, errGNextRow, errBRow, errBNextRow, true, true, true, fsStrength)
+			}
+		} else {
+			for x := w - 1; x >= 0; x-- {
+				i := row + x
+				rXi := (x + rPhaseX) & tileMask
+				rYi := (y + rPhaseY) & tileMask
+				gXi := (x + gPhaseX) & tileMask
+				gYi := (y + gPhaseY) & tileMask
+				bXi := (x + bPhaseX) & tileMask
+				bYi := (y + bPhaseY) & tileMask
+				rBias := ((float64(tile[(rYi*blueNoiseTileSize)+rXi]) / maxRank) - 0.5) * rAmp
+				gBias := ((float64(tile[(gYi*blueNoiseTileSize)+gXi]) / maxRank) - 0.5) * gAmp
+				bBias := ((float64(tile[(bYi*blueNoiseTileSize)+bXi]) / maxRank) - 0.5) * bAmp
+				targetR := clamp255(float64(rPlane[i]) + errRRow[x+1] + rBias)
+				targetG := clamp255(float64(gPlane[i]) + errGRow[x+1] + gBias)
+				targetB := clamp255(float64(bPlane[i]) + errBRow[x+1] + bBias)
+				if adaptive {
+					targetR, targetG, targetB = adaptivePaletteTargetIntegral(rPlane, gPlane, bPlane, rIntegral, gIntegral, bIntegral, w, xLo[x], xHi[x], yLo[y], yHi[y], x, y, targetR, targetG, targetB)
+				}
+				idx := nearestPaletteEntry(targetR, targetG, targetB, palette)
+				out := palette[idx]
+				pixelIdx[i] = idx
+				freq[idx]++
+				diffuseColorError(targetR-float64(out[0]), targetG-float64(out[1]), targetB-float64(out[2]), x, errRRow, errRNextRow, errGRow, errGNextRow, errBRow, errBNextRow, true, true, false, fsStrength)
+			}
+		}
+		for i := range errRCurr {
+			errRCurr[i], errRNext[i] = errRNext[i], 0
+			errGCurr[i], errGNext[i] = errGNext[i], 0
+			errBCurr[i], errBNext[i] = errBNext[i], 0
+		}
+	}
+	perm := reorderPaletteByLocality(palette, freq)
+	if len(perm) == len(palette) {
+		reordered := make([][3]uint8, len(palette))
+		remap := make([]int, len(palette))
+		for newIdx, oldIdx := range perm {
+			reordered[newIdx] = palette[oldIdx]
+			remap[oldIdx] = newIdx
+		}
+		palette = reordered
+		remappedFreq := make([]int, len(freq))
+		for oldIdx, f := range freq {
+			remappedFreq[remap[oldIdx]] = f
+		}
+		freq = remappedFreq
+		for i, idx := range pixelIdx {
+			pixelIdx[i] = remap[idx]
+		}
+	}
 	hdr := make([]byte, 2+len(palette)*3)
 	binary.BigEndian.PutUint16(hdr[0:2], uint16(len(palette)))
 	pos := 2
@@ -1168,171 +1303,102 @@ func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, p
 		pos += 3
 	}
 	dst.Write(hdr)
-
-	rAmp := ditherAmplitude(44, quality)
-	gAmp := ditherAmplitude(28, quality)
-	bAmp := ditherAmplitude(28, quality)
-	fsStrength := fsDiffusionStrength(quality)
-	rowIdx := make([]int, w)
-	pixelIdx := make([]int, w*h)
-	freq := make([]int, len(palette))
-	errRCurr := make([]float64, w+2)
-	errRNext := make([]float64, w+2)
-	errGCurr := make([]float64, w+2)
-	errGNext := make([]float64, w+2)
-	errBCurr := make([]float64, w+2)
-	errBNext := make([]float64, w+2)
-
-	for y := 0; y < h; y++ {
-		row := y * w
-		if y&1 == 0 {
-			for x := 0; x < w; x++ {
-				i := row + x
-				targetR := clamp255(applyQualityExposure(float64(rPlane[i]), quality) + errRCurr[x+1] + noiseBias(x, y, rPhaseX, rPhaseY, rAmp))
-				targetG := clamp255(applyQualityExposure(float64(gPlane[i]), quality) + errGCurr[x+1] + noiseBias(x, y, gPhaseX, gPhaseY, gAmp))
-				targetB := clamp255(applyQualityExposure(float64(bPlane[i]), quality) + errBCurr[x+1] + noiseBias(x, y, bPhaseX, bPhaseY, bAmp))
-				if adaptive {
-					targetR, targetG, targetB = adaptivePaletteTarget(rPlane, gPlane, bPlane, w, h, x, y, targetR, targetG, targetB)
-				}
-				idx, out := nearestPaletteEntry(targetR, targetG, targetB, palette)
-				rowIdx[x] = idx
-				diffuseColorError(targetR-float64(out[0]), targetG-float64(out[1]), targetB-float64(out[2]), x, errRCurr, errRNext, errGCurr, errGNext, errBCurr, errBNext, true, true, true, fsStrength)
-			}
-		} else {
-			for x := w - 1; x >= 0; x-- {
-				i := row + x
-				targetR := clamp255(applyQualityExposure(float64(rPlane[i]), quality) + errRCurr[x+1] + noiseBias(x, y, rPhaseX, rPhaseY, rAmp))
-				targetG := clamp255(applyQualityExposure(float64(gPlane[i]), quality) + errGCurr[x+1] + noiseBias(x, y, gPhaseX, gPhaseY, gAmp))
-				targetB := clamp255(applyQualityExposure(float64(bPlane[i]), quality) + errBCurr[x+1] + noiseBias(x, y, bPhaseX, bPhaseY, bAmp))
-				if adaptive {
-					targetR, targetG, targetB = adaptivePaletteTarget(rPlane, gPlane, bPlane, w, h, x, y, targetR, targetG, targetB)
-				}
-				idx, out := nearestPaletteEntry(targetR, targetG, targetB, palette)
-				rowIdx[x] = idx
-				diffuseColorError(targetR-float64(out[0]), targetG-float64(out[1]), targetB-float64(out[2]), x, errRCurr, errRNext, errGCurr, errGNext, errBCurr, errBNext, true, true, false, fsStrength)
-			}
-		}
-		for x := 0; x < w; x++ {
-			idx := rowIdx[x]
-			pixelIdx[row+x] = idx
-			freq[idx]++
-		}
-		for i := range errRCurr {
-			errRCurr[i], errRNext[i] = errRNext[i], 0
-			errGCurr[i], errGNext[i] = errGNext[i], 0
-			errBCurr[i], errBNext[i] = errBNext[i], 0
-		}
+	var stream bytes.Buffer
+	dst.WriteByte(paletteSubmodeRawTreeAdaptive)
+	order := make([]byte, len(palette))
+	for i := range order {
+		order[i] = byte(i)
 	}
-
-	canvasIdx := 0
-	for i := 1; i < len(freq); i++ {
-		if freq[i] > freq[canvasIdx] {
-			canvasIdx = i
+	sort.Slice(order, func(i, j int) bool {
+		fi := freq[int(order[i])]
+		fj := freq[int(order[j])]
+		if fi != fj {
+			return fi > fj
 		}
+		return order[i] < order[j]
+	})
+	stream.Grow(len(order) + len(pixelIdx))
+	stream.Write(order)
+	hOrder := hilbertIndices(w, h)
+	values := make([]int, len(hOrder))
+	for i, pi := range hOrder {
+		values[i] = pixelIdx[pi]
 	}
-	if tileSize <= 0 {
-		tileSize = paletteTileSize
-	}
-	dst.WriteByte(2) // tile-local subset mode
-	dst.WriteByte(byte(tileSize))
-	dst.WriteByte(byte(tileSize))
-
-	tilesX := ceilDiv(w, tileSize)
-	tilesY := ceilDiv(h, tileSize)
-	for ty := 0; ty < tilesY; ty++ {
-		y0 := ty * tileSize
-		y1 := min(y0+tileSize, h)
-		for tx := 0; tx < tilesX; tx++ {
-			x0 := tx * tileSize
-			x1 := min(x0+tileSize, w)
-
-			localFreq := make(map[int]int, len(palette))
-			for y := y0; y < y1; y++ {
-				row := y * w
-				for x := x0; x < x1; x++ {
-					localFreq[pixelIdx[row+x]]++
-				}
-			}
-			subset := make([]int, 0, len(localFreq))
-			for idx := range localFreq {
-				subset = append(subset, idx)
-			}
-			sort.Slice(subset, func(i, j int) bool {
-				fi := localFreq[subset[i]]
-				fj := localFreq[subset[j]]
-				if fi != fj {
-					return fi > fj
-				}
-				return subset[i] < subset[j]
-			})
-			if len(subset) < 1 {
-				subset = append(subset, canvasIdx)
-			}
-			dst.WriteByte(byte(len(subset)))
-			for _, idx := range subset {
-				dst.WriteByte(byte(idx))
-			}
-			localBits := bitsNeeded(len(subset) - 1)
-			if localBits < 1 {
-				localBits = 1
-			}
-			inv := make([]int, len(palette))
-			for i := range inv {
-				inv[i] = -1
-			}
-			for i, idx := range subset {
-				inv[idx] = i
-			}
-			var tileBuf bytes.Buffer
-			bw := newBitWriter(&tileBuf)
-			order := zOrderIndices(x1-x0, y1-y0)
-			values := make([]int, 0, len(order))
-			for _, localPi := range order {
-				lx := localPi % (x1 - x0)
-				ly := localPi / (x1 - x0)
-				globalPi := (y0+ly)*w + (x0 + lx)
-				values = append(values, inv[pixelIdx[globalPi]])
-			}
-			for bit := localBits - 1; bit >= 0; bit-- {
-				for _, v := range values {
-					bw.writeBit(((v >> bit) & 1) != 0)
-				}
-			}
-			bw.flush()
-			dst.Write(tileBuf.Bytes())
-		}
-	}
+	encodeRawIndexTreeFreq(values, order, &stream)
+	dst.Write(stream.Bytes())
 }
 
 func adaptivePaletteTarget(rPlane, gPlane, bPlane []uint8, w, h, x, y int, targetR, targetG, targetB float64) (float64, float64, float64) {
-	localR := neighborhoodMean(rPlane, w, h, x, y)
-	localG := neighborhoodMean(gPlane, w, h, x, y)
-	localB := neighborhoodMean(bPlane, w, h, x, y)
-	rangeNorm := neighborhoodRange(rPlane, w, h, x, y) + neighborhoodRange(gPlane, w, h, x, y) + neighborhoodRange(bPlane, w, h, x, y)
-	rangeNorm /= 3.0 * 255.0
-	detailWeight := 0.18 + rangeNorm*0.28
-	targetR = clamp255(targetR*(1.0-detailWeight) + localR*detailWeight)
-	targetG = clamp255(targetG*(1.0-detailWeight) + localG*detailWeight)
-	targetB = clamp255(targetB*(1.0-detailWeight) + localB*detailWeight)
+	localR, rangeR := neighborhoodMeanRange(rPlane, w, h, x, y)
+	localG, rangeG := neighborhoodMeanRange(gPlane, w, h, x, y)
+	localB, rangeB := neighborhoodMeanRange(bPlane, w, h, x, y)
+	rangeSum := rangeR + rangeG + rangeB
+	weight := 18 + (rangeSum * 28 / (3 * 255))
+	if weight < 18 {
+		weight = 18
+	}
+	if weight > 46 {
+		weight = 46
+	}
+	targetR = clamp255((targetR*float64(100-weight) + localR*float64(weight)) / 100.0)
+	targetG = clamp255((targetG*float64(100-weight) + localG*float64(weight)) / 100.0)
+	targetB = clamp255((targetB*float64(100-weight) + localB*float64(weight)) / 100.0)
 	return targetR, targetG, targetB
 }
 
-func nearestPaletteEntry(targetR, targetG, targetB float64, palette [][3]uint8) (int, [3]uint8) {
+func adaptivePaletteTargetIntegral(rPlane, gPlane, bPlane []uint8, rIntegral, gIntegral, bIntegral []uint32, w, x0, x1, y0, y1, x, y int, targetR, targetG, targetB float64) (float64, float64, float64) {
+	localR := rectMeanIntegral(rIntegral, w, x0, x1, y0, y1)
+	localG := rectMeanIntegral(gIntegral, w, x0, x1, y0, y1)
+	localB := rectMeanIntegral(bIntegral, w, x0, x1, y0, y1)
+	rangeR := neighborhoodRangeBounds(rPlane, w, x0, x1, y0, y1)
+	rangeG := neighborhoodRangeBounds(gPlane, w, x0, x1, y0, y1)
+	rangeB := neighborhoodRangeBounds(bPlane, w, x0, x1, y0, y1)
+	rangeSum := rangeR + rangeG + rangeB
+	weight := 18 + (rangeSum * 28 / (3 * 255))
+	if weight < 18 {
+		weight = 18
+	}
+	if weight > 46 {
+		weight = 46
+	}
+	targetR = clamp255((targetR*float64(100-weight) + localR*float64(weight)) / 100.0)
+	targetG = clamp255((targetG*float64(100-weight) + localG*float64(weight)) / 100.0)
+	targetB = clamp255((targetB*float64(100-weight) + localB*float64(weight)) / 100.0)
+	return targetR, targetG, targetB
+}
+
+func nearestPaletteEntry(targetR, targetG, targetB float64, palette [][3]uint8) int {
+	tr := int(targetR + 0.5)
+	tg := int(targetG + 0.5)
+	tb := int(targetB + 0.5)
+	if tr < 0 {
+		tr = 0
+	} else if tr > 255 {
+		tr = 255
+	}
+	if tg < 0 {
+		tg = 0
+	} else if tg > 255 {
+		tg = 255
+	}
+	if tb < 0 {
+		tb = 0
+	} else if tb > 255 {
+		tb = 255
+	}
 	bestIdx := 0
-	best := palette[0]
-	bestDist := math.MaxFloat64
+	bestDist := int(^uint(0) >> 1)
 	for i, p := range palette {
-		dr := targetR - float64(p[0])
-		dg := targetG - float64(p[1])
-		db := targetB - float64(p[2])
-		dist := dr*dr*1.2 + dg*dg + db*db
+		dr := tr - int(p[0])
+		dg := tg - int(p[1])
+		db := tb - int(p[2])
+		dist := dr*dr*12 + dg*dg*10 + db*db*10
 		if dist < bestDist {
 			bestDist = dist
 			bestIdx = i
-			best = p
 		}
 	}
-	return bestIdx, best
+	return bestIdx
 }
 
 func nearestPaletteColor(targetY, targetCb, targetCr float64, yLevels, cbLevels, crLevels []uint8, hasCb, hasCr bool) (int, int, int, float64, float64, float64) {
@@ -2074,6 +2140,76 @@ func neighborhoodMean(plane []uint8, w, h, x, y int) float64 {
 	return float64(sum) / float64(count)
 }
 
+func neighborhoodMeanRange(plane []uint8, w, h, x, y int) (float64, int) {
+	var sum int
+	var count int
+	lo := 255
+	hi := 0
+	for yy := max(0, y-neighborhoodBackSpan); yy <= min(h-1, y+neighborhoodForwardSpan); yy++ {
+		row := yy * w
+		for xx := max(0, x-neighborhoodBackSpan); xx <= min(w-1, x+neighborhoodForwardSpan); xx++ {
+			v := int(plane[row+xx])
+			sum += v
+			count++
+			if v < lo {
+				lo = v
+			}
+			if v > hi {
+				hi = v
+			}
+		}
+	}
+	if count == 0 {
+		return 0, 0
+	}
+	return float64(sum) / float64(count), hi - lo
+}
+
+func neighborhoodRangeBounds(plane []uint8, w, x0, x1, y0, y1 int) int {
+	lo := 255
+	hi := 0
+	for yy := y0; yy <= y1; yy++ {
+		row := yy * w
+		for xx := x0; xx <= x1; xx++ {
+			v := int(plane[row+xx])
+			if v < lo {
+				lo = v
+			}
+			if v > hi {
+				hi = v
+			}
+		}
+	}
+	return hi - lo
+}
+
+func buildIntegralU8(plane []uint8, w, h int) []uint32 {
+	integral := make([]uint32, (w+1)*(h+1))
+	stride := w + 1
+	for y := 0; y < h; y++ {
+		rowSum := uint32(0)
+		srcRow := y * w
+		dstRow := (y + 1) * stride
+		prevRow := y * stride
+		for x := 0; x < w; x++ {
+			rowSum += uint32(plane[srcRow+x])
+			integral[dstRow+x+1] = integral[prevRow+x+1] + rowSum
+		}
+	}
+	return integral
+}
+
+func rectMeanIntegral(integral []uint32, w, x0, x1, y0, y1 int) float64 {
+	stride := w + 1
+	x0i := x0
+	x1i := x1 + 1
+	y0i := y0
+	y1i := y1 + 1
+	sum := integral[y1i*stride+x1i] - integral[y0i*stride+x1i] - integral[y1i*stride+x0i] + integral[y0i*stride+x0i]
+	count := (x1 - x0 + 1) * (y1 - y0 + 1)
+	return float64(sum) / float64(count)
+}
+
 func neighborhoodRange(plane []uint8, w, h, x, y int) float64 {
 	lo := 255
 	hi := 0
@@ -2441,7 +2577,135 @@ func decodePaletteToRGBA(dst *image.RGBA, data []byte, bitDepth int, yStorageMod
 	}
 	submode := int(data[pos])
 	pos++
-	if submode == 2 {
+	if submode == paletteSubmodeExtended {
+		if len(data)-pos < 2 {
+			return fmt.Errorf("decode: truncated extended palette submode")
+		}
+		extSubmode := int(data[pos])
+		pos++
+		if extSubmode == paletteSubmodeExtColorMasks {
+			canvasIdx := int(data[pos])
+			pos++
+			if canvasIdx < 0 || canvasIdx >= paletteSize {
+				return fmt.Errorf("decode: invalid color-mask canvas index")
+			}
+			maskLen := packedPlaneLenBits(w, h, 1)
+			order := make([]int, 0, paletteSize-1)
+			for pi := 0; pi < paletteSize; pi++ {
+				if pi != canvasIdx {
+					order = append(order, pi)
+				}
+			}
+			maskPos := make([][]byte, paletteSize)
+			for _, pi := range order {
+				if len(data)-pos < 1+maskLen {
+					return fmt.Errorf("decode: truncated color mask payload")
+				}
+				maskedIdx := int(data[pos])
+				pos++
+				if maskedIdx != pi {
+					return fmt.Errorf("decode: unexpected color mask order")
+				}
+				maskPos[pi] = data[pos : pos+maskLen]
+				pos += maskLen
+			}
+			for y := 0; y < h; y++ {
+				rowOff := y * dst.Stride
+				for x := 0; x < w; x++ {
+					idx := canvasIdx
+					pixelIdx := y*w + x
+					for _, pi := range order {
+						if monoBitAt(maskPos[pi], pixelIdx) {
+							idx = pi
+						}
+					}
+					p := idx * 3
+					off := rowOff + x*4
+					dst.Pix[off+0] = palette[p+0]
+					dst.Pix[off+1] = palette[p+1]
+					dst.Pix[off+2] = palette[p+2]
+					dst.Pix[off+3] = 255
+				}
+			}
+			_, _, _ = bitDepth, patternW, patternH
+			return nil
+		}
+		if extSubmode == paletteSubmodeExtIndexStream {
+			if len(data)-pos < 1 {
+				return fmt.Errorf("decode: truncated index-stream canvas index")
+			}
+			canvasIdx := int(data[pos])
+			pos++
+			if canvasIdx < 0 || canvasIdx >= paletteSize {
+				return fmt.Errorf("decode: invalid index-stream canvas index")
+			}
+			indexBits := bitsNeeded(paletteSize - 1)
+			if indexBits < 1 {
+				indexBits = 1
+			}
+			pixels := w * h
+			streamBytes := (pixels*indexBits + 7) >> 3
+			if len(data)-pos < streamBytes {
+				return fmt.Errorf("decode: truncated index-stream payload")
+			}
+			br := newBitReader(data[pos : pos+streamBytes])
+			pos += streamBytes
+			for i := 0; i < pixels; i++ {
+				idx, err := br.readBits(uint8(indexBits))
+				if err != nil {
+					return fmt.Errorf("decode: truncated index-stream payload")
+				}
+				if int(idx) >= paletteSize {
+					return fmt.Errorf("decode: index-stream palette index out of range")
+				}
+				p := int(idx) * 3
+				off := (i/w)*dst.Stride + (i%w)*4
+				dst.Pix[off+0] = palette[p+0]
+				dst.Pix[off+1] = palette[p+1]
+				dst.Pix[off+2] = palette[p+2]
+				dst.Pix[off+3] = 255
+			}
+			_, _, _, _ = bitDepth, patternW, patternH, canvasIdx
+			return nil
+		}
+		if extSubmode == paletteSubmodeExtIndexDelta {
+			if len(data)-pos < 1 {
+				return fmt.Errorf("decode: truncated index-delta canvas index")
+			}
+			canvasIdx := int(data[pos])
+			pos++
+			if canvasIdx < 0 || canvasIdx >= paletteSize {
+				return fmt.Errorf("decode: invalid index-delta canvas index")
+			}
+			pixels := w * h
+			if len(data)-pos < pixels {
+				return fmt.Errorf("decode: truncated index-delta payload")
+			}
+			stream := data[pos : pos+pixels]
+			pos += pixels
+			prev := 0
+			for i := 0; i < pixels; i++ {
+				idx := int(stream[i])
+				if i > 0 {
+					idx = (prev + idx) % paletteSize
+				}
+				if idx < 0 || idx >= paletteSize {
+					return fmt.Errorf("decode: index-delta palette index out of range")
+				}
+				p := idx * 3
+				off := (i/w)*dst.Stride + (i%w)*4
+				dst.Pix[off+0] = palette[p+0]
+				dst.Pix[off+1] = palette[p+1]
+				dst.Pix[off+2] = palette[p+2]
+				dst.Pix[off+3] = 255
+				prev = idx
+			}
+			_, _, _, _ = bitDepth, patternW, patternH, canvasIdx
+			return nil
+		}
+		return fmt.Errorf("decode: unknown extended palette submode %d", extSubmode)
+	}
+	if submode == paletteSubmodeTileSubset {
 		if len(data)-pos < 2 {
 			return fmt.Errorf("decode: truncated tile subset header")
 		}
@@ -2523,7 +2787,7 @@ func decodePaletteToRGBA(dst *image.RGBA, data []byte, bitDepth int, yStorageMod
 		_, _, _ = bitDepth, patternW, patternH
 		return nil
 	}
-	if submode == 5 {
+	if submode == paletteSubmodeBlockSubset {
 		if len(data)-pos < 1 {
 			return fmt.Errorf("decode: truncated block subset header")
 		}
@@ -2589,7 +2853,7 @@ func decodePaletteToRGBA(dst *image.RGBA, data []byte, bitDepth int, yStorageMod
 		_, _, _ = bitDepth, patternW, patternH
 		return nil
 	}
-	if submode == 4 {
+	if submode == paletteSubmodeBlockRaw {
 		if len(data)-pos < 1 {
 			return fmt.Errorf("decode: truncated block raw header")
 		}
@@ -2635,7 +2899,7 @@ func decodePaletteToRGBA(dst *image.RGBA, data []byte, bitDepth int, yStorageMod
 		_, _, _ = bitDepth, patternW, patternH
 		return nil
 	}
-	if submode == 1 {
+	if submode == paletteSubmodeRawIndices {
 		indexBits := bitsNeeded(paletteSize - 1)
 		if indexBits < 1 {
 			indexBits = 1
@@ -2664,7 +2928,7 @@ func decodePaletteToRGBA(dst *image.RGBA, data []byte, bitDepth int, yStorageMod
 		_, _, _ = bitDepth, patternW, patternH
 		return nil
 	}
-	if submode == 6 {
+	if submode == paletteSubmodeRawTop16 {
 		indexBits := bitsNeeded(paletteSize - 1)
 		if indexBits < 1 {
 			indexBits = 1
@@ -2771,7 +3035,7 @@ func decodePaletteToRGBA(dst *image.RGBA, data []byte, bitDepth int, yStorageMod
 		_, _, _ = bitDepth, patternW, patternH
 		return nil
 	}
-	if submode == 7 {
+	if submode == paletteSubmodeRawTree {
 		values, err := decodeRawIndexTree(data, &pos, w*h, 0, paletteSize)
 		if err != nil {
 			return err
@@ -2790,7 +3054,7 @@ func decodePaletteToRGBA(dst *image.RGBA, data []byte, bitDepth int, yStorageMod
 		_, _, _ = bitDepth, patternW, patternH
 		return nil
 	}
-	if submode == 8 {
+	if submode == paletteSubmodeRawTop16Tree {
 		indexBits := bitsNeeded(paletteSize - 1)
 		if indexBits < 1 {
 			indexBits = 1
@@ -2893,22 +3157,27 @@ func decodePaletteToRGBA(dst *image.RGBA, data []byte, bitDepth int, yStorageMod
 		_, _, _ = bitDepth, patternW, patternH
 		return nil
 	}
-	if submode == 9 {
+	if submode == paletteSubmodeRawTreeAdaptive {
 		if len(data)-pos < paletteSize {
 			return fmt.Errorf("decode: truncated raw treeadapt order")
 		}
-		order := append([]byte(nil), data[pos:pos+paletteSize]...)
+		order := data[pos : pos+paletteSize]
 		pos += paletteSize
 		values, err := decodeRawIndexTreeFreq(data, &pos, w*h, order)
 		if err != nil {
 			return err
+		}
+		hOrder := hilbertIndices(w, h)
+		if len(hOrder) != len(values) {
+			return fmt.Errorf("decode: hilbert order length mismatch")
 		}
 		for i, idx := range values {
 			if idx < 0 || idx >= paletteSize {
 				return fmt.Errorf("decode: raw treeadapt palette index out of range")
 			}
 			p := idx * 3
-			off := (i/w)*dst.Stride + (i%w)*4
+			pi := hOrder[i]
+			off := (pi/w)*dst.Stride + (pi%w)*4
 			dst.Pix[off+0] = palette[p+0]
 			dst.Pix[off+1] = palette[p+1]
 			dst.Pix[off+2] = palette[p+2]
@@ -2917,7 +3186,7 @@ func decodePaletteToRGBA(dst *image.RGBA, data []byte, bitDepth int, yStorageMod
 		_, _, _ = bitDepth, patternW, patternH
 		return nil
 	}
-	if submode == 3 {
+	if submode == paletteSubmodeReconstruct {
 		if len(data)-pos < 2 {
 			return fmt.Errorf("decode: truncated reconstruct palette header")
 		}
@@ -3469,6 +3738,97 @@ func monoBitSet(dst []byte, idx int) {
 	dst[byteIdx] |= 1 << shift
 }
 
+func reorderPaletteByLocality(palette [][3]uint8, freq []int) []int {
+	if len(palette) == 0 {
+		return nil
+	}
+	used := make([]bool, len(palette))
+	order := make([]int, 0, len(palette))
+	start := 0
+	for i := 1; i < len(palette); i++ {
+		if freq[i] > freq[start] {
+			start = i
+		}
+	}
+	order = append(order, start)
+	used[start] = true
+	for len(order) < len(palette) {
+		last := order[len(order)-1]
+		best := -1
+		bestScoreNum := int(^uint(0) >> 1)
+		bestScoreDen := 1
+		for i := 0; i < len(palette); i++ {
+			if used[i] {
+				continue
+			}
+			dr := int(palette[last][0]) - int(palette[i][0])
+			dg := int(palette[last][1]) - int(palette[i][1])
+			db := int(palette[last][2]) - int(palette[i][2])
+			dist := dr*dr + dg*dg + db*db
+			den := 1 + freq[i]
+			if best == -1 || dist*bestScoreDen < bestScoreNum*den {
+				bestScoreNum = dist
+				bestScoreDen = den
+				best = i
+			}
+		}
+		if best < 0 {
+			break
+		}
+		used[best] = true
+		order = append(order, best)
+	}
+	return order
+}
+
+func hilbertIndices(w, h int) []int {
+	if w <= 0 || h <= 0 {
+		return nil
+	}
+	key := uint64(uint32(w))<<32 | uint64(uint32(h))
+	if cached, ok := hilbertOrderCache.Load(key); ok {
+		return cached.([]int)
+	}
+	n := 1
+	for n < w || n < h {
+		n <<= 1
+	}
+	order := make([]int, 0, w*h)
+	for d := 0; d < n*n && len(order) < w*h; d++ {
+		x, y := hilbertD2XY(n, d)
+		if x < w && y < h {
+			order = append(order, y*w+x)
+		}
+	}
+	hilbertOrderCache.Store(key, order)
+	return order
+}
+
+func hilbertD2XY(n, d int) (int, int) {
+	x, y := 0, 0
+	t := d
+	for s := 1; s < n; s <<= 1 {
+		rx := 1 & (t >> 1)
+		ry := 1 & (t ^ rx)
+		x, y = hilbertRotate(s, x, y, rx, ry)
+		x += s * rx
+		y += s * ry
+		t >>= 2
+	}
+	return x, y
+}
+
+func hilbertRotate(n, x, y, rx, ry int) (int, int) {
+	if ry == 0 {
+		if rx == 1 {
+			x = n - 1 - x
+			y = n - 1 - y
+		}
+		x, y = y, x
+	}
+	return x, y
+}
+
 func encodeRawIndexTree(values []int, lo, hi int, dst *bytes.Buffer) {
 	if len(values) == 0 || hi-lo <= 1 {
 		return
@@ -3536,25 +3896,42 @@ func encodeRawIndexTreeFreq(values []int, symbols []byte, dst *bytes.Buffer) {
 	if len(values) == 0 || len(symbols) <= 1 {
 		return
 	}
-	leftSyms, rightSyms := splitSymbolsBalanced(symbols)
-	rightSet := make(map[int]struct{}, len(rightSyms))
-	for _, s := range rightSyms {
-		rightSet[int(s)] = struct{}{}
+	var rank [256]uint8
+	for i, sym := range symbols {
+		rank[sym] = uint8(i)
 	}
-	plane := make([]byte, (len(values)+7)>>3)
-	leftVals := make([]int, 0, len(values))
-	rightVals := make([]int, 0, len(values))
-	for i, v := range values {
-		if _, ok := rightSet[v]; ok {
+	tmp := make([]int, len(values))
+	encodeRawIndexTreeFreqRec(values, tmp, &rank, 0, len(symbols), dst)
+}
+
+func encodeRawIndexTreeFreqRec(src, tmp []int, rank *[256]uint8, lo, hi int, dst *bytes.Buffer) {
+	if len(src) == 0 || hi-lo <= 1 {
+		return
+	}
+	mid := lo + (hi-lo)/2
+	plane := make([]byte, (len(src)+7)>>3)
+	leftCount := 0
+	for i, v := range src {
+		if int(rank[v]) >= mid {
 			monoBitSet(plane, i)
-			rightVals = append(rightVals, v)
 		} else {
-			leftVals = append(leftVals, v)
+			leftCount++
+		}
+	}
+	rightPos := leftCount
+	leftPos := 0
+	for _, v := range src {
+		if int(rank[v]) >= mid {
+			tmp[rightPos] = v
+			rightPos++
+		} else {
+			tmp[leftPos] = v
+			leftPos++
 		}
 	}
 	dst.Write(plane)
-	encodeRawIndexTreeFreq(leftVals, leftSyms, dst)
-	encodeRawIndexTreeFreq(rightVals, rightSyms, dst)
+	encodeRawIndexTreeFreqRec(tmp[:leftCount], src[:leftCount], rank, lo, mid, dst)
+	encodeRawIndexTreeFreqRec(tmp[leftCount:], src[leftCount:], rank, mid, hi, dst)
 }
 
 func decodeRawIndexTreeFreq(data []byte, pos *int, count int, symbols []byte) ([]int, error) {
@@ -3601,7 +3978,7 @@ func decodeRawIndexTreeFreq(data []byte, pos *int, count int, symbols []byte) ([
 
 func splitSymbolsBalanced(symbols []byte) ([]byte, []byte) {
 	if len(symbols) <= 1 {
-		return append([]byte(nil), symbols...), nil
+		return symbols, nil
 	}
 	split := len(symbols) / 2
 	if split <= 0 {
@@ -3610,18 +3987,26 @@ func splitSymbolsBalanced(symbols []byte) ([]byte, []byte) {
 	if split >= len(symbols) {
 		split = len(symbols) - 1
 	}
-	left := append([]byte(nil), symbols[:split]...)
-	right := append([]byte(nil), symbols[split:]...)
+	left := symbols[:split]
+	right := symbols[split:]
 	return left, right
 }
 
 func countMonoBitsPrefix(src []byte, n int) int {
-	c := 0
-	for i := 0; i < n; i++ {
-		if monoBitAt(src, i) {
-			c++
-		}
+	if n <= 0 {
+		return 0
 	}
+	fullBytes := n >> 3
+	c := 0
+	for i := 0; i < fullBytes; i++ {
+		c += bits.OnesCount8(src[i])
+	}
+	rem := n & 7
+	if rem == 0 {
+		return c
+	}
+	mask := byte(0xFF << (8 - rem))
+	c += bits.OnesCount8(src[fullBytes] & mask)
 	return c
 }
 
