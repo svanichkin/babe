@@ -10,10 +10,118 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
+
+func writePatternUsageSheets(basePath string) error {
+	if len(lastPatternUsageByChannel) == 0 {
+		return nil
+	}
+
+	const (
+		cellScale = 8
+		padding   = 4
+		cols      = 8
+	)
+
+	channels := make([]string, 0, len(lastPatternUsageByChannel))
+	for channel := range lastPatternUsageByChannel {
+		channels = append(channels, channel)
+	}
+	sort.Strings(channels)
+
+	for _, channel := range channels {
+		sizeUsage := lastPatternUsageByChannel[channel]
+		sizes := make([][2]int, 0, len(sizeUsage))
+		for size := range sizeUsage {
+			sizes = append(sizes, size)
+		}
+		sort.Slice(sizes, func(i, j int) bool {
+			if sizes[i][0] != sizes[j][0] {
+				return sizes[i][0] < sizes[j][0]
+			}
+			return sizes[i][1] < sizes[j][1]
+		})
+
+		for _, size := range sizes {
+			entries := sizeUsage[size]
+			if len(entries) == 0 {
+				continue
+			}
+
+			bw, bh := size[0], size[1]
+			rows := (len(entries) + cols - 1) / cols
+			cellW := bw*cellScale + padding*2
+			cellH := bh*cellScale + padding*2
+			img := image.NewRGBA(image.Rect(0, 0, cols*cellW, rows*cellH))
+
+			bg := color.RGBA{245, 245, 245, 255}
+			cellBG := color.RGBA{225, 225, 225, 255}
+			fg := color.RGBA{20, 20, 20, 255}
+			grid := color.RGBA{120, 120, 120, 255}
+			for y := 0; y < img.Bounds().Dy(); y++ {
+				for x := 0; x < img.Bounds().Dx(); x++ {
+					img.Set(x, y, bg)
+				}
+			}
+
+			for i, entry := range entries {
+				col := i % cols
+				row := i / cols
+				ox := col * cellW
+				oy := row * cellH
+
+				for y := oy; y < oy+cellH; y++ {
+					for x := ox; x < ox+cellW; x++ {
+						img.Set(x, y, cellBG)
+					}
+				}
+				for x := ox; x < ox+cellW; x++ {
+					img.Set(x, oy, grid)
+					img.Set(x, oy+cellH-1, grid)
+				}
+				for y := oy; y < oy+cellH; y++ {
+					img.Set(ox, y, grid)
+					img.Set(ox+cellW-1, y, grid)
+				}
+
+				for py := 0; py < bh; py++ {
+					for px := 0; px < bw; px++ {
+						shift := bw*bh - 1 - (py*bw + px)
+						c := color.Color(color.RGBA{250, 250, 250, 255})
+						if ((entry.bits >> shift) & 1) != 0 {
+							c = fg
+						}
+						for sy := 0; sy < cellScale; sy++ {
+							for sx := 0; sx < cellScale; sx++ {
+								img.Set(ox+padding+px*cellScale+sx, oy+padding+py*cellScale+sy, c)
+							}
+						}
+					}
+				}
+			}
+
+			outPath := fmt.Sprintf("%s.pattern-usage.%s.%dx%d.png", basePath, strings.ToLower(channel), bw, bh)
+			f, err := os.Create(outPath)
+			if err != nil {
+				return err
+			}
+			if err := png.Encode(f, img); err != nil {
+				_ = f.Close()
+				return err
+			}
+			if err := f.Close(); err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "[log] wrote %s\n", outPath)
+		}
+	}
+
+	return nil
+}
 
 func writePatternSheets(basePath string) error {
 	if len(lastPatternSizesUsed) == 0 {
@@ -99,8 +207,8 @@ func writePatternSheets(basePath string) error {
 }
 
 func main() {
-	if len(os.Args) < 2 || len(os.Args) > 7 {
-		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png] [-patterns=N] [-pattern-index=per-channel|shared] [-log]\n  babe <input.babe> [-postfilter]\n  (bw flag, decoded.png, -patterns=N, -pattern-index=... and -log can appear anywhere after quality)\n")
+	if len(os.Args) < 2 || len(os.Args) > 12 {
+		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png] [-patterns=N] [-blocks=A,B] [-color-quant=N] [-pattern-index=per-channel|shared] [-log]\n  babe <input.babe> [-postfilter]\n  (bw flag, decoded.png, -patterns=N, -blocks=A,B, -color-quant=N, -pattern-index=... and -log can appear anywhere after quality)\n")
 		os.Exit(1)
 	}
 
@@ -144,6 +252,8 @@ func main() {
 	bwmode := false
 	decodeOutPath := ""
 	patternCount := defaultPatternCount
+	blockSpec := ""
+	colorQuantShift := 0
 	patternIndexMode := "per-channel"
 	logPatterns := false
 	for _, a := range encodeArgs {
@@ -164,6 +274,19 @@ func main() {
 			patternCount = v
 			continue
 		}
+		if strings.HasPrefix(a, "-blocks=") {
+			blockSpec = strings.TrimPrefix(a, "-blocks=")
+			continue
+		}
+		if strings.HasPrefix(a, "-color-quant=") {
+			v, err := strconv.Atoi(strings.TrimPrefix(a, "-color-quant="))
+			if err != nil || v < 0 || v > 7 {
+				fmt.Fprintln(os.Stderr, "color-quant must be an integer between 0 and 7")
+				os.Exit(1)
+			}
+			colorQuantShift = v
+			continue
+		}
 		if strings.HasPrefix(a, "-pattern-index=") {
 			v := strings.TrimPrefix(a, "-pattern-index=")
 			if v != "per-channel" && v != "shared" {
@@ -179,7 +302,33 @@ func main() {
 	}
 
 	outPath := base + ".babe"
-	if err := encodeToBabe(inputPath, outPath, quality, bwmode, patternCount, patternIndexMode, logPatterns); err != nil {
+	if blockSpec != "" {
+		parts := strings.Split(blockSpec, ",")
+		var a, b int
+		var errA, errB error
+		switch len(parts) {
+		case 1:
+			a, errA = strconv.Atoi(strings.TrimSpace(parts[0]))
+			b = a
+		case 2:
+			a, errA = strconv.Atoi(strings.TrimSpace(parts[0]))
+			b, errB = strconv.Atoi(strings.TrimSpace(parts[1]))
+		default:
+			fmt.Fprintln(os.Stderr, "blocks must be one size like 4 or two comma-separated sizes like 4,8")
+			os.Exit(1)
+		}
+		if errA != nil || errB != nil || a < 1 || b < 1 || a > b || b%a != 0 {
+			fmt.Fprintln(os.Stderr, "blocks must be positive sizes like 4 or 4,8 where macro is >= small and divisible by it")
+			os.Exit(1)
+		}
+		forcedSmallBlock = a
+		forcedMacroBlock = b
+		defer func() {
+			forcedSmallBlock = 0
+			forcedMacroBlock = 0
+		}()
+	}
+	if err := encodeToBabe(inputPath, outPath, quality, bwmode, patternCount, colorQuantShift, patternIndexMode, logPatterns); err != nil {
 		fmt.Fprintln(os.Stderr, "encode error:", err)
 		os.Exit(1)
 	}
@@ -191,7 +340,7 @@ func main() {
 	}
 }
 
-func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount int, patternIndexMode string, logPatterns bool) error {
+func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount int, colorQuantShift int, patternIndexMode string, logPatterns bool) error {
 	info, err := os.Stat(inPath)
 	if err != nil {
 		return err
@@ -211,10 +360,12 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount
 
 	start := time.Now()
 	activePatternCount = patternCount
+	activeColorQuantShift = colorQuantShift
 	activeSharedPatternIndexes = patternIndexMode == "shared"
 	encodeLog = logPatterns
 	defer func() {
 		activePatternCount = defaultPatternCount
+		activeColorQuantShift = 0
 		activeSharedPatternIndexes = false
 		encodeLog = false
 	}()
@@ -235,6 +386,9 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount
 	}
 	if logPatterns {
 		base := strings.TrimSuffix(outPath, filepath.Ext(outPath))
+		if err := writePatternUsageSheets(base); err != nil {
+			return err
+		}
 		if err := writePatternSheets(base); err != nil {
 			return err
 		}
@@ -256,9 +410,10 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount
 		outPath,
 		formatSize(encSize),
 	)
-	fmt.Printf("quality=%d, patterns=%d, pattern-index=%s, ratio=%.3f, time=%s\n",
+	fmt.Printf("quality=%d, patterns=%d, color-quant=%d, pattern-index=%s, ratio=%.3f, time=%s\n",
 		quality,
 		patternCount,
+		colorQuantShift,
 		patternIndexMode,
 		ratio,
 		finish,

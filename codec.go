@@ -53,6 +53,7 @@ const (
 var encodeBW bool
 var encodeLog bool
 var lastPatternSizesUsed map[[2]int]struct{}
+var lastPatternUsageByChannel map[string]map[[2]int][]patternUsageEntry
 
 const (
 	defaultPatternCount = 64
@@ -60,6 +61,9 @@ const (
 
 var activePatternCount = defaultPatternCount
 var activeSharedPatternIndexes bool
+var forcedSmallBlock int
+var forcedMacroBlock int
+var activeColorQuantShift int
 
 // Quality mapping:
 // - quality is in [0..100]
@@ -100,7 +104,37 @@ func setBlocksForQuality(quality int) error {
 		macroBlock = 8
 	}
 
+	if forcedSmallBlock > 0 && forcedMacroBlock > 0 {
+		smallBlock = forcedSmallBlock
+		macroBlock = forcedMacroBlock
+	}
+
 	return nil
+}
+
+func invertPatternBits(bits uint64, bw, bh int) uint64 {
+	total := bw * bh
+	if total <= 0 || total >= 64 {
+		return ^bits
+	}
+	mask := uint64(1)<<total - 1
+	return (^bits) & mask
+}
+
+func quantizeColor(v uint8) uint8 {
+	if activeColorQuantShift <= 0 {
+		return v
+	}
+	if activeColorQuantShift >= 8 {
+		return 128
+	}
+	step := 1 << activeColorQuantShift
+	base := int(v>>activeColorQuantShift) << activeColorQuantShift
+	center := base + step/2
+	if center > 255 {
+		center = 255
+	}
+	return uint8(center)
 }
 
 // bitWriter writes bits to a bytes.Buffer (msb-first in each byte).
@@ -814,6 +848,13 @@ type patternToken struct {
 	has  bool
 }
 
+type patternUsageEntry struct {
+	bits  uint64
+	bw    int
+	bh    int
+	count int
+}
+
 type patternBlockKey struct {
 	x  int
 	y  int
@@ -898,16 +939,21 @@ func appendLocalPatterns(out *[]uint64, seen map[uint64]struct{}, bw, bh int) {
 	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, func(x, y int) bool { return true }))
 	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, leftHalf))
 	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, topHalf))
-	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, func(x, y int) bool { return topLeft(x, y) || bottomRight(x, y) }))
-	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, func(x, y int) bool { return x < bw/4 }))
-	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, func(x, y int) bool { return y < bh/4 }))
-	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, func(x, y int) bool { return x < (3*bw)/4 }))
-	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, func(x, y int) bool { return y < (3*bh)/4 }))
 	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, topLeft))
 	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, topRight))
 	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, bottomLeft))
 	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, bottomRight))
+	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, func(x, y int) bool { return topLeft(x, y) || bottomRight(x, y) }))
 	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, centerBox))
+	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, func(x, y int) bool { return x < bw/4 }))
+	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, func(x, y int) bool { return y < bh/4 }))
+	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, func(x, y int) bool { return x < bw/4 && y < bh/4 }))
+	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, func(x, y int) bool { return x >= (3*bw)/4 && y < bh/4 }))
+	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, func(x, y int) bool { return x < bw/4 && y >= (3*bh)/4 }))
+	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, func(x, y int) bool { return x >= (3*bw)/4 && y >= (3*bh)/4 }))
+	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, func(x, y int) bool {
+		return (x < bw/4 && y < bh/4) || (x >= (3*bw)/4 && y >= (3*bh)/4)
+	}))
 }
 
 func synthesizePatternCandidates(bw, bh int) []uint64 {
@@ -1111,6 +1157,12 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh int) (uint8,
 		}
 		fg := uint8(fgSum / uint64(fgCnt))
 		bg := uint8(bgSum / uint64(bgCnt))
+		if fg < bg {
+			fg, bg = bg, fg
+			bits = invertPatternBits(bits, bw, bh)
+		}
+		fg = quantizeColor(fg)
+		bg = quantizeColor(bg)
 		if fg == bg {
 			return fg, bg, 0, false, nil
 		}
@@ -1160,6 +1212,12 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh int) (uint8,
 	}
 	fg := uint8(fgSum / uint64(fgCnt))
 	bg := uint8(bgSum / uint64(bgCnt))
+	if fg < bg {
+		fg, bg = bg, fg
+		bits = invertPatternBits(bits, bw, bh)
+	}
+	fg = quantizeColor(fg)
+	bg = quantizeColor(bg)
 	if fg == bg {
 		return fg, bg, 0, false, nil
 	}
@@ -1227,6 +1285,71 @@ func formatPatternSizeSummary(counts map[[2]int]int) string {
 
 func formatPatternBits(bits uint64, bw, bh int) string {
 	return fmt.Sprintf("%0*b", bw*bh, bits)
+}
+
+func logPatternUsage(channel string, tokens []patternToken) {
+	if !encodeLog || len(tokens) == 0 {
+		return
+	}
+	counts := make(map[string]int, len(tokens))
+	bySize := make(map[[2]int]map[uint64]int)
+	for _, tok := range tokens {
+		key := fmt.Sprintf("%dx%d:%s", tok.bw, tok.bh, formatPatternBits(tok.bits, tok.bw, tok.bh))
+		counts[key]++
+		size := [2]int{tok.bw, tok.bh}
+		if bySize[size] == nil {
+			bySize[size] = make(map[uint64]int)
+		}
+		bySize[size][tok.bits]++
+	}
+	type entry struct {
+		key   string
+		count int
+	}
+	items := make([]entry, 0, len(counts))
+	for k, c := range counts {
+		items = append(items, entry{key: k, count: c})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].count != items[j].count {
+			return items[i].count > items[j].count
+		}
+		return items[i].key < items[j].key
+	})
+	fmt.Fprintf(os.Stderr, "[pattern-usage] %s unique=%d\n", channel, len(items))
+	limit := min(12, len(items))
+	for i := 0; i < limit; i++ {
+		fmt.Fprintf(os.Stderr, "[pattern-usage] %s #%d %s count=%d\n", channel, i+1, items[i].key, items[i].count)
+	}
+	if lastPatternUsageByChannel == nil {
+		lastPatternUsageByChannel = make(map[string]map[[2]int][]patternUsageEntry)
+	}
+	channelUsage := make(map[[2]int][]patternUsageEntry, len(bySize))
+	for size, sizeCounts := range bySize {
+		entries := make([]patternUsageEntry, 0, len(sizeCounts))
+		for bits, count := range sizeCounts {
+			entries = append(entries, patternUsageEntry{
+				bits:  bits,
+				bw:    size[0],
+				bh:    size[1],
+				count: count,
+			})
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			if entries[i].count != entries[j].count {
+				return entries[i].count > entries[j].count
+			}
+			if entries[i].bw != entries[j].bw {
+				return entries[i].bw < entries[j].bw
+			}
+			if entries[i].bh != entries[j].bh {
+				return entries[i].bh < entries[j].bh
+			}
+			return entries[i].bits < entries[j].bits
+		})
+		channelUsage[size] = entries
+	}
+	lastPatternUsageByChannel[channel] = channelUsage
 }
 
 func logPatternCodebooks(channel string, counts map[[2]int]int) {
@@ -1550,6 +1673,9 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 		sizeW.flush()
 		typeW.flush()
 		writePatternStream(&scratch.patternBuf, patternTokens)
+		if encodeLog {
+			logPatternUsage(channelName(channelID), patternTokens)
+		}
 
 		return blockCount, scratch.sizeBuf.Bytes(), scratch.typeBuf.Bytes(), scratch.patternBuf.Bytes(), scratch.fgVals, scratch.bgVals, patternSizes, nil
 	}
@@ -1633,6 +1759,9 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 	sizeW.flush()
 	typeW.flush()
 	writePatternStream(&scratch.patternBuf, patternTokens)
+	if encodeLog {
+		logPatternUsage(channelName(channelID), patternTokens)
+	}
 
 	return blockCount, scratch.sizeBuf.Bytes(), scratch.typeBuf.Bytes(), scratch.patternBuf.Bytes(), scratch.fgVals, scratch.bgVals, patternSizes, nil
 }
@@ -1718,6 +1847,7 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 		chCount = 3
 	}
 	lastPatternSizesUsed = make(map[[2]int]struct{})
+	lastPatternUsageByChannel = make(map[string]map[[2]int][]patternUsageEntry)
 
 	if e.Parallel {
 		// Encode channels in parallel; scratch is per-channel so it's safe to reuse.
