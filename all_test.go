@@ -80,6 +80,79 @@ func TestEncode_ImageTooSmall(t *testing.T) {
 	}
 }
 
+func TestEncodeDecode_RoundTrip_BlockRange(t *testing.T) {
+	src := makeTestImage(64, 64)
+
+	if err := setBlocksFromSpec("2-64"); err != nil {
+		t.Fatalf("setBlocksFromSpec: %v", err)
+	}
+	defer func() {
+		forcedBlockSizes = nil
+		blockLevels = nil
+	}()
+
+	comp, err := Encode(src, 70, false)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+
+	dec, err := Decode(comp, false)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got, want := dec.Bounds(), src.Bounds(); got != want {
+		t.Fatalf("bounds mismatch: got %v want %v", got, want)
+	}
+}
+
+func TestEncodeDecode_RoundTrip_SingleBlockLevel(t *testing.T) {
+	src := makeTestImage(64, 64)
+
+	if err := setBlocksFromSpec("16-16"); err != nil {
+		t.Fatalf("setBlocksFromSpec: %v", err)
+	}
+	defer func() {
+		forcedBlockSizes = nil
+		blockLevels = nil
+	}()
+
+	comp, err := Encode(src, 0, true)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+
+	dec, err := Decode(comp, false)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got, want := dec.Bounds(), src.Bounds(); got != want {
+		t.Fatalf("bounds mismatch: got %v want %v", got, want)
+	}
+}
+
+func TestPatternSetBasic_Order(t *testing.T) {
+	book := fixedPatternCodebook(8, 8, 8)
+	if len(book) != 8 {
+		t.Fatalf("unexpected codebook size: got %d want 8", len(book))
+	}
+
+	expect := []patternMask{
+		buildPatternMask(8, 8, func(x, y int) bool { return true }),
+		buildPatternMask(8, 8, func(x, y int) bool { return x < 4 }),
+		buildPatternMask(8, 8, func(x, y int) bool { return y < 4 }),
+		buildPatternMask(8, 8, func(x, y int) bool { return x < 4 && y < 4 }),
+		buildPatternMask(8, 8, func(x, y int) bool { return x >= 4 && y < 4 }),
+		buildPatternMask(8, 8, func(x, y int) bool { return x < 4 && y >= 4 }),
+		buildPatternMask(8, 8, func(x, y int) bool { return x >= 4 && y >= 4 }),
+		buildPatternMask(8, 8, func(x, y int) bool { return (x < 4 && y < 4) || (x >= 4 && y >= 4) }),
+	}
+	for i := range expect {
+		if patternMaskKey(book[i]) != patternMaskKey(expect[i]) {
+			t.Fatalf("pattern %d mismatch: got %s want %s", i, formatPatternBits(book[i], 8, 8), formatPatternBits(expect[i], 8, 8))
+		}
+	}
+}
+
 // -----------------------------
 // Benchmark helpers
 // -----------------------------

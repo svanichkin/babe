@@ -1,7 +1,7 @@
-// BABE (Bi-Level Adaptive Block Encoding) is a dual-tone block codec for images.
-// It operates in YCbCr color space, uses adaptive block sizes (small and macro blocks)
-// and per-channel bi-level patterns, plus a light post-process for deblocking
-// and gradient smoothing.
+// BABE (Bi-Level Adaptive Block Encoding) is a multi-level block codec for images.
+// It operates in YCbCr color space, uses an N-level adaptive block hierarchy
+// (configured via forcedBlockSizes or quality presets), per-channel bi-level patterns,
+// plus a light post-process for deblocking and gradient smoothing.
 
 package main
 
@@ -16,6 +16,7 @@ import (
 	"os"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -23,7 +24,8 @@ import (
 )
 
 const (
-	codec = "BABE\n"
+	codec  = "BABE\n"
+	codec2 = "BABE2\n"
 )
 
 // Default block sizes; these are overridden by compression presets via setBlocksForQuality.
@@ -32,6 +34,11 @@ var (
 	smallBlock = 1
 	// size of the macroblock (in pixels)
 	macroBlock = 2
+
+	// blockLevels holds the active N-level block size hierarchy, from smallest to largest.
+	// When len(blockLevels) >= 2, the N-level recursive encoder/decoder is used.
+	// blockLevels[0] == smallBlock, blockLevels[len-1] == macroBlock always.
+	blockLevels []int
 
 	// codecStateMu serializes access to global codec configuration/state.
 	// The current codec implementation still uses package-level block settings
@@ -57,12 +64,12 @@ var lastPatternUsageByChannel map[string]map[[2]int][]patternUsageEntry
 
 const (
 	defaultPatternCount = 64
+	patternSetBasic    = "basic"
 )
 
 var activePatternCount = defaultPatternCount
 var activeSharedPatternIndexes bool
-var forcedSmallBlock int
-var forcedMacroBlock int
+var forcedBlockSizes []int
 var activeColorQuantShift int
 
 // Quality mapping:
@@ -70,7 +77,7 @@ var activeColorQuantShift int
 // - smallBlock/macroBlock are chosen from a small set of presets
 //   to trade off quality vs. compression.
 
-// setBlocksForQuality configures global smallBlock/macroBlock based on a quality in [0..100].
+// setBlocksForQuality configures global smallBlock/macroBlock/blockLevels based on a quality in [0..100].
 // It uses a small set of discrete presets to keep the behavior stable and predictable.
 func setBlocksForQuality(quality int) error {
 	// clamp quality to [0..100]
@@ -104,21 +111,110 @@ func setBlocksForQuality(quality int) error {
 		macroBlock = 8
 	}
 
-	if forcedSmallBlock > 0 && forcedMacroBlock > 0 {
-		smallBlock = forcedSmallBlock
-		macroBlock = forcedMacroBlock
+	if len(forcedBlockSizes) > 0 {
+		smallBlock = forcedBlockSizes[0]
+		macroBlock = forcedBlockSizes[len(forcedBlockSizes)-1]
+		blockLevels = append(blockLevels[:0], forcedBlockSizes...)
+	} else {
+		blockLevels = blockLevels[:0]
 	}
 
 	return nil
 }
 
-func invertPatternBits(bits uint64, bw, bh int) uint64 {
-	total := bw * bh
-	if total <= 0 || total >= 64 {
-		return ^bits
+// setBlocksFromSpec parses one or more comma-separated block sizes like
+// "4", "2,4,8" or "2,4,8,16". Sizes must be positive, strictly increasing,
+// and each next size must be divisible by the previous one.
+func setBlocksFromSpec(spec string) error {
+	if strings.Contains(spec, "-") && !strings.Contains(spec, ",") {
+		parts := strings.Split(spec, "-")
+		if len(parts) != 2 {
+			return fmt.Errorf("blocks range must look like 2-64")
+		}
+		minV, errMin := strconv.Atoi(strings.TrimSpace(parts[0]))
+		maxV, errMax := strconv.Atoi(strings.TrimSpace(parts[1]))
+		if errMin != nil || errMax != nil || minV < 1 || maxV < minV {
+			return fmt.Errorf("blocks range must contain positive sizes like 2-64")
+		}
+		sizes := make([]int, 0, 8)
+		for v := minV; v <= maxV; v *= 2 {
+			sizes = append(sizes, v)
+			if v == maxV {
+				break
+			}
+			if v > maxV/2 {
+				return fmt.Errorf("blocks range %q must double exactly, e.g. 2-64 or 4-32", spec)
+			}
+		}
+		forcedBlockSizes = append(forcedBlockSizes[:0], sizes...)
+		smallBlock = sizes[0]
+		macroBlock = sizes[len(sizes)-1]
+		return nil
 	}
-	mask := uint64(1)<<total - 1
-	return (^bits) & mask
+
+	parts := strings.Split(spec, ",")
+	if len(parts) == 0 {
+		return fmt.Errorf("blocks must contain at least one size")
+	}
+	sizes := make([]int, 0, len(parts))
+	for _, part := range parts {
+		v, err := strconv.Atoi(strings.TrimSpace(part))
+		if err != nil || v < 1 {
+			return fmt.Errorf("blocks must contain positive integer sizes like 4, 4,8 or 2,4,8,16")
+		}
+		sizes = append(sizes, v)
+	}
+	for i := 1; i < len(sizes); i++ {
+		if sizes[i] <= sizes[i-1] {
+			return fmt.Errorf("blocks must be strictly increasing, got %v", sizes)
+		}
+	}
+	base := sizes[0]
+	for i := 1; i < len(sizes); i++ {
+		if sizes[i]%base != 0 {
+			return fmt.Errorf("each block size must be divisible by the first one, got %v", sizes)
+		}
+	}
+	forcedBlockSizes = append(forcedBlockSizes[:0], sizes...)
+	smallBlock = sizes[0]
+	macroBlock = sizes[len(sizes)-1]
+	return nil
+}
+
+func activeLevels() []int {
+	if len(blockLevels) > 0 {
+		if len(blockLevels) == 2 && blockLevels[0] == blockLevels[1] {
+			return blockLevels[:1]
+		}
+		return blockLevels
+	}
+	if smallBlock <= 0 || macroBlock <= 0 {
+		return nil
+	}
+	if smallBlock == macroBlock {
+		return []int{smallBlock}
+	}
+	return []int{smallBlock, macroBlock}
+}
+
+func invertPatternBits(bits patternMask, bw, bh int) patternMask {
+	total := bw * bh
+	if total <= 0 {
+		return nil
+	}
+	out := clonePatternMask(bits)
+	if len(out) == 0 {
+		out = newPatternMask(total)
+	}
+	for i := range out {
+		out[i] = ^out[i]
+	}
+	usedBits := total % 64
+	if usedBits != 0 {
+		mask := uint64(1)<<usedBits - 1
+		out[len(out)-1] &= mask
+	}
+	return out
 }
 
 func quantizeColor(v uint8) uint8 {
@@ -778,17 +874,21 @@ func allowedMacroSpreadForQuality(quality int) int32 {
 }
 
 func canUseBigBlockChannel(plane []uint8, stride, height, x0, y0 int, spread int32) bool {
+	return canUseBlockSizeChannel(plane, stride, height, x0, y0, macroBlock, spread)
+}
+
+func canUseBlockSizeChannel(plane []uint8, stride, height, x0, y0, blockSize int, spread int32) bool {
 	if spread <= 0 {
 		return false
 	}
-	if stride <= 0 || height <= 0 || x0 < 0 || y0 < 0 || macroBlock <= 0 {
+	if stride <= 0 || height <= 0 || x0 < 0 || y0 < 0 || blockSize <= 0 {
 		return false
 	}
-	if x0+macroBlock > stride || y0+macroBlock > height {
+	if x0+blockSize > stride || y0+blockSize > height {
 		return false
 	}
 
-	if macroBlock == 2 {
+	if blockSize == 2 {
 		idx0 := y0*stride + x0
 		idx1 := idx0 + stride
 
@@ -820,9 +920,9 @@ func canUseBigBlockChannel(plane []uint8, stride, height, x0, y0 int, spread int
 	minV := plane[y0*stride+x0]
 	maxV := minV
 
-	for yy := 0; yy < macroBlock; yy++ {
+	for yy := 0; yy < blockSize; yy++ {
 		row := (y0+yy)*stride + x0
-		for xx := 0; xx < macroBlock; xx++ {
+		for xx := 0; xx < blockSize; xx++ {
 			v := plane[row+xx]
 			if v < minV {
 				minV = v
@@ -839,7 +939,7 @@ func canUseBigBlockChannel(plane []uint8, stride, height, x0, y0 int, spread int
 }
 
 type patternToken struct {
-	bits uint64
+	bits patternMask
 	bw   int
 	bh   int
 	x    int
@@ -849,7 +949,7 @@ type patternToken struct {
 }
 
 type patternUsageEntry struct {
-	bits  uint64
+	bits  patternMask
 	bw    int
 	bh    int
 	count int
@@ -864,45 +964,99 @@ type patternBlockKey struct {
 
 var (
 	fixedPatternCacheMu sync.RWMutex
-	fixedPatternCache   = map[[3]int][]uint64{}
+	fixedPatternCache   = map[string][]patternMask{}
 )
 
-func buildPatternMask(bw, bh int, pred func(x, y int) bool) uint64 {
-	var mask uint64
+type patternMask []uint64
+
+func newPatternMask(total int) patternMask {
+	if total <= 0 {
+		return nil
+	}
+	return make(patternMask, (total+63)/64)
+}
+
+func clonePatternMask(src patternMask) patternMask {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(patternMask, len(src))
+	copy(dst, src)
+	return dst
+}
+
+func patternMaskKey(mask patternMask) string {
+	if len(mask) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, word := range mask {
+		if i > 0 {
+			b.WriteByte(':')
+		}
+		fmt.Fprintf(&b, "%016x", word)
+	}
+	return b.String()
+}
+
+func setPatternBit(mask patternMask, shift int) {
+	if shift < 0 {
+		return
+	}
+	word := shift / 64
+	bit := uint(shift % 64)
+	mask[word] |= uint64(1) << bit
+}
+
+func testPatternBit(mask patternMask, bw, bh, x, y int) bool {
+	shift := bw*bh - 1 - (y*bw + x)
+	if shift < 0 {
+		return false
+	}
+	word := shift / 64
+	bit := uint(shift % 64)
+	if word >= len(mask) {
+		return false
+	}
+	return ((mask[word] >> bit) & 1) != 0
+}
+
+func buildPatternMask(bw, bh int, pred func(x, y int) bool) patternMask {
 	total := bw * bh
+	mask := newPatternMask(total)
 	for y := 0; y < bh; y++ {
 		for x := 0; x < bw; x++ {
 			if pred(x, y) {
 				shift := total - 1 - (y*bw + x)
-				mask |= uint64(1) << shift
+				setPatternBit(mask, shift)
 			}
 		}
 	}
 	return mask
 }
 
-func appendPatternCandidate(dst *[]uint64, seen map[uint64]struct{}, mask uint64) {
-	if mask == 0 {
+func appendPatternCandidate(dst *[]patternMask, seen map[string]struct{}, mask patternMask) {
+	if len(mask) == 0 {
 		return
 	}
-	if _, ok := seen[mask]; ok {
+	key := patternMaskKey(mask)
+	if _, ok := seen[key]; ok {
 		return
 	}
-	seen[mask] = struct{}{}
-	*dst = append(*dst, mask)
+	seen[key] = struct{}{}
+	*dst = append(*dst, clonePatternMask(mask))
 }
 
-func tilePattern(src uint64, sw, sh, dw, dh int) uint64 {
-	return buildPatternMask(dw, dh, func(x, y int) bool {
-		sx := x % sw
-		sy := y % sh
-		shift := sw*sh - 1 - (sy*sw + sx)
-		return ((src >> shift) & 1) != 0
-	})
+func patternMaskFromUint64(bits uint64, total int) patternMask {
+	mask := newPatternMask(total)
+	if len(mask) > 0 {
+		mask[0] = bits
+	}
+	return mask
 }
 
-func base2x2Patterns() []uint64 {
-	return []uint64{
+func base2x2Patterns() []patternMask {
+	raw := []uint64{
 		0b1111,
 		0b1100,
 		0b1110,
@@ -919,22 +1073,20 @@ func base2x2Patterns() []uint64 {
 		0b1010,
 		0b1001,
 	}
+	out := make([]patternMask, 0, len(raw))
+	for _, bits := range raw {
+		out = append(out, patternMaskFromUint64(bits, 4))
+	}
+	return out
 }
 
-func appendLocalPatterns(out *[]uint64, seen map[uint64]struct{}, bw, bh int) {
+func appendBasicPatterns(out *[]patternMask, seen map[string]struct{}, bw, bh int) {
 	leftHalf := func(x, y int) bool { return x < bw/2 }
 	topHalf := func(x, y int) bool { return y < bh/2 }
 	topLeft := func(x, y int) bool { return x < bw/2 && y < bh/2 }
 	topRight := func(x, y int) bool { return x >= bw/2 && y < bh/2 }
 	bottomLeft := func(x, y int) bool { return x < bw/2 && y >= bh/2 }
 	bottomRight := func(x, y int) bool { return x >= bw/2 && y >= bh/2 }
-	centerBox := func(x, y int) bool {
-		left := bw / 4
-		right := bw - left
-		top := bh / 4
-		bottom := bh - top
-		return x >= left && x < right && y >= top && y < bottom
-	}
 
 	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, func(x, y int) bool { return true }))
 	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, leftHalf))
@@ -944,21 +1096,11 @@ func appendLocalPatterns(out *[]uint64, seen map[uint64]struct{}, bw, bh int) {
 	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, bottomLeft))
 	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, bottomRight))
 	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, func(x, y int) bool { return topLeft(x, y) || bottomRight(x, y) }))
-	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, centerBox))
-	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, func(x, y int) bool { return x < bw/4 }))
-	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, func(x, y int) bool { return y < bh/4 }))
-	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, func(x, y int) bool { return x < bw/4 && y < bh/4 }))
-	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, func(x, y int) bool { return x >= (3*bw)/4 && y < bh/4 }))
-	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, func(x, y int) bool { return x < bw/4 && y >= (3*bh)/4 }))
-	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, func(x, y int) bool { return x >= (3*bw)/4 && y >= (3*bh)/4 }))
-	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, func(x, y int) bool {
-		return (x < bw/4 && y < bh/4) || (x >= (3*bw)/4 && y >= (3*bh)/4)
-	}))
 }
 
-func synthesizePatternCandidates(bw, bh int) []uint64 {
-	out := make([]uint64, 0, 256)
-	seen := make(map[uint64]struct{}, 256)
+func synthesizePatternCandidates(bw, bh int) []patternMask {
+	out := make([]patternMask, 0, 256)
+	seen := make(map[string]struct{}, 256)
 	if bw == 2 && bh == 2 {
 		for _, mask := range base2x2Patterns() {
 			appendPatternCandidate(&out, seen, mask)
@@ -966,16 +1108,7 @@ func synthesizePatternCandidates(bw, bh int) []uint64 {
 		return out
 	}
 
-	appendLocalPatterns(&out, seen, bw, bh)
-
-	if bw%2 == 0 && bh%2 == 0 {
-		parentW := bw / 2
-		parentH := bh / 2
-		for _, parent := range synthesizePatternCandidates(parentW, parentH) {
-			appendPatternCandidate(&out, seen, tilePattern(parent, parentW, parentH, bw, bh))
-		}
-	}
-
+	appendBasicPatterns(&out, seen, bw, bh)
 	return out
 }
 
@@ -1008,8 +1141,8 @@ func readPatternIndex(br *bitReader, bitCount uint8) (uint64, error) {
 	return out, nil
 }
 
-func fixedPatternCodebook(bw, bh, count int) []uint64 {
-	key := [3]int{bw, bh, count}
+func fixedPatternCodebook(bw, bh, count int) []patternMask {
+	key := fmt.Sprintf("%d:%d:%d", bw, bh, count)
 
 	fixedPatternCacheMu.RLock()
 	book, ok := fixedPatternCache[key]
@@ -1026,7 +1159,7 @@ func fixedPatternCodebook(bw, bh, count int) []uint64 {
 	if len(candidates) < count {
 		count = len(candidates)
 	}
-	built := append([]uint64(nil), candidates[:count]...)
+	built := append([]patternMask(nil), candidates[:count]...)
 
 	fixedPatternCacheMu.Lock()
 	fixedPatternCache[key] = built
@@ -1034,7 +1167,26 @@ func fixedPatternCodebook(bw, bh, count int) []uint64 {
 	return built
 }
 
-func nearestPatternIndex(patternBits uint64, bw, bh int) uint64 {
+func patternDistance(a, b patternMask) int {
+	n := len(a)
+	if len(b) > n {
+		n = len(b)
+	}
+	dist := 0
+	for i := 0; i < n; i++ {
+		var aw, bw uint64
+		if i < len(a) {
+			aw = a[i]
+		}
+		if i < len(b) {
+			bw = b[i]
+		}
+		dist += bits.OnesCount64(aw ^ bw)
+	}
+	return dist
+}
+
+func nearestPatternIndex(patternBits patternMask, bw, bh int) uint64 {
 	limit := activePatternCount
 	if limit < 1 {
 		limit = 1
@@ -1044,7 +1196,7 @@ func nearestPatternIndex(patternBits uint64, bw, bh int) uint64 {
 	bestDist := bw*bh + 1
 	for i := 0; i < len(book); i++ {
 		candidate := book[i]
-		dist := bits.OnesCount64(patternBits ^ candidate)
+		dist := patternDistance(patternBits, candidate)
 		if dist < bestDist {
 			bestDist = dist
 			bestIdx = i
@@ -1066,29 +1218,29 @@ func writePatternStream(buf *bytes.Buffer, tokens []patternToken) {
 	indexW.flush()
 }
 
-func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh int) (uint8, uint8, uint64, bool, error) {
+func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh int) (uint8, uint8, patternMask, bool, error) {
 	total := bw * bh
 	if total <= 0 {
-		return 0, 0, 0, false, fmt.Errorf("invalid block size")
+		return 0, 0, nil, false, fmt.Errorf("invalid block size")
 	}
 
 	if bw == 1 && bh == 1 {
 		if x0 < 0 || y0 < 0 || x0 >= stride {
-			return 0, 0, 0, false, fmt.Errorf("encodeBlockPlane: index out of range")
+			return 0, 0, nil, false, fmt.Errorf("encodeBlockPlane: index out of range")
 		}
 		idx := y0*stride + x0
 		if idx < 0 || idx >= len(plane) {
-			return 0, 0, 0, false, fmt.Errorf("encodeBlockPlane: index out of range")
+			return 0, 0, nil, false, fmt.Errorf("encodeBlockPlane: index out of range")
 		}
 		v := plane[idx]
-		return v, v, 0, false, nil
+		return v, v, nil, false, nil
 	}
 
 	if x0 < 0 || y0 < 0 || bw <= 0 || bh <= 0 || stride <= 0 || height <= 0 || x0+bw > stride {
-		return 0, 0, 0, false, fmt.Errorf("encodeBlockPlane: index out of range")
+		return 0, 0, nil, false, fmt.Errorf("encodeBlockPlane: index out of range")
 	}
 	if y0+bh > height {
-		return 0, 0, 0, false, fmt.Errorf("encodeBlockPlane: index out of range")
+		return 0, 0, nil, false, fmt.Errorf("encodeBlockPlane: index out of range")
 	}
 
 	if bw == 2 && bh == 2 {
@@ -1153,28 +1305,31 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh int) (uint8,
 		}
 
 		if fgCnt == 0 || bgCnt == 0 {
-			return avg, avg, 0, false, nil
+			return avg, avg, nil, false, nil
 		}
 		fg := uint8(fgSum / uint64(fgCnt))
 		bg := uint8(bgSum / uint64(bgCnt))
 		if fg < bg {
 			fg, bg = bg, fg
-			bits = invertPatternBits(bits, bw, bh)
+			bits = invertPatternBits(patternMaskFromUint64(bits, total), bw, bh)[0]
 		}
 		fg = quantizeColor(fg)
 		bg = quantizeColor(bg)
 		if fg == bg {
-			return fg, bg, 0, false, nil
+			return fg, bg, nil, false, nil
 		}
-		return fg, bg, bits, true, nil
+		return fg, bg, patternMaskFromUint64(bits, total), true, nil
 	}
 
-	// Read the block once into a small stack buffer.
-	var valsBuf [64]uint8
-	if total > len(valsBuf) {
-		return 0, 0, 0, false, fmt.Errorf("encodeBlockPlane: block too large")
+	// Read the block once into a small buffer.
+	var vals []uint8
+	if total <= 64 {
+		var valsBuf [64]uint8
+		vals = valsBuf[:total]
+		_ = valsBuf
+	} else {
+		vals = make([]uint8, total)
 	}
-	vals := valsBuf[:total]
 
 	var sum uint64
 	i := 0
@@ -1192,12 +1347,11 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh int) (uint8,
 	var fgSum, bgSum uint64
 	var fgCnt, bgCnt uint32
 
-	var bits uint64
-	for _, v := range vals {
+	mask := newPatternMask(total)
+	for i, v := range vals {
 		isFg := v >= thr
-		bits <<= 1
 		if isFg {
-			bits |= 1
+			setPatternBit(mask, total-1-i)
 			fgSum += uint64(v)
 			fgCnt++
 		} else {
@@ -1208,20 +1362,20 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh int) (uint8,
 
 	avg := uint8(sum / uint64(total))
 	if fgCnt == 0 || bgCnt == 0 {
-		return avg, avg, 0, false, nil
+		return avg, avg, nil, false, nil
 	}
 	fg := uint8(fgSum / uint64(fgCnt))
 	bg := uint8(bgSum / uint64(bgCnt))
 	if fg < bg {
 		fg, bg = bg, fg
-		bits = invertPatternBits(bits, bw, bh)
+		mask = invertPatternBits(mask, bw, bh)
 	}
 	fg = quantizeColor(fg)
 	bg = quantizeColor(bg)
 	if fg == bg {
-		return fg, bg, 0, false, nil
+		return fg, bg, nil, false, nil
 	}
-	return fg, bg, bits, true, nil
+	return fg, bg, mask, true, nil
 }
 
 type encoderChannelScratch struct {
@@ -1283,8 +1437,23 @@ func formatPatternSizeSummary(counts map[[2]int]int) string {
 	return strings.Join(parts, ", ")
 }
 
-func formatPatternBits(bits uint64, bw, bh int) string {
-	return fmt.Sprintf("%0*b", bw*bh, bits)
+func formatPatternBits(bits patternMask, bw, bh int) string {
+	total := bw * bh
+	if total <= 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(total)
+	for y := 0; y < bh; y++ {
+		for x := 0; x < bw; x++ {
+			if testPatternBit(bits, bw, bh, x, y) {
+				b.WriteByte('1')
+			} else {
+				b.WriteByte('0')
+			}
+		}
+	}
+	return b.String()
 }
 
 func logPatternUsage(channel string, tokens []patternToken) {
@@ -1292,15 +1461,21 @@ func logPatternUsage(channel string, tokens []patternToken) {
 		return
 	}
 	counts := make(map[string]int, len(tokens))
-	bySize := make(map[[2]int]map[uint64]int)
+	bySize := make(map[[2]int]map[string]int)
+	bySizeMask := make(map[[2]int]map[string]patternMask)
 	for _, tok := range tokens {
 		key := fmt.Sprintf("%dx%d:%s", tok.bw, tok.bh, formatPatternBits(tok.bits, tok.bw, tok.bh))
 		counts[key]++
 		size := [2]int{tok.bw, tok.bh}
 		if bySize[size] == nil {
-			bySize[size] = make(map[uint64]int)
+			bySize[size] = make(map[string]int)
+			bySizeMask[size] = make(map[string]patternMask)
 		}
-		bySize[size][tok.bits]++
+		maskKey := patternMaskKey(tok.bits)
+		bySize[size][maskKey]++
+		if _, ok := bySizeMask[size][maskKey]; !ok {
+			bySizeMask[size][maskKey] = clonePatternMask(tok.bits)
+		}
 	}
 	type entry struct {
 		key   string
@@ -1327,9 +1502,9 @@ func logPatternUsage(channel string, tokens []patternToken) {
 	channelUsage := make(map[[2]int][]patternUsageEntry, len(bySize))
 	for size, sizeCounts := range bySize {
 		entries := make([]patternUsageEntry, 0, len(sizeCounts))
-		for bits, count := range sizeCounts {
+		for key, count := range sizeCounts {
 			entries = append(entries, patternUsageEntry{
-				bits:  bits,
+				bits:  clonePatternMask(bySizeMask[size][key]),
 				bw:    size[0],
 				bh:    size[1],
 				count: count,
@@ -1345,7 +1520,7 @@ func logPatternUsage(channel string, tokens []patternToken) {
 			if entries[i].bh != entries[j].bh {
 				return entries[i].bh < entries[j].bh
 			}
-			return entries[i].bits < entries[j].bits
+			return patternMaskKey(entries[i].bits) < patternMaskKey(entries[j].bits)
 		})
 		channelUsage[size] = entries
 	}
@@ -1387,6 +1562,20 @@ func encodeChannelWorker(e *Encoder, dst *encodeChannelResult, channelID int, pl
 	dst.bgVals = bgVals
 	dst.patternSizes = patternSizes
 	dst.err = err
+}
+
+func countSmallBlocks(width, height, small int) int {
+	if width <= 0 || height <= 0 || small <= 0 {
+		return 0
+	}
+	return (width / small) * (height / small)
+}
+
+func countTopLevelBlocks(fullW, fullH, top int) int {
+	if fullW <= 0 || fullH <= 0 || top <= 0 {
+		return 0
+	}
+	return (fullW / top) * (fullH / top)
 }
 
 // Encoder reuses large scratch buffers across Encode calls to reduce allocations.
@@ -1432,42 +1621,15 @@ func (e *Encoder) ensurePlanes(w, h int) {
 }
 
 func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h4, fullW, fullH int, useMacro bool, scratch *encoderChannelScratch, sharedPatternIndexes map[patternBlockKey]uint64) (uint32, []byte, []byte, []byte, []uint8, []uint8, map[[2]int]int, error) {
-	// macro-block decision bits (only for main fullW x fullH area)
-	// Precompute an upper bound on the total block count so we can
-	// preallocate FG/BG slices and avoid repeated growth.
-	macroGroupsX := 0
-	macroGroupsY := 0
-	if macroBlock > 0 {
-		macroGroupsX = fullW / macroBlock
-		macroGroupsY = fullH / macroBlock
+	levels := activeLevels()
+	topBlock := smallBlock
+	if len(levels) > 0 {
+		topBlock = levels[len(levels)-1]
 	}
-	macroGroupCount := macroGroupsX * macroGroupsY
+	topLevelCount := countTopLevelBlocks(fullW, fullH, topBlock)
 
-	// worst-case: every macro-block is split into a full grid of small blocks
-	mbs := 1
-	if smallBlock > 0 {
-		mbs = macroBlock / smallBlock
-		if mbs < 1 {
-			mbs = 1
-		}
-	}
-	worstMainBlocks := macroGroupCount * mbs * mbs
-
-	// right stripe: only small blocks
-	rightWidth := w4 - fullW
-	rightBlocks := 0
-	if rightWidth > 0 && smallBlock > 0 {
-		rightBlocks = (fullH / smallBlock) * (rightWidth / smallBlock)
-	}
-
-	// bottom stripe (including bottom-right corner): only small blocks
-	bottomHeight := h4 - fullH
-	bottomBlocks := 0
-	if bottomHeight > 0 && smallBlock > 0 {
-		bottomBlocks = (bottomHeight / smallBlock) * (w4 / smallBlock)
-	}
-
-	worstBlockCount := worstMainBlocks + rightBlocks + bottomBlocks
+	// Worst-case leaf count is still the full smallest-block grid over the encoded area.
+	worstBlockCount := countSmallBlocks(w4, h4, smallBlock)
 	if worstBlockCount < 0 {
 		worstBlockCount = 0
 	}
@@ -1476,8 +1638,16 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 	scratch.typeBuf.Reset()
 	scratch.patternBuf.Reset()
 
-	if macroGroupCount > 0 {
-		scratch.sizeBuf.Grow((macroGroupCount + 7) / 8)
+	if topLevelCount > 0 {
+		// In the worst case every non-leaf smallest block ancestor emits one split bit.
+		worstDecisionBits := 0
+		if smallBlock > 0 {
+			worstDecisionBits = worstBlockCount - topLevelCount
+		}
+		if worstDecisionBits < topLevelCount {
+			worstDecisionBits = topLevelCount
+		}
+		scratch.sizeBuf.Grow((worstDecisionBits + 7) / 8)
 	}
 	if worstBlockCount > 0 {
 		scratch.typeBuf.Grow((worstBlockCount + 7) / 8)
@@ -1516,8 +1686,8 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 	recordPatternSize := func(bw, bh int) {
 		patternSizes[[2]int{bw, bh}]++
 	}
-	recordPatternToken := func(x, y int, bits uint64, bw, bh int) {
-		tok := patternToken{bits: bits, bw: bw, bh: bh, x: x, y: y}
+	recordPatternToken := func(x, y int, bits patternMask, bw, bh int) {
+		tok := patternToken{bits: clonePatternMask(bits), bw: bw, bh: bh, x: x, y: y}
 		if activeSharedPatternIndexes && sharedPatternIndexes != nil {
 			key := patternBlockKey{x: x, y: y, bw: bw, bh: bh}
 			if channelID == chY {
@@ -1532,7 +1702,7 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 		patternTokens = append(patternTokens, tok)
 	}
 
-	if useMacro && smallBlock == 1 && macroBlock == 2 {
+	if len(levels) == 2 && useMacro && smallBlock == 1 && macroBlock == 2 {
 		// Specialized hot path for the most common setting (quality >= 80):
 		// - macro blocks are 2x2
 		// - small blocks are 1x1 (always solid, no pattern bits)
@@ -1635,7 +1805,7 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 					scratch.fgVals = append(scratch.fgVals, fg)
 					if isPattern {
 						recordPatternSize(2, 2)
-						recordPatternToken(mx, my, bits, 2, 2)
+						recordPatternToken(mx, my, patternMaskFromUint64(bits, 4), 2, 2)
 						scratch.bgVals = append(scratch.bgVals, bg)
 					}
 					typeW.writeBit(isPattern)
@@ -1680,43 +1850,60 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 		return blockCount, scratch.sizeBuf.Bytes(), scratch.typeBuf.Bytes(), scratch.patternBuf.Bytes(), scratch.fgVals, scratch.bgVals, patternSizes, nil
 	}
 
-	// main macroBlock x macroBlock area
-	for my := 0; my < fullH; my += macroBlock {
-		for mx := 0; mx < fullW; mx += macroBlock {
-			useBig := useMacro && canUseBigBlockChannel(plane, stride, height, mx, my, spread)
-			sizeW.writeBit(useBig)
-			if useBig {
-				fg, bg, bits, isPattern, err := encodeBlockPlane(plane, stride, height, mx, my, macroBlock, macroBlock)
-				if err != nil {
-					return 0, nil, nil, nil, nil, nil, nil, err
+	var encodeNode func(x, y, levelIdx int) error
+	encodeNode = func(x, y, levelIdx int) error {
+		size := levels[levelIdx]
+		if levelIdx == 0 {
+			fg, bg, bits, isPattern, err := encodeBlockPlane(plane, stride, height, x, y, size, size)
+			if err != nil {
+				return err
+			}
+			scratch.fgVals = append(scratch.fgVals, fg)
+			if isPattern {
+				recordPatternSize(size, size)
+				recordPatternToken(x, y, bits, size, size)
+				scratch.bgVals = append(scratch.bgVals, bg)
+			}
+			typeW.writeBit(isPattern)
+			blockCount++
+			return nil
+		}
+
+		useHere := canUseBlockSizeChannel(plane, stride, height, x, y, size, spread)
+		sizeW.writeBit(useHere)
+		if useHere {
+			fg, bg, bits, isPattern, err := encodeBlockPlane(plane, stride, height, x, y, size, size)
+			if err != nil {
+				return err
+			}
+			scratch.fgVals = append(scratch.fgVals, fg)
+			if isPattern {
+				recordPatternSize(size, size)
+				recordPatternToken(x, y, bits, size, size)
+				scratch.bgVals = append(scratch.bgVals, bg)
+			}
+			typeW.writeBit(isPattern)
+			blockCount++
+			return nil
+		}
+
+		childSize := levels[levelIdx-1]
+		ratio := size / childSize
+		for by := 0; by < ratio; by++ {
+			for bx := 0; bx < ratio; bx++ {
+				if err := encodeNode(x+bx*childSize, y+by*childSize, levelIdx-1); err != nil {
+					return err
 				}
-				scratch.fgVals = append(scratch.fgVals, fg)
-				if isPattern {
-					recordPatternSize(macroBlock, macroBlock)
-					recordPatternToken(mx, my, bits, macroBlock, macroBlock)
-					scratch.bgVals = append(scratch.bgVals, bg)
-				}
-				typeW.writeBit(isPattern)
-				blockCount++
-			} else {
-				// grid of smallBlock x smallBlock blocks covering the macroBlock area
-				for by := 0; by < macroBlock; by += smallBlock {
-					for bx := 0; bx < macroBlock; bx += smallBlock {
-						xx, yy := mx+bx, my+by
-						fg, bg, bits, isPattern, err := encodeBlockPlane(plane, stride, height, xx, yy, smallBlock, smallBlock)
-						if err != nil {
-							return 0, nil, nil, nil, nil, nil, nil, err
-						}
-						scratch.fgVals = append(scratch.fgVals, fg)
-						if isPattern {
-							recordPatternSize(smallBlock, smallBlock)
-							recordPatternToken(xx, yy, bits, smallBlock, smallBlock)
-							scratch.bgVals = append(scratch.bgVals, bg)
-						}
-						typeW.writeBit(isPattern)
-						blockCount++
-					}
-				}
+			}
+		}
+		return nil
+	}
+
+	// main topBlock x topBlock area
+	for my := 0; my < fullH; my += topBlock {
+		for mx := 0; mx < fullW; mx += topBlock {
+			if err := encodeNode(mx, my, len(levels)-1); err != nil {
+				return 0, nil, nil, nil, nil, nil, nil, err
 			}
 		}
 	}
@@ -1805,8 +1992,10 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 	if w4 == 0 || h4 == 0 {
 		return nil, fmt.Errorf("image too small for %dx%d blocks: %dx%d", smallBlock, smallBlock, w, h)
 	}
-	fullW := (w4 / macroBlock) * macroBlock
-	fullH := (h4 / macroBlock) * macroBlock
+	levels := activeLevels()
+	topBlock := levels[len(levels)-1]
+	fullW := (w4 / topBlock) * topBlock
+	fullH := (h4 / topBlock) * topBlock
 
 	if macroBlock < smallBlock || macroBlock%smallBlock != 0 {
 		return nil, fmt.Errorf("macroBlock (%d) must be >= smallBlock (%d) and a multiple of it",
@@ -1815,7 +2004,7 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 	useMacro := macroBlock > smallBlock
 
 	// --- Write header ---
-	if _, err := e.bw.WriteString(codec); err != nil {
+	if _, err := e.bw.WriteString(codec2); err != nil {
 		return nil, err
 	}
 	if err := writeU16BE(e.bw, uint16(smallBlock)); err != nil {
@@ -1826,6 +2015,14 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 	}
 	if err := writeU16BE(e.bw, uint16(activePatternCount)); err != nil {
 		return nil, err
+	}
+	if err := writeU16BE(e.bw, uint16(len(levels))); err != nil {
+		return nil, err
+	}
+	for _, level := range levels {
+		if err := writeU16BE(e.bw, uint16(level)); err != nil {
+			return nil, err
+		}
 	}
 	// channels mask: which Y/Cb/Cr planes are stored.
 	if err := e.bw.WriteByte(channelsMask); err != nil {
@@ -2001,20 +2198,20 @@ func Encode(img image.Image, quality int, bwmode bool) ([]byte, error) {
 	return e.Encode(img, quality, bwmode)
 }
 
-func readPatternComposite(br *bitReader, bw, bh int) (uint64, error) {
+func readPatternComposite(br *bitReader, bw, bh int) (patternMask, error) {
 	limit := activePatternCount
 	if limit < 1 {
 		limit = 1
 	}
 	idx, err := readPatternIndex(br, patternIndexBitsForCount(limit))
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	book := fixedPatternCodebook(bw, bh, limit)
 	if int(idx) >= len(book) {
-		return book[len(book)-1], nil
+		return clonePatternMask(book[len(book)-1]), nil
 	}
-	return book[idx], nil
+	return clonePatternMask(book[idx]), nil
 }
 
 // drawBlockPlane decodes a single block for one channel into a planar buffer.
@@ -2026,8 +2223,7 @@ func drawBlockPlane(plane []uint8, stride int, x0, y0, bw, bh int, br *bitReader
 	for yy := 0; yy < bh; yy++ {
 		for xx := 0; xx < bw; xx++ {
 			val := bg
-			shift := bw*bh - 1 - (yy*bw + xx)
-			if ((pattern >> shift) & 1) != 0 {
+			if testPatternBit(pattern, bw, bh, xx, yy) {
 				val = fg
 			}
 			idx := (y0+yy)*stride + (x0 + xx)
@@ -2064,7 +2260,7 @@ func drawBlockPix(pix []byte, strideBytes int, x0, y0, bw, bh int, br *bitReader
 		if o < 0 || o >= len(pix) {
 			return fmt.Errorf("drawBlockPix: index out of range")
 		}
-		if pattern != 0 {
+		if testPatternBit(pattern, bw, bh, 0, 0) {
 			pix[o] = fg
 		} else {
 			pix[o] = bg
@@ -2073,7 +2269,10 @@ func drawBlockPix(pix []byte, strideBytes int, x0, y0, bw, bh int, br *bitReader
 	}
 
 	if bw == 2 && bh == 2 {
-		bits := uint8(pattern)
+		var bits uint8
+		if len(pattern) > 0 {
+			bits = uint8(pattern[0])
+		}
 
 		row0 := y0*strideBytes + x0*4 + channelOffset
 		row1 := row0 + strideBytes
@@ -2113,8 +2312,7 @@ func drawBlockPix(pix []byte, strideBytes int, x0, y0, bw, bh int, br *bitReader
 		row := (y0+yy)*strideBytes + x0*4 + channelOffset
 		for xx := 0; xx < bw; xx++ {
 			val := bg
-			shift := bw*bh - 1 - (yy*bw + xx)
-			if ((pattern >> shift) & 1) != 0 {
+			if testPatternBit(pattern, bw, bh, xx, yy) {
 				val = fg
 			}
 			o := row + xx*4
@@ -2564,6 +2762,231 @@ func decodeChannel(data []byte, imgW, imgH int) ([]uint8, error) {
 	return plane, nil
 }
 
+func decodeChannelWithRects(data []byte, imgW, imgH int) ([]uint8, []image.Rectangle, error) {
+	pos := 0
+
+	readU32 := func(label string) (uint32, error) {
+		if len(data)-pos < 4 {
+			return 0, fmt.Errorf("decodeChannel: truncated while reading %s", label)
+		}
+		v := binary.BigEndian.Uint32(data[pos : pos+4])
+		pos += 4
+		return v, nil
+	}
+
+	readSlice := func(n uint32, label string) ([]byte, error) {
+		if n > uint32(len(data)-pos) {
+			return nil, fmt.Errorf("decodeChannel: truncated while reading %s", label)
+		}
+		end := pos + int(n)
+		s := data[pos:end]
+		pos = end
+		return s, nil
+	}
+
+	blockCount, err := readU32("blockCount")
+	if err != nil {
+		return nil, nil, err
+	}
+	sizeStreamLen, err := readU32("sizeStreamLen")
+	if err != nil {
+		return nil, nil, err
+	}
+	sizeBytes, err := readSlice(sizeStreamLen, "sizeStream")
+	if err != nil {
+		return nil, nil, err
+	}
+	sizeBR := newBitReader(sizeBytes)
+	typeStreamLen, err := readU32("typeStreamLen")
+	if err != nil {
+		return nil, nil, err
+	}
+	typeBytes, err := readSlice(typeStreamLen, "typeStream")
+	if err != nil {
+		return nil, nil, err
+	}
+	typeBR := newBitReader(typeBytes)
+	patternLen, err := readU32("patternLen")
+	if err != nil {
+		return nil, nil, err
+	}
+	patternBytes, err := readSlice(patternLen, "patternStream")
+	if err != nil {
+		return nil, nil, err
+	}
+	patternBR := newBitReader(patternBytes)
+	fgPackedLen, err := readU32("FG packedLen")
+	if err != nil {
+		return nil, nil, err
+	}
+	fgPacked, err := readSlice(fgPackedLen, "FG packed data")
+	if err != nil {
+		return nil, nil, err
+	}
+	if blockCount > 0 && fgPackedLen < blockCount {
+		return nil, nil, fmt.Errorf("decodeChannel: FG packed data too short")
+	}
+	fgStream, err := newDeltaStream(fgPacked, int(blockCount))
+	if err != nil {
+		return nil, nil, err
+	}
+	bgPackedLen, err := readU32("BG packedLen")
+	if err != nil {
+		return nil, nil, err
+	}
+	bgPacked, err := readSlice(bgPackedLen, "BG packed data")
+	if err != nil {
+		return nil, nil, err
+	}
+	if bgPackedLen > blockCount {
+		return nil, nil, fmt.Errorf("decodeChannel: BG packed data too long")
+	}
+	bgStream, err := newDeltaStream(bgPacked, int(bgPackedLen))
+	if err != nil {
+		return nil, nil, err
+	}
+	bgPerPattern := true
+
+	plane := make([]uint8, imgW*imgH)
+	rects := make([]image.Rectangle, 0, int(blockCount))
+
+	levels := activeLevels()
+	topBlock := levels[len(levels)-1]
+	w4 := (imgW / smallBlock) * smallBlock
+	h4 := (imgH / smallBlock) * smallBlock
+	fullW := (w4 / topBlock) * topBlock
+	fullH := (h4 / topBlock) * topBlock
+
+	blockIndex := 0
+
+	var decodeNode func(x, y, levelIdx int) error
+	decodeNode = func(x, y, levelIdx int) error {
+		size := levels[levelIdx]
+		if levelIdx > 0 {
+			useHere, err := sizeBR.readBit()
+			if err != nil {
+				return err
+			}
+			if !useHere {
+				childSize := levels[levelIdx-1]
+				ratio := size / childSize
+				for by := 0; by < ratio; by++ {
+					for bx := 0; bx < ratio; bx++ {
+						if err := decodeNode(x+bx*childSize, y+by*childSize, levelIdx-1); err != nil {
+							return err
+						}
+					}
+				}
+				return nil
+			}
+		}
+
+		if blockIndex >= int(blockCount) {
+			return fmt.Errorf("unexpected end of blocks in main area")
+		}
+		bitType, err := typeBR.readBit()
+		if err != nil {
+			return err
+		}
+		fg, err := fgStream.next()
+		if err != nil {
+			return err
+		}
+		if bitType {
+			var bg uint8
+			if bgPerPattern {
+				bg, err = bgStream.next()
+				if err != nil {
+					return err
+				}
+			}
+			if err := drawBlockPlane(plane, imgW, x, y, size, size, &patternBR, fg, bg); err != nil {
+				return err
+			}
+		} else {
+			if err := fillBlockPlane(plane, imgW, x, y, size, size, fg); err != nil {
+				return err
+			}
+		}
+		rects = append(rects, image.Rect(x, y, x+size, y+size))
+		blockIndex++
+		return nil
+	}
+
+	for my := 0; my < fullH; my += topBlock {
+		for mx := 0; mx < fullW; mx += topBlock {
+			if err := decodeNode(mx, my, len(levels)-1); err != nil {
+				return nil, nil, err
+			}
+		}
+	}
+	for my := 0; my < fullH; my += smallBlock {
+		for mx := fullW; mx < w4; mx += smallBlock {
+			if blockIndex >= int(blockCount) {
+				return nil, nil, fmt.Errorf("unexpected end of blocks in right stripe")
+			}
+			bitType, err := typeBR.readBit()
+			if err != nil {
+				return nil, nil, err
+			}
+			fg, err := fgStream.next()
+			if err != nil {
+				return nil, nil, err
+			}
+			if bitType {
+				bg, err := bgStream.next()
+				if err != nil {
+					return nil, nil, err
+				}
+				if err := drawBlockPlane(plane, imgW, mx, my, smallBlock, smallBlock, &patternBR, fg, bg); err != nil {
+					return nil, nil, err
+				}
+			} else {
+				if err := fillBlockPlane(plane, imgW, mx, my, smallBlock, smallBlock, fg); err != nil {
+					return nil, nil, err
+				}
+			}
+			rects = append(rects, image.Rect(mx, my, mx+smallBlock, my+smallBlock))
+			blockIndex++
+		}
+	}
+	for my := fullH; my < h4; my += smallBlock {
+		for mx := 0; mx < w4; mx += smallBlock {
+			if blockIndex >= int(blockCount) {
+				return nil, nil, fmt.Errorf("unexpected end of blocks in bottom stripe")
+			}
+			bitType, err := typeBR.readBit()
+			if err != nil {
+				return nil, nil, err
+			}
+			fg, err := fgStream.next()
+			if err != nil {
+				return nil, nil, err
+			}
+			if bitType {
+				bg, err := bgStream.next()
+				if err != nil {
+					return nil, nil, err
+				}
+				if err := drawBlockPlane(plane, imgW, mx, my, smallBlock, smallBlock, &patternBR, fg, bg); err != nil {
+					return nil, nil, err
+				}
+			} else {
+				if err := fillBlockPlane(plane, imgW, mx, my, smallBlock, smallBlock, fg); err != nil {
+					return nil, nil, err
+				}
+			}
+			rects = append(rects, image.Rect(mx, my, mx+smallBlock, my+smallBlock))
+			blockIndex++
+		}
+	}
+
+	if blockIndex != int(blockCount) {
+		return nil, nil, fmt.Errorf("block count mismatch: used %d of %d", blockIndex, blockCount)
+	}
+	return plane, rects, nil
+}
+
 type decoderChannelScratch struct {
 	plane    []uint8
 	macroBig []bool
@@ -2586,6 +3009,16 @@ type Decoder struct {
 
 	neutral []uint8
 	dst     *image.RGBA
+}
+
+type decodedPlanes struct {
+	y     []uint8
+	cb    []uint8
+	cr    []uint8
+	hasCb bool
+	hasCr bool
+	w     int
+	h     int
 }
 
 func NewDecoder() *Decoder {
@@ -2684,11 +3117,13 @@ func decodeChannelToPix(data []byte, imgW, imgH int, pix []byte, strideBytes int
 		return err
 	}
 
+	levels := activeLevels()
+	topBlock := levels[len(levels)-1]
 	w4 := (imgW / smallBlock) * smallBlock
 	h4 := (imgH / smallBlock) * smallBlock
-	fullW := (w4 / macroBlock) * macroBlock
-	fullH := (h4 / macroBlock) * macroBlock
-	useMacro := macroBlock > smallBlock
+	fullW := (w4 / topBlock) * topBlock
+	fullH := (h4 / topBlock) * topBlock
+	useMacro := len(levels) == 2 && macroBlock > smallBlock
 
 	blockIndex := 0
 
@@ -2740,22 +3175,22 @@ func decodeChannelToPix(data []byte, imgW, imgH int, pix []byte, strideBytes int
 							return err
 						}
 
-						if (pattern & 0b1000) != 0 {
+						if testPatternBit(pattern, 2, 2, 0, 0) {
 							pix[o00] = fg
 						} else {
 							pix[o00] = bg
 						}
-						if (pattern & 0b0100) != 0 {
+						if testPatternBit(pattern, 2, 2, 1, 0) {
 							pix[o01] = fg
 						} else {
 							pix[o01] = bg
 						}
-						if (pattern & 0b0010) != 0 {
+						if testPatternBit(pattern, 2, 2, 0, 1) {
 							pix[o10] = fg
 						} else {
 							pix[o10] = bg
 						}
-						if (pattern & 0b0001) != 0 {
+						if testPatternBit(pattern, 2, 2, 1, 1) {
 							pix[o11] = fg
 						} else {
 							pix[o11] = bg
@@ -2838,81 +3273,65 @@ func decodeChannelToPix(data []byte, imgW, imgH int, pix []byte, strideBytes int
 		return nil
 	}
 
-	for my := 0; my < fullH; my += macroBlock {
-		for mx := 0; mx < fullW; mx += macroBlock {
-			if blockIndex >= int(blockCount) {
-				return fmt.Errorf("unexpected end of blocks in main area")
-			}
-
-			macroIsBig, err := sizeBR.readBit()
+	var decodeNode func(x, y, levelIdx int) error
+	decodeNode = func(x, y, levelIdx int) error {
+		size := levels[levelIdx]
+		if levelIdx > 0 {
+			useHere, err := sizeBR.readBit()
 			if err != nil {
 				return err
 			}
-
-			if useMacro && macroIsBig {
-				bitType, err := typeBR.readBit()
-				if err != nil {
-					return err
-				}
-				fg := fgStream.nextFast()
-				if bitType {
-					var bg uint8
-					if bgPerPattern {
-						if bgStream.i >= bgStream.n {
-							return fmt.Errorf("decodeChannel: BG stream truncated")
+			if !useHere {
+				childSize := levels[levelIdx-1]
+				ratio := size / childSize
+				for by := 0; by < ratio; by++ {
+					for bx := 0; bx < ratio; bx++ {
+						if err := decodeNode(x+bx*childSize, y+by*childSize, levelIdx-1); err != nil {
+							return err
 						}
-						bg = bgStream.nextFast()
-					} else {
-						bg = bgStream.nextFast()
-					}
-					if err := drawBlockPix(pix, strideBytes, mx, my, macroBlock, macroBlock, &patternBR, fg, bg, channelOffset); err != nil {
-						return err
-					}
-				} else {
-					if !bgPerPattern {
-						_ = bgStream.nextFast()
-					}
-					if err := fillBlockPix(pix, strideBytes, mx, my, macroBlock, macroBlock, fg, channelOffset); err != nil {
-						return err
 					}
 				}
-				blockIndex++
-				continue
+				return nil
 			}
+		}
 
-			for by := 0; by < macroBlock; by += smallBlock {
-				for bx := 0; bx < macroBlock; bx += smallBlock {
-					if blockIndex >= int(blockCount) {
-						return fmt.Errorf("unexpected end of blocks in macro grid")
-					}
-					bitType, err := typeBR.readBit()
-					if err != nil {
-						return err
-					}
-					fg := fgStream.nextFast()
-					if bitType {
-						var bg uint8
-						if bgPerPattern {
-							if bgStream.i >= bgStream.n {
-								return fmt.Errorf("decodeChannel: BG stream truncated")
-							}
-							bg = bgStream.nextFast()
-						} else {
-							bg = bgStream.nextFast()
-						}
-						if err := drawBlockPix(pix, strideBytes, mx+bx, my+by, smallBlock, smallBlock, &patternBR, fg, bg, channelOffset); err != nil {
-							return err
-						}
-					} else {
-						if !bgPerPattern {
-							_ = bgStream.nextFast()
-						}
-						if err := fillBlockPix(pix, strideBytes, mx+bx, my+by, smallBlock, smallBlock, fg, channelOffset); err != nil {
-							return err
-						}
-					}
-					blockIndex++
+		if blockIndex >= int(blockCount) {
+			return fmt.Errorf("unexpected end of blocks in main area")
+		}
+		bitType, err := typeBR.readBit()
+		if err != nil {
+			return err
+		}
+		fg := fgStream.nextFast()
+		if bitType {
+			var bg uint8
+			if bgPerPattern {
+				if bgStream.i >= bgStream.n {
+					return fmt.Errorf("decodeChannel: BG stream truncated")
 				}
+				bg = bgStream.nextFast()
+			} else {
+				bg = bgStream.nextFast()
+			}
+			if err := drawBlockPix(pix, strideBytes, x, y, size, size, &patternBR, fg, bg, channelOffset); err != nil {
+				return err
+			}
+		} else {
+			if !bgPerPattern {
+				_ = bgStream.nextFast()
+			}
+			if err := fillBlockPix(pix, strideBytes, x, y, size, size, fg, channelOffset); err != nil {
+				return err
+			}
+		}
+		blockIndex++
+		return nil
+	}
+
+	for my := 0; my < fullH; my += topBlock {
+		for mx := 0; mx < fullW; mx += topBlock {
+			if err := decodeNode(mx, my, len(levels)-1); err != nil {
+				return err
 			}
 		}
 	}
@@ -3353,10 +3772,20 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	pos := 0
 
 	// magic
-	if string(payload[pos:pos+len(codec)]) != codec {
-		return nil, fmt.Errorf("bad magic: %q", string(payload[pos:pos+len(codec)]))
+	useExtendedHeader := false
+	switch {
+	case len(payload)-pos >= len(codec2) && string(payload[pos:pos+len(codec2)]) == codec2:
+		useExtendedHeader = true
+		pos += len(codec2)
+	case len(payload)-pos >= len(codec) && string(payload[pos:pos+len(codec)]) == codec:
+		pos += len(codec)
+	default:
+		end := pos + len(codec)
+		if end > len(payload) {
+			end = len(payload)
+		}
+		return nil, fmt.Errorf("bad magic: %q", string(payload[pos:end]))
 	}
-	pos += len(codec)
 
 	readU16 := func(label string) (uint16, error) {
 		if len(payload)-pos < 2 {
@@ -3387,11 +3816,34 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	if err != nil {
 		return nil, err
 	}
+	blockLevels = blockLevels[:0]
+	if useExtendedHeader {
+		levelCount, err := readU16("block level count")
+		if err != nil {
+			return nil, err
+		}
+		if levelCount == 0 {
+			return nil, fmt.Errorf("invalid block level count: %d", levelCount)
+		}
+		for i := 0; i < int(levelCount); i++ {
+			level, err := readU16("block level")
+			if err != nil {
+				return nil, err
+			}
+			blockLevels = append(blockLevels, int(level))
+		}
+	}
 	if bwSize == 0 || bhSize == 0 {
 		return nil, fmt.Errorf("invalid block sizes in header: %dx%d", bwSize, bhSize)
 	}
 	smallBlock = int(bwSize)
 	macroBlock = int(bhSize)
+	if !useExtendedHeader {
+		blockLevels = append(blockLevels[:0], smallBlock, macroBlock)
+	}
+	if len(blockLevels) == 2 && blockLevels[0] == blockLevels[1] {
+		blockLevels = blockLevels[:1]
+	}
 	if patternCount == 0 {
 		return nil, fmt.Errorf("invalid pattern count in header: %d", patternCount)
 	}
@@ -3418,9 +3870,18 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	imgW := int(imgW32)
 	imgH := int(imgH32)
 
-	if macroBlock < smallBlock || macroBlock%smallBlock != 0 {
-		return nil, fmt.Errorf("macroBlock (%d) must be >= smallBlock (%d) and a multiple of it",
-			macroBlock, smallBlock)
+	if len(blockLevels) == 0 {
+		return nil, fmt.Errorf("missing block levels in header")
+	}
+	for i := 0; i < len(blockLevels); i++ {
+		if blockLevels[i] <= 0 {
+			return nil, fmt.Errorf("invalid block level %d at index %d", blockLevels[i], i)
+		}
+		if i > 0 {
+			if blockLevels[i] <= blockLevels[i-1] || blockLevels[i]%blockLevels[i-1] != 0 {
+				return nil, fmt.Errorf("invalid block hierarchy %v", blockLevels)
+			}
+		}
 	}
 
 	if d.dst == nil || d.dst.Bounds().Dx() != imgW || d.dst.Bounds().Dy() != imgH {
@@ -3521,6 +3982,96 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	}
 
 	return dst, nil
+}
+
+func DecodeLayers(compData []byte) (int, int, []uint8, []image.Rectangle, []uint8, []image.Rectangle, []uint8, []image.Rectangle, bool, bool, error) {
+	codecStateMu.Lock()
+	defer codecStateMu.Unlock()
+
+	zdec := mustNewZstdDecoder()
+	payload, err := zdec.DecodeAll(compData, nil)
+	if err != nil {
+		return 0, 0, nil, nil, nil, nil, nil, nil, false, false, fmt.Errorf("zstd decode: %w", err)
+	}
+
+	pos := 0
+	useExtendedHeader := false
+	switch {
+	case len(payload)-pos >= len(codec2) && string(payload[pos:pos+len(codec2)]) == codec2:
+		useExtendedHeader = true
+		pos += len(codec2)
+	case len(payload)-pos >= len(codec) && string(payload[pos:pos+len(codec)]) == codec:
+		pos += len(codec)
+	default:
+		return 0, 0, nil, nil, nil, nil, nil, nil, false, false, fmt.Errorf("bad magic")
+	}
+
+	readU16 := func() uint16 {
+		v := binary.BigEndian.Uint16(payload[pos : pos+2])
+		pos += 2
+		return v
+	}
+	readU32 := func() uint32 {
+		v := binary.BigEndian.Uint32(payload[pos : pos+4])
+		pos += 4
+		return v
+	}
+
+	smallBlock = int(readU16())
+	macroBlock = int(readU16())
+	activePatternCount = int(readU16())
+	blockLevels = blockLevels[:0]
+	if useExtendedHeader {
+		levelCount := int(readU16())
+		for i := 0; i < levelCount; i++ {
+			blockLevels = append(blockLevels, int(readU16()))
+		}
+	} else {
+		blockLevels = append(blockLevels, smallBlock, macroBlock)
+	}
+	if len(blockLevels) == 2 && blockLevels[0] == blockLevels[1] {
+		blockLevels = blockLevels[:1]
+	}
+	channelsMask := payload[pos]
+	pos++
+	imgW := int(readU32())
+	imgH := int(readU32())
+
+	ySeg, err := readChannelSegment(payload, &pos)
+	if err != nil {
+		return 0, 0, nil, nil, nil, nil, nil, nil, false, false, err
+	}
+	yPlane, yRects, err := decodeChannelWithRects(ySeg, imgW, imgH)
+	if err != nil {
+		return 0, 0, nil, nil, nil, nil, nil, nil, false, false, err
+	}
+
+	hasCb := (channelsMask & channelFlagCb) != 0
+	hasCr := (channelsMask & channelFlagCr) != 0
+	var cbPlane, crPlane []uint8
+	var cbRects, crRects []image.Rectangle
+	if hasCb {
+		cbSeg, err := readChannelSegment(payload, &pos)
+		if err != nil {
+			return 0, 0, nil, nil, nil, nil, nil, nil, false, false, err
+		}
+		cbPlane, cbRects, err = decodeChannelWithRects(cbSeg, imgW, imgH)
+		if err != nil {
+			return 0, 0, nil, nil, nil, nil, nil, nil, false, false, err
+		}
+	}
+	if hasCr {
+		crSeg, err := readChannelSegment(payload, &pos)
+		if err != nil {
+			return 0, 0, nil, nil, nil, nil, nil, nil, false, false, err
+		}
+		crPlane, crRects, err = decodeChannelWithRects(crSeg, imgW, imgH)
+		if err != nil {
+			return 0, 0, nil, nil, nil, nil, nil, nil, false, false, err
+		}
+	}
+
+	return imgW, imgH, yPlane, yRects, cbPlane, cbRects, crPlane, crRects, hasCb, hasCr, nil
 }
 
 // DecodeFrom reads compressed data from r and decodes it.

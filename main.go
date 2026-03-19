@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/draw"
 	_ "image/gif"
 	_ "image/jpeg"
 	"image/png"
@@ -90,9 +91,8 @@ func writePatternUsageSheets(basePath string) error {
 
 				for py := 0; py < bh; py++ {
 					for px := 0; px < bw; px++ {
-						shift := bw*bh - 1 - (py*bw + px)
 						c := color.Color(color.RGBA{250, 250, 250, 255})
-						if ((entry.bits >> shift) & 1) != 0 {
+						if testPatternBit(entry.bits, bw, bh, px, py) {
 							c = fg
 						}
 						for sy := 0; sy < cellScale; sy++ {
@@ -172,13 +172,12 @@ func writePatternSheets(basePath string) error {
 				img.Set(ox+cellW-1, y, grid)
 			}
 
-			for py := 0; py < bh; py++ {
-				for px := 0; px < bw; px++ {
-					shift := bw*bh - 1 - (py*bw + px)
-					c := color.Color(color.RGBA{250, 250, 250, 255})
-					if ((bits >> shift) & 1) != 0 {
-						c = fg
-					}
+				for py := 0; py < bh; py++ {
+					for px := 0; px < bw; px++ {
+						c := color.Color(color.RGBA{250, 250, 250, 255})
+						if testPatternBit(bits, bw, bh, px, py) {
+							c = fg
+						}
 					for sy := 0; sy < cellScale; sy++ {
 						for sx := 0; sx < cellScale; sx++ {
 							img.Set(ox+padding+px*cellScale+sx, oy+padding+py*cellScale+sy, c)
@@ -207,8 +206,8 @@ func writePatternSheets(basePath string) error {
 }
 
 func main() {
-	if len(os.Args) < 2 || len(os.Args) > 12 {
-		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png] [-patterns=N] [-blocks=A,B] [-color-quant=N] [-pattern-index=per-channel|shared] [-log]\n  babe <input.babe> [-postfilter]\n  (bw flag, decoded.png, -patterns=N, -blocks=A,B, -color-quant=N, -pattern-index=... and -log can appear anywhere after quality)\n")
+	if len(os.Args) < 2 || len(os.Args) > 14 {
+		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png] [-patterns=N] [-blocks=A,B|A-B] [-color-quant=N] [-pattern-set=basic] [-pattern-index=per-channel|shared] [-log]\n  babe <input.babe> [-postfilter] [-layers]\n  (bw flag, decoded.png, -patterns=N, -blocks=A,B|A-B, -color-quant=N, -pattern-set=basic, -pattern-index=... and -log can appear anywhere after quality)\n")
 		os.Exit(1)
 	}
 
@@ -219,13 +218,17 @@ func main() {
 	// If input is .babe → decode to PNG
 	if ext == ".babe" {
 		postfilter := false
+		splitChannels := false
 		for _, a := range os.Args[2:] {
 			if a == "-postfilter" {
 				postfilter = true
-				break
+				continue
+			}
+			if a == "-layers" {
+				splitChannels = true
 			}
 		}
-		if err := decodeBabe(inputPath, base+".png", false, postfilter); err != nil {
+		if err := decodeBabe(inputPath, base+".png", splitChannels, postfilter); err != nil {
 			fmt.Fprintln(os.Stderr, "decode error:", err)
 			os.Exit(1)
 		}
@@ -251,6 +254,7 @@ func main() {
 
 	bwmode := false
 	decodeOutPath := ""
+	layersOut := false
 	patternCount := defaultPatternCount
 	blockSpec := ""
 	colorQuantShift := 0
@@ -263,6 +267,10 @@ func main() {
 		}
 		if a == "-log" {
 			logPatterns = true
+			continue
+		}
+		if a == "-layers" {
+			layersOut = true
 			continue
 		}
 		if strings.HasPrefix(a, "-patterns=") {
@@ -287,6 +295,14 @@ func main() {
 			colorQuantShift = v
 			continue
 		}
+		if strings.HasPrefix(a, "-pattern-set=") {
+			v := strings.TrimPrefix(a, "-pattern-set=")
+			if v != patternSetBasic {
+				fmt.Fprintf(os.Stderr, "pattern-set must be %s\n", patternSetBasic)
+				os.Exit(1)
+			}
+			continue
+		}
 		if strings.HasPrefix(a, "-pattern-index=") {
 			v := strings.TrimPrefix(a, "-pattern-index=")
 			if v != "per-channel" && v != "shared" {
@@ -303,29 +319,12 @@ func main() {
 
 	outPath := base + ".babe"
 	if blockSpec != "" {
-		parts := strings.Split(blockSpec, ",")
-		var a, b int
-		var errA, errB error
-		switch len(parts) {
-		case 1:
-			a, errA = strconv.Atoi(strings.TrimSpace(parts[0]))
-			b = a
-		case 2:
-			a, errA = strconv.Atoi(strings.TrimSpace(parts[0]))
-			b, errB = strconv.Atoi(strings.TrimSpace(parts[1]))
-		default:
-			fmt.Fprintln(os.Stderr, "blocks must be one size like 4 or two comma-separated sizes like 4,8")
+		if err := setBlocksFromSpec(blockSpec); err != nil {
+			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		if errA != nil || errB != nil || a < 1 || b < 1 || a > b || b%a != 0 {
-			fmt.Fprintln(os.Stderr, "blocks must be positive sizes like 4 or 4,8 where macro is >= small and divisible by it")
-			os.Exit(1)
-		}
-		forcedSmallBlock = a
-		forcedMacroBlock = b
 		defer func() {
-			forcedSmallBlock = 0
-			forcedMacroBlock = 0
+			forcedBlockSizes = nil
 		}()
 	}
 	if err := encodeToBabe(inputPath, outPath, quality, bwmode, patternCount, colorQuantShift, patternIndexMode, logPatterns); err != nil {
@@ -334,6 +333,12 @@ func main() {
 	}
 	if decodeOutPath != "" {
 		if err := decodeBabe(outPath, decodeOutPath, false, false); err != nil {
+			fmt.Fprintln(os.Stderr, "decode error:", err)
+			os.Exit(1)
+		}
+	}
+	if layersOut {
+		if err := decodeBabe(outPath, base+".png", true, false); err != nil {
 			fmt.Fprintln(os.Stderr, "decode error:", err)
 			os.Exit(1)
 		}
@@ -410,10 +415,11 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount
 		outPath,
 		formatSize(encSize),
 	)
-	fmt.Printf("quality=%d, patterns=%d, color-quant=%d, pattern-index=%s, ratio=%.3f, time=%s\n",
+	fmt.Printf("quality=%d, patterns=%d, color-quant=%d, pattern-set=%s, pattern-index=%s, ratio=%.3f, time=%s\n",
 		quality,
 		patternCount,
 		colorQuantShift,
+		patternSetBasic,
 		patternIndexMode,
 		ratio,
 		finish,
@@ -484,20 +490,57 @@ func decodeBabe(inPath, outPath string, splitChannels, postfilter bool) error {
 	}
 
 	base := strings.TrimSuffix(outPath, filepath.Ext(outPath))
-	bounds := dec.Bounds()
-	yImg := image.NewGray(bounds)
-	cbImg := image.NewGray(bounds)
-	crImg := image.NewGray(bounds)
-
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			c := dec.At(x, y)
-			yc := color.YCbCrModel.Convert(c).(color.YCbCr)
-			yImg.SetGray(x, y, color.Gray{Y: yc.Y})
-			cbImg.SetGray(x, y, color.Gray{Y: yc.Cb})
-			crImg.SetGray(x, y, color.Gray{Y: yc.Cr})
-		}
+	imgW, imgH, yPlane, yRects, cbPlane, cbRects, crPlane, crRects, hasCb, hasCr, err := DecodeLayers(compData)
+	if err != nil {
+		return err
 	}
+
+	makeLayer := func(plane []uint8, rects []image.Rectangle, fallback uint8) *image.RGBA {
+		img := image.NewRGBA(image.Rect(0, 0, imgW, imgH))
+		gray := image.NewGray(img.Bounds())
+		if len(plane) == 0 {
+			for i := range gray.Pix {
+				gray.Pix[i] = fallback
+			}
+		} else {
+			copy(gray.Pix, plane)
+		}
+		draw.Draw(img, img.Bounds(), gray, image.Point{}, draw.Src)
+		green := color.RGBA{0, 255, 0, 255}
+		for _, r := range rects {
+			for x := r.Min.X; x < r.Max.X; x++ {
+				if r.Min.Y >= 0 && r.Min.Y < imgH {
+					img.Set(x, r.Min.Y, green)
+				}
+				if r.Max.Y-1 >= 0 && r.Max.Y-1 < imgH {
+					img.Set(x, r.Max.Y-1, green)
+				}
+			}
+			for y := r.Min.Y; y < r.Max.Y; y++ {
+				if r.Min.X >= 0 && r.Min.X < imgW {
+					img.Set(r.Min.X, y, green)
+				}
+				if r.Max.X-1 >= 0 && r.Max.X-1 < imgW {
+					img.Set(r.Max.X-1, y, green)
+				}
+			}
+		}
+		return img
+	}
+
+	yImg := makeLayer(yPlane, yRects, 0)
+	cbImg := makeLayer(cbPlane, cbRects, func() uint8 {
+		if hasCb {
+			return 0
+		}
+		return 128
+	}())
+	crImg := makeLayer(crPlane, crRects, func() uint8 {
+		if hasCr {
+			return 0
+		}
+		return 128
+	}())
 
 	yFile, err := os.Create(base + "_Y.png")
 	if err != nil {

@@ -6,6 +6,7 @@ It focuses on simplicity, compact encoded size, and fast decoding rather than pe
 ## Features
 
 - Two‑tone block encoding with adaptive subdivision  
+- Configurable multi-level block hierarchy via `-blocks=2-64` or `-blocks=2,4,8,16,32,64`
 - Palette reduction in YUV space  
 - Delta-indexed blocks for compact representation  
 - Zstandard used for final compression stage  
