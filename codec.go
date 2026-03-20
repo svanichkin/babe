@@ -47,6 +47,9 @@ const (
 	channelFlagY  = 1 << 0
 	channelFlagCb = 1 << 1
 	channelFlagCr = 1 << 2
+
+	// Cb/Cr are stored as a sparse chroma grid instead of per-channel block streams.
+	channelFlagChromaGrid = 1 << 7
 )
 
 // encodeBW toggles grayscale mode; when true, only the Y channel is stored.
@@ -65,6 +68,7 @@ var activeSharedPatternIndexes bool
 var forcedBlockSizes []int
 var forcedSpreadFactors []float64
 var activeColorQuantShift int
+var activeBackgroundTile int
 
 // Quality mapping:
 // - quality is in [0..100]
@@ -866,6 +870,140 @@ func extractYCbCrFromGraySequential(src *image.Gray, yPlane, cbPlane, crPlane []
 			crPlane[baseIdx+x] = 128
 		}
 	}
+}
+
+func encodeRingDeltaBytesInPlace(data []byte) {
+	if len(data) == 0 {
+		return
+	}
+	prev := data[0]
+	for i := 1; i < len(data); i++ {
+		curr := data[i]
+		data[i] = byte((int(curr) - int(prev) + 256) & 0xFF)
+		prev = curr
+	}
+}
+
+func decodeRingDeltaBytesInPlace(data []byte) {
+	if len(data) == 0 {
+		return
+	}
+	prev := data[0]
+	for i := 1; i < len(data); i++ {
+		prev = byte((int(prev) + int(data[i])) & 0xFF)
+		data[i] = prev
+	}
+}
+
+func encodeChromaGridOverlay(dst *bytes.Buffer, cbPlane, crPlane []uint8, w, h, step int) {
+	if step <= 0 {
+		step = 16
+	}
+	dst.WriteByte(byte(step))
+	gridW := (w+step-1)/step + 1
+	gridH := (h+step-1)/step + 1
+	var hdr [4]byte
+	binary.BigEndian.PutUint16(hdr[0:2], uint16(gridW))
+	binary.BigEndian.PutUint16(hdr[2:4], uint16(gridH))
+	dst.Write(hdr[:])
+	for gy := 0; gy < gridH; gy++ {
+		y := min(gy*step, h-1)
+		for gx := 0; gx < gridW; gx++ {
+			x := min(gx*step, w-1)
+			dst.WriteByte(cbPlane[y*w+x])
+		}
+	}
+	cbGridEnd := dst.Len()
+	for gy := 0; gy < gridH; gy++ {
+		y := min(gy*step, h-1)
+		for gx := 0; gx < gridW; gx++ {
+			x := min(gx*step, w-1)
+			dst.WriteByte(crPlane[y*w+x])
+		}
+	}
+	gridStart := cbGridEnd - gridW*gridH
+	encodeRingDeltaBytesInPlace(dst.Bytes()[gridStart:cbGridEnd])
+	encodeRingDeltaBytesInPlace(dst.Bytes()[cbGridEnd : cbGridEnd+gridW*gridH])
+}
+
+func decodeChromaGridOverlay(data []byte, pos, w, h int) ([]uint8, []uint8, int, error) {
+	if len(data)-pos < 5 {
+		return nil, nil, pos, fmt.Errorf("decode: truncated chroma grid header")
+	}
+	step := int(data[pos])
+	pos++
+	if step < 1 {
+		return nil, nil, pos, fmt.Errorf("decode: invalid chroma grid step")
+	}
+	gridW := int(binary.BigEndian.Uint16(data[pos : pos+2]))
+	gridH := int(binary.BigEndian.Uint16(data[pos+2 : pos+4]))
+	pos += 4
+	if gridW < 2 || gridH < 2 {
+		return nil, nil, pos, fmt.Errorf("decode: invalid chroma grid size")
+	}
+	nodeCount := gridW * gridH
+	if len(data)-pos < nodeCount*2 {
+		return nil, nil, pos, fmt.Errorf("decode: truncated chroma grid payload")
+	}
+	cbGrid := append([]byte(nil), data[pos:pos+nodeCount]...)
+	pos += nodeCount
+	crGrid := append([]byte(nil), data[pos:pos+nodeCount]...)
+	pos += nodeCount
+	decodeRingDeltaBytesInPlace(cbGrid)
+	decodeRingDeltaBytesInPlace(crGrid)
+	cbPlane := decodeChromaGridPlaneValues(cbGrid, step, gridW, gridH, w, h)
+	crPlane := decodeChromaGridPlaneValues(crGrid, step, gridW, gridH, w, h)
+	return cbPlane, crPlane, pos, nil
+}
+
+func decodeChromaGridPlaneValues(grid []byte, step, gridW, gridH, w, h int) []uint8 {
+	out := make([]uint8, w*h)
+	if w == 0 || h == 0 {
+		return out
+	}
+	for y := 0; y < h; y++ {
+		cellY := y / step
+		if cellY >= gridH-1 {
+			cellY = gridH - 2
+		}
+		y0 := cellY * step
+		fy := 0.0
+		if step > 0 {
+			fy = float64(y-y0) / float64(step)
+		}
+		for x := 0; x < w; x++ {
+			cellX := x / step
+			if cellX >= gridW-1 {
+				cellX = gridW - 2
+			}
+			x0 := cellX * step
+			fx := 0.0
+			if step > 0 {
+				fx = float64(x-x0) / float64(step)
+			}
+
+			i00 := cellY*gridW + cellX
+			i10 := i00 + 1
+			i01 := i00 + gridW
+			i11 := i01 + 1
+
+			v00 := float64(grid[i00])
+			v10 := float64(grid[i10])
+			v01 := float64(grid[i01])
+			v11 := float64(grid[i11])
+
+			top := v00 + (v10-v00)*fx
+			bot := v01 + (v11-v01)*fx
+			v := top + (bot-top)*fy
+			if v < 0 {
+				v = 0
+			} else if v > 255 {
+				v = 255
+			}
+			out[y*w+x] = uint8(v + 0.5)
+		}
+	}
+	return out
 }
 
 // canUseBigBlockChannel decides whether a macroBlock region can be encoded as a single block
@@ -2073,11 +2211,16 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 		extractYCbCrPlanesIntoSerial(img, e.yPlane, e.cbPlane, e.crPlane)
 	}
 
+	useChromaGrid := !encodeBW && activeBackgroundTile > 0
+
 	// Decide which channels will be stored. Y is always present; Cb/Cr
 	// may be omitted in grayscale mode.
 	channelsMask := byte(channelFlagY)
 	if !encodeBW {
 		channelsMask |= channelFlagCb | channelFlagCr
+		if useChromaGrid {
+			channelsMask |= channelFlagChromaGrid
+		}
 	}
 
 	e.raw.Reset()
@@ -2135,7 +2278,7 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 	var channels [3]encodeChannelSpec
 	chCount := 1
 	channels[0] = encodeChannelSpec{id: chY, plane: e.yPlane}
-	if !encodeBW {
+	if !encodeBW && !useChromaGrid {
 		channels[1] = encodeChannelSpec{id: chCb, plane: e.cbPlane}
 		channels[2] = encodeChannelSpec{id: chCr, plane: e.crPlane}
 		chCount = 3
@@ -2265,6 +2408,14 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 			for size := range patternSizes {
 				lastPatternSizesUsed[size] = struct{}{}
 			}
+		}
+	}
+
+	if useChromaGrid {
+		var chroma bytes.Buffer
+		encodeChromaGridOverlay(&chroma, e.cbPlane, e.crPlane, w, h, activeBackgroundTile)
+		if _, err := e.bw.Write(chroma.Bytes()); err != nil {
+			return nil, err
 		}
 	}
 
@@ -4005,6 +4156,7 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	if channelsMask&channelFlagY == 0 {
 		return nil, fmt.Errorf("decode: Y channel missing in header")
 	}
+	hasChromaGrid := (channelsMask & channelFlagChromaGrid) != 0
 
 	imgW32, err := readU32("image width")
 	if err != nil {
@@ -4046,13 +4198,16 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	hasCr := (channelsMask & channelFlagCr) != 0
 
 	var cbSeg, crSeg []byte
-	if hasCb {
+	if hasChromaGrid {
+		hasCb = true
+		hasCr = true
+	} else if hasCb {
 		cbSeg, err = readChannelSegment(payload, &pos)
 		if err != nil {
 			return nil, err
 		}
 	}
-	if hasCr {
+	if !hasChromaGrid && hasCr {
 		crSeg, err = readChannelSegment(payload, &pos)
 		if err != nil {
 			return nil, err
@@ -4072,7 +4227,19 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	}
 
 	var errY, errCb, errCr error
-	if d.Parallel {
+	if hasChromaGrid {
+		errY = decodeChannelToPix(ySeg, imgW, imgH, pix, stride, 0)
+		if errY != nil {
+			return nil, errY
+		}
+		cbPlane, crPlane, nextPos, err := decodeChromaGridOverlay(payload, pos, imgW, imgH)
+		if err != nil {
+			return nil, err
+		}
+		pos = nextPos
+		blitPlaneToPix(cbPlane, pix, stride, imgW, imgH, 1)
+		blitPlaneToPix(crPlane, pix, stride, imgW, imgH, 2)
+	} else if d.Parallel {
 		var wg sync.WaitGroup
 		wg.Add(1)
 		go decodeChannelToPixWorker(ySeg, imgW, imgH, pix, stride, 0, &errY, &wg)
@@ -4184,6 +4351,7 @@ func DecodeLayers(compData []byte) (int, int, []uint8, []image.Rectangle, []uint
 	pos++
 	imgW := int(readU32())
 	imgH := int(readU32())
+	hasChromaGrid := (channelsMask & channelFlagChromaGrid) != 0
 
 	ySeg, err := readChannelSegment(payload, &pos)
 	if err != nil {
@@ -4198,7 +4366,14 @@ func DecodeLayers(compData []byte) (int, int, []uint8, []image.Rectangle, []uint
 	hasCr := (channelsMask & channelFlagCr) != 0
 	var cbPlane, crPlane []uint8
 	var cbRects, crRects []image.Rectangle
-	if hasCb {
+	if hasChromaGrid {
+		cbPlane, crPlane, pos, err = decodeChromaGridOverlay(payload, pos, imgW, imgH)
+		if err != nil {
+			return 0, 0, nil, nil, nil, nil, nil, nil, false, false, err
+		}
+		hasCb = true
+		hasCr = true
+	} else if hasCb {
 		cbSeg, err := readChannelSegment(payload, &pos)
 		if err != nil {
 			return 0, 0, nil, nil, nil, nil, nil, nil, false, false, err
@@ -4208,7 +4383,7 @@ func DecodeLayers(compData []byte) (int, int, []uint8, []image.Rectangle, []uint
 			return 0, 0, nil, nil, nil, nil, nil, nil, false, false, err
 		}
 	}
-	if hasCr {
+	if !hasChromaGrid && hasCr {
 		crSeg, err := readChannelSegment(payload, &pos)
 		if err != nil {
 			return 0, 0, nil, nil, nil, nil, nil, nil, false, false, err
@@ -4237,6 +4412,16 @@ func (d *Decoder) DecodeFrom(r io.Reader, postfilter bool) (*image.RGBA, error) 
 func decodeChannelToPixWorker(data []byte, imgW, imgH int, pix []byte, strideBytes int, channelOffset int, dstErr *error, wg *sync.WaitGroup) {
 	defer wg.Done()
 	*dstErr = decodeChannelToPix(data, imgW, imgH, pix, strideBytes, channelOffset)
+}
+
+func blitPlaneToPix(plane, pix []byte, strideBytes, imgW, imgH, channelOffset int) {
+	for y := 0; y < imgH; y++ {
+		rowOff := y * strideBytes
+		planeOff := y * imgW
+		for x := 0; x < imgW; x++ {
+			pix[rowOff+x*4+channelOffset] = plane[planeOff+x]
+		}
+	}
 }
 
 func ycbcrToRGB(pix []byte, stride, imgW int, yStart, yEnd int, hasCb, hasCr bool) {

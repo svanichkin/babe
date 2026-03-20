@@ -150,6 +150,49 @@ func TestEncodeDecode_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestEncodeDecode_RoundTrip_BackgroundTile(t *testing.T) {
+	src := makeTestImage(64, 48)
+
+	prevBackgroundTile := activeBackgroundTile
+	activeBackgroundTile = 10
+	defer func() {
+		activeBackgroundTile = prevBackgroundTile
+	}()
+
+	comp, err := Encode(src, 70, false)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if len(comp) == 0 {
+		t.Fatalf("Encode returned empty payload")
+	}
+
+	dec, err := Decode(comp, false)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got, want := dec.Bounds(), src.Bounds(); got != want {
+		t.Fatalf("bounds mismatch: got %v want %v", got, want)
+	}
+
+	imgW, imgH, yPlane, _, cbPlane, _, crPlane, _, hasCb, hasCr, err := DecodeLayers(comp)
+	if err != nil {
+		t.Fatalf("DecodeLayers: %v", err)
+	}
+	if imgW != src.Bounds().Dx() || imgH != src.Bounds().Dy() {
+		t.Fatalf("layer bounds mismatch: got %dx%d want %dx%d", imgW, imgH, src.Bounds().Dx(), src.Bounds().Dy())
+	}
+	if len(yPlane) != imgW*imgH {
+		t.Fatalf("Y plane len = %d, want %d", len(yPlane), imgW*imgH)
+	}
+	if !hasCb || !hasCr {
+		t.Fatalf("expected chroma planes to be present")
+	}
+	if len(cbPlane) != imgW*imgH || len(crPlane) != imgW*imgH {
+		t.Fatalf("chroma plane lengths = %d/%d, want %d", len(cbPlane), len(crPlane), imgW*imgH)
+	}
+}
+
 func TestEncode_ImageTooSmall(t *testing.T) {
 	// Edge clipping now allows encoding even when the image is smaller than the nominal block size.
 	img := makeTestImage(1, 1)
