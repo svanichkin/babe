@@ -28,16 +28,8 @@ const (
 	codec2 = "BABE2\n"
 )
 
-// Default block sizes; these are overridden by compression presets via setBlocksForQuality.
 var (
-	// base size of the small block (in pixels)
-	smallBlock = 1
-	// size of the macroblock (in pixels)
-	macroBlock = 2
-
 	// blockLevels holds the active N-level block size hierarchy, from smallest to largest.
-	// When len(blockLevels) >= 2, the N-level recursive encoder/decoder is used.
-	// blockLevels[0] == smallBlock, blockLevels[len-1] == macroBlock always.
 	blockLevels []int
 
 	// codecStateMu serializes access to global codec configuration/state.
@@ -64,7 +56,7 @@ var lastPatternUsageByChannel map[string]map[[2]int][]patternUsageEntry
 
 const (
 	defaultPatternCount = 64
-	patternSetBasic    = "basic"
+	patternSetBasic     = "basic"
 )
 
 var activePatternCount = defaultPatternCount
@@ -74,11 +66,12 @@ var activeColorQuantShift int
 
 // Quality mapping:
 // - quality is in [0..100]
-// - smallBlock/macroBlock are chosen from a small set of presets
-//   to trade off quality vs. compression.
+// - block sizes stay fixed unless they are explicitly overridden.
 
-// setBlocksForQuality configures global smallBlock/macroBlock/blockLevels based on a quality in [0..100].
-// It uses a small set of discrete presets to keep the behavior stable and predictable.
+var defaultBlockLevels = [...]int{1, 2}
+
+// setBlocksForQuality configures the active block hierarchy for a quality in [0..100].
+// Quality affects only the spread heuristics; block sizes remain fixed unless forcedBlockSizes is set.
 func setBlocksForQuality(quality int) error {
 	// clamp quality to [0..100]
 	if quality < 0 {
@@ -91,32 +84,10 @@ func setBlocksForQuality(quality int) error {
 	// remember quality globally so heuristics (macro vs small) can use it directly
 	encQuality = quality
 
-	switch {
-	case quality >= 80:
-		// highest quality: smallest macro-blocks
-		smallBlock = 1
-		macroBlock = 2
-	case quality >= 60:
-		smallBlock = 1
-		macroBlock = 3
-	case quality >= 40:
-		smallBlock = 2
-		macroBlock = 4
-	case quality >= 20:
-		smallBlock = 3
-		macroBlock = 6
-	default:
-		// lowest quality / highest compression
-		smallBlock = 4
-		macroBlock = 8
-	}
-
 	if len(forcedBlockSizes) > 0 {
-		smallBlock = forcedBlockSizes[0]
-		macroBlock = forcedBlockSizes[len(forcedBlockSizes)-1]
 		blockLevels = append(blockLevels[:0], forcedBlockSizes...)
 	} else {
-		blockLevels = blockLevels[:0]
+		blockLevels = append(blockLevels[:0], defaultBlockLevels[:]...)
 	}
 
 	return nil
@@ -147,8 +118,7 @@ func setBlocksFromSpec(spec string) error {
 			}
 		}
 		forcedBlockSizes = append(forcedBlockSizes[:0], sizes...)
-		smallBlock = sizes[0]
-		macroBlock = sizes[len(sizes)-1]
+		blockLevels = append(blockLevels[:0], sizes...)
 		return nil
 	}
 
@@ -176,8 +146,7 @@ func setBlocksFromSpec(spec string) error {
 		}
 	}
 	forcedBlockSizes = append(forcedBlockSizes[:0], sizes...)
-	smallBlock = sizes[0]
-	macroBlock = sizes[len(sizes)-1]
+	blockLevels = append(blockLevels[:0], sizes...)
 	return nil
 }
 
@@ -188,13 +157,45 @@ func activeLevels() []int {
 		}
 		return blockLevels
 	}
-	if smallBlock <= 0 || macroBlock <= 0 {
-		return nil
+	return defaultBlockLevels[:]
+}
+
+func baseBlockSize() int {
+	levels := activeLevels()
+	if len(levels) == 0 {
+		return 0
 	}
-	if smallBlock == macroBlock {
-		return []int{smallBlock}
+	return levels[0]
+}
+
+func topBlockSize() int {
+	levels := activeLevels()
+	if len(levels) == 0 {
+		return 0
 	}
-	return []int{smallBlock, macroBlock}
+	return levels[len(levels)-1]
+}
+
+func ceilToStep(v, step int) int {
+	if step <= 0 || v <= 0 {
+		return 0
+	}
+	return ((v + step - 1) / step) * step
+}
+
+func visibleBlockDims(width, height, x0, y0, bw, bh int) (int, int) {
+	if x0 < 0 || y0 < 0 || bw <= 0 || bh <= 0 || width <= 0 || height <= 0 {
+		return 0, 0
+	}
+	visW := min(bw, width-x0)
+	visH := min(bh, height-y0)
+	if visW < 0 {
+		visW = 0
+	}
+	if visH < 0 {
+		visH = 0
+	}
+	return visW, visH
 }
 
 func invertPatternBits(bits patternMask, bw, bh int) patternMask {
@@ -826,10 +827,9 @@ func extractYCbCrFromGraySequential(src *image.Gray, yPlane, cbPlane, crPlane []
 // for the given channel plane. It uses a quality-dependent spread threshold: lower quality
 // allows larger spread (more macroBlocks), higher quality reduces spread (more small blocks).
 func allowedMacroSpreadForQuality(quality int) int32 {
-	// quality-dependent spread:
-	// in each quality band (0–19, 20–39, 40–59, 60–79, 80–100) that we use
-	// for smallBlock/macroBlock selection, the allowed spread changes linearly
-	// from 64 (bottom of the band) down to 8 (top of the band).
+	// quality-dependent spread changes linearly across the full [0..100] range:
+	// lower quality allows larger spread (more macro blocks), higher quality
+	// tightens the threshold and forces more subdivision.
 	q := quality
 	if q < 0 {
 		q = 0
@@ -838,43 +838,13 @@ func allowedMacroSpreadForQuality(quality int) int32 {
 		q = 100
 	}
 
-	// Use the same quality bands as setBlocksForQuality:
-	//   [0–19]  → 4/8
-	//   [20–39] → 3/6
-	//   [40–59] → 2/4
-	//   [60–79] → 1/3
-	//   [80–100]→ 1/2
-	var groupStart, groupEnd int
-	switch {
-	case q < 20:
-		groupStart, groupEnd = 0, 19
-	case q < 40:
-		groupStart, groupEnd = 20, 39
-	case q < 60:
-		groupStart, groupEnd = 40, 59
-	case q < 80:
-		groupStart, groupEnd = 60, 79
-	default:
-		groupStart, groupEnd = 80, 100
-	}
-
-	// Linear interpolation of the allowed spread from 64 down to 8 within the band.
 	const spreadMax int32 = 64
 	const spreadMin int32 = 8
-	span := groupEnd - groupStart
-	var spread int32
-	if span <= 0 {
-		spread = (spreadMax + spreadMin) / 2
-	} else {
-		offset := q - groupStart
-		spread = spreadMax - int32(offset)*(spreadMax-spreadMin)/int32(span)
-	}
-
-	return spread
+	return spreadMax - int32(q)*(spreadMax-spreadMin)/100
 }
 
 func canUseBigBlockChannel(plane []uint8, stride, height, x0, y0 int, spread int32) bool {
-	return canUseBlockSizeChannel(plane, stride, height, x0, y0, macroBlock, spread)
+	return canUseBlockSizeChannel(plane, stride, height, x0, y0, topBlockSize(), spread)
 }
 
 func canUseBlockSizeChannel(plane []uint8, stride, height, x0, y0, blockSize int, spread int32) bool {
@@ -884,11 +854,12 @@ func canUseBlockSizeChannel(plane []uint8, stride, height, x0, y0, blockSize int
 	if stride <= 0 || height <= 0 || x0 < 0 || y0 < 0 || blockSize <= 0 {
 		return false
 	}
-	if x0+blockSize > stride || y0+blockSize > height {
+	visW, visH := visibleBlockDims(stride, height, x0, y0, blockSize, blockSize)
+	if visW <= 0 || visH <= 0 {
 		return false
 	}
 
-	if blockSize == 2 {
+	if visW == 2 && visH == 2 {
 		idx0 := y0*stride + x0
 		idx1 := idx0 + stride
 
@@ -920,9 +891,9 @@ func canUseBlockSizeChannel(plane []uint8, stride, height, x0, y0, blockSize int
 	minV := plane[y0*stride+x0]
 	maxV := minV
 
-	for yy := 0; yy < blockSize; yy++ {
+	for yy := 0; yy < visH; yy++ {
 		row := (y0+yy)*stride + x0
-		for xx := 0; xx < blockSize; xx++ {
+		for xx := 0; xx < visW; xx++ {
 			v := plane[row+xx]
 			if v < minV {
 				minV = v
@@ -985,6 +956,15 @@ func clonePatternMask(src patternMask) patternMask {
 	return dst
 }
 
+func patternMaskEmpty(mask patternMask) bool {
+	for _, word := range mask {
+		if word != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func patternMaskKey(mask patternMask) string {
 	if len(mask) == 0 {
 		return ""
@@ -1039,6 +1019,9 @@ func appendPatternCandidate(dst *[]patternMask, seen map[string]struct{}, mask p
 	if len(mask) == 0 {
 		return
 	}
+	if patternMaskEmpty(mask) {
+		return
+	}
 	key := patternMaskKey(mask)
 	if _, ok := seen[key]; ok {
 		return
@@ -1080,34 +1063,92 @@ func base2x2Patterns() []patternMask {
 	return out
 }
 
-func appendBasicPatterns(out *[]patternMask, seen map[string]struct{}, bw, bh int) {
-	leftHalf := func(x, y int) bool { return x < bw/2 }
-	topHalf := func(x, y int) bool { return y < bh/2 }
-	topLeft := func(x, y int) bool { return x < bw/2 && y < bh/2 }
-	topRight := func(x, y int) bool { return x >= bw/2 && y < bh/2 }
-	bottomLeft := func(x, y int) bool { return x < bw/2 && y >= bh/2 }
-	bottomRight := func(x, y int) bool { return x >= bw/2 && y >= bh/2 }
+func basicPatternTemplates() [][]string {
+	return [][]string{
+		{"11111111", "11111111", "11111111", "11111111", "11111111", "11111111", "11111111", "11111111"},
+		{"11110000", "11110000", "11110000", "11110000", "11110000", "11110000", "11110000", "11110000"},
+		{"11111111", "11111111", "11111111", "11111111", "00000000", "00000000", "00000000", "00000000"},
+		{"11110000", "11110000", "11110000", "11110000", "00000000", "00000000", "00000000", "00000000"},
+		{"00000000", "00000000", "00000000", "00000000", "11110000", "11110000", "11110000", "11110000"},
+		{"00001111", "00001111", "00001111", "00001111", "00000000", "00000000", "00000000", "00000000"},
+		{"00000000", "00000000", "00000000", "00000000", "00001111", "00001111", "00001111", "00001111"},
+		{"11110000", "11110000", "11110000", "11110000", "00001111", "00001111", "00001111", "00001111"},
+		{"11100000", "11100000", "11100000", "11100000", "11100000", "11100000", "11100000", "11100000"},
+		{"11000000", "11000000", "11000000", "11000000", "11000000", "11000000", "11000000", "11000000"},
+		{"10000000", "10000000", "10000000", "10000000", "10000000", "10000000", "10000000", "10000000"},
+		{"11111111", "11111111", "11111111", "00000000", "00000000", "00000000", "00000000", "00000000"},
+		{"11111111", "11111111", "00000000", "00000000", "00000000", "00000000", "00000000", "00000000"},
+		{"11111111", "00000000", "00000000", "00000000", "00000000", "00000000", "00000000", "00000000"},
+		{"01000000", "01000000", "01000000", "01000000", "01000000", "01000000", "01000000", "01000000"},
+		{"00100000", "00100000", "00100000", "00100000", "00100000", "00100000", "00100000", "00100000"},
+		{"00010000", "00010000", "00010000", "00010000", "00010000", "00010000", "00010000", "00010000"},
+		{"00000000", "11111111", "00000000", "00000000", "00000000", "00000000", "00000000", "00000000"},
+		{"00000000", "00000000", "11111111", "00000000", "00000000", "00000000", "00000000", "00000000"},
+		{"00000000", "00000000", "00000000", "11111111", "00000000", "00000000", "00000000", "00000000"},
+		{"01100000", "01100000", "01100000", "01100000", "01100000", "01100000", "01100000", "01100000"},
+		{"00110000", "00110000", "00110000", "00110000", "00110000", "00110000", "00110000", "00110000"},
+		{"00011000", "00011000", "00011000", "00011000", "00011000", "00011000", "00011000", "00011000"},
+		{"00000000", "11111111", "11111111", "00000000", "00000000", "00000000", "00000000", "00000000"},
+		{"00000000", "00000000", "11111111", "11111111", "00000000", "00000000", "00000000", "00000000"},
+		{"00000000", "00000000", "00000000", "11111111", "11111111", "00000000", "00000000", "00000000"},
+		{"01110000", "01110000", "01110000", "01110000", "01110000", "01110000", "01110000", "01110000"},
+		{"00111000", "00111000", "00111000", "00111000", "00111000", "00111000", "00111000", "00111000"},
+		{"00000000", "11111111", "11111111", "11111111", "00000000", "00000000", "00000000", "00000000"},
+		{"00000000", "00000000", "11111111", "11111111", "11111111", "00000000", "00000000", "00000000"},
+		{"01111000", "01111000", "01111000", "01111000", "01111000", "01111000", "01111000", "01111000"},
+		{"00111100", "00111100", "00111100", "00111100", "00111100", "00111100", "00111100", "00111100"},
+		{"00000000", "11111111", "11111111", "11111111", "11111111", "00000000", "00000000", "00000000"},
+		{"00000000", "00000000", "11111111", "11111111", "11111111", "11111111", "00000000", "00000000"},
+		{"01111100", "01111100", "01111100", "01111100", "01111100", "01111100", "01111100", "01111100"},
+		{"00000000", "11111111", "11111111", "11111111", "11111111", "11111111", "00000000", "00000000"},
+		{"01111110", "01111110", "01111110", "01111110", "01111110", "01111110", "01111110", "01111110"},
+		{"00000000", "11111111", "11111111", "11111111", "11111111", "11111111", "11111111", "00000000"},
+		{"00000000", "01111110", "01111110", "01111110", "01111110", "01111110", "01111110", "00000000"},
+		{"11100000", "11100000", "11100000", "00000000", "00000000", "00000000", "00000000", "00000000"},
+		{"00000000", "00000000", "00000000", "00000000", "00000000", "11100000", "11100000", "11100000"},
+		{"00000111", "00000111", "00000111", "00000000", "00000000", "00000000", "00000000", "00000000"},
+		{"00000000", "00000000", "00000000", "00000000", "00000000", "00000111", "00000111", "00000111"},
+		{"11100000", "11100000", "11100000", "00000000", "00000000", "00000111", "00000111", "00000111"},
+		{"00000000", "00000000", "00111100", "00111100", "00111100", "00111100", "00000000", "00000000"},
+		{"11000000", "11000000", "00000000", "00000000", "00000000", "00000000", "00000000", "00000000"},
+		{"00000000", "00000000", "00000000", "00000000", "00000000", "00000000", "11000000", "11000000"},
+		{"00000011", "00000011", "00000000", "00000000", "00000000", "00000000", "00000000", "00000000"},
+		{"00000000", "00000000", "00000000", "00000000", "00000000", "00000000", "00000011", "00000011"},
+		{"11000000", "11000000", "00000000", "00000000", "00000000", "00000000", "00000011", "00000011"},
+		{"00000000", "00000000", "00000000", "00011000", "00011000", "00000000", "00000000", "00000000"},
+		{"10000000", "00000000", "00000000", "00000000", "00000000", "00000000", "00000000", "00000000"},
+		{"00000000", "00000000", "00000000", "00000000", "00000000", "00000000", "00000000", "10000000"},
+		{"00000001", "00000000", "00000000", "00000000", "00000000", "00000000", "00000000", "00000000"},
+		{"00000000", "00000000", "00000000", "00000000", "00000000", "00000000", "00000000", "00000001"},
+		{"10000000", "00000000", "00000000", "00000000", "00000000", "00000000", "00000000", "00000001"},
+	}
+}
 
-	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, func(x, y int) bool { return true }))
-	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, leftHalf))
-	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, topHalf))
-	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, topLeft))
-	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, topRight))
-	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, bottomLeft))
-	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, bottomRight))
-	appendPatternCandidate(out, seen, buildPatternMask(bw, bh, func(x, y int) bool { return topLeft(x, y) || bottomRight(x, y) }))
+func scalePatternTemplate(rows []string, bw, bh int) patternMask {
+	srcH := len(rows)
+	if srcH == 0 || bw <= 0 || bh <= 0 {
+		return nil
+	}
+	srcW := len(rows[0])
+	if srcW == 0 {
+		return nil
+	}
+	return buildPatternMask(bw, bh, func(x, y int) bool {
+		sx := x * srcW / bw
+		sy := y * srcH / bh
+		return rows[sy][sx] == '1'
+	})
+}
+
+func appendBasicPatterns(out *[]patternMask, seen map[string]struct{}, bw, bh int) {
+	for _, rows := range basicPatternTemplates() {
+		appendPatternCandidate(out, seen, scalePatternTemplate(rows, bw, bh))
+	}
 }
 
 func synthesizePatternCandidates(bw, bh int) []patternMask {
 	out := make([]patternMask, 0, 256)
 	seen := make(map[string]struct{}, 256)
-	if bw == 2 && bh == 2 {
-		for _, mask := range base2x2Patterns() {
-			appendPatternCandidate(&out, seen, mask)
-		}
-		return out
-	}
-
 	appendBasicPatterns(&out, seen, bw, bh)
 	return out
 }
@@ -1236,14 +1277,15 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh int) (uint8,
 		return v, v, nil, false, nil
 	}
 
-	if x0 < 0 || y0 < 0 || bw <= 0 || bh <= 0 || stride <= 0 || height <= 0 || x0+bw > stride {
+	if x0 < 0 || y0 < 0 || bw <= 0 || bh <= 0 || stride <= 0 || height <= 0 {
 		return 0, 0, nil, false, fmt.Errorf("encodeBlockPlane: index out of range")
 	}
-	if y0+bh > height {
+	visW, visH := visibleBlockDims(stride, height, x0, y0, bw, bh)
+	if visW <= 0 || visH <= 0 {
 		return 0, 0, nil, false, fmt.Errorf("encodeBlockPlane: index out of range")
 	}
 
-	if bw == 2 && bh == 2 {
+	if visW == 2 && visH == 2 {
 		idx0 := y0*stride + x0
 		idx1 := idx0 + stride
 
@@ -1333,9 +1375,9 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh int) (uint8,
 
 	var sum uint64
 	i := 0
-	for yy := 0; yy < bh; yy++ {
+	for yy := 0; yy < visH; yy++ {
 		row := (y0+yy)*stride + x0
-		for xx := 0; xx < bw; xx++ {
+		for xx := 0; xx < visW; xx++ {
 			v := plane[row+xx]
 			vals[i] = v
 			sum += uint64(v)
@@ -1622,10 +1664,8 @@ func (e *Encoder) ensurePlanes(w, h int) {
 
 func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h4, fullW, fullH int, useMacro bool, scratch *encoderChannelScratch, sharedPatternIndexes map[patternBlockKey]uint64) (uint32, []byte, []byte, []byte, []uint8, []uint8, map[[2]int]int, error) {
 	levels := activeLevels()
-	topBlock := smallBlock
-	if len(levels) > 0 {
-		topBlock = levels[len(levels)-1]
-	}
+	smallBlock := levels[0]
+	topBlock := levels[len(levels)-1]
 	topLevelCount := countTopLevelBlocks(fullW, fullH, topBlock)
 
 	// Worst-case leaf count is still the full smallest-block grid over the encoded area.
@@ -1680,7 +1720,10 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 	}
 
 	var blockCount uint32
-	height := h4
+	height := 0
+	if stride > 0 {
+		height = len(plane) / stride
+	}
 	spread := allowedMacroSpreadForQuality(encQuality)
 	patternSizes := make(map[[2]int]int)
 	recordPatternSize := func(bw, bh int) {
@@ -1702,7 +1745,7 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 		patternTokens = append(patternTokens, tok)
 	}
 
-	if len(levels) == 2 && useMacro && smallBlock == 1 && macroBlock == 2 {
+	if len(levels) == 2 && useMacro && smallBlock == 1 && topBlock == 2 && fullW == w4 && fullH == h4 {
 		// Specialized hot path for the most common setting (quality >= 80):
 		// - macro blocks are 2x2
 		// - small blocks are 1x1 (always solid, no pattern bits)
@@ -1891,7 +1934,12 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 		ratio := size / childSize
 		for by := 0; by < ratio; by++ {
 			for bx := 0; bx < ratio; bx++ {
-				if err := encodeNode(x+bx*childSize, y+by*childSize, levelIdx-1); err != nil {
+				cx := x + bx*childSize
+				cy := y + by*childSize
+				if vw, vh := visibleBlockDims(stride, height, cx, cy, childSize, childSize); vw <= 0 || vh <= 0 {
+					continue
+				}
+				if err := encodeNode(cx, cy, levelIdx-1); err != nil {
 					return err
 				}
 			}
@@ -1987,21 +2035,22 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 	e.raw.Reset()
 	e.bw.Reset(&e.raw)
 
-	w4 := (w / smallBlock) * smallBlock
-	h4 := (h / smallBlock) * smallBlock
-	if w4 == 0 || h4 == 0 {
+	levels := activeLevels()
+	smallBlock := levels[0]
+	w4 := ceilToStep(w, smallBlock)
+	h4 := ceilToStep(h, smallBlock)
+	if w == 0 || h == 0 {
 		return nil, fmt.Errorf("image too small for %dx%d blocks: %dx%d", smallBlock, smallBlock, w, h)
 	}
-	levels := activeLevels()
 	topBlock := levels[len(levels)-1]
-	fullW := (w4 / topBlock) * topBlock
-	fullH := (h4 / topBlock) * topBlock
+	fullW := ceilToStep(w, topBlock)
+	fullH := ceilToStep(h, topBlock)
 
-	if macroBlock < smallBlock || macroBlock%smallBlock != 0 {
-		return nil, fmt.Errorf("macroBlock (%d) must be >= smallBlock (%d) and a multiple of it",
-			macroBlock, smallBlock)
+	if topBlock < smallBlock || topBlock%smallBlock != 0 {
+		return nil, fmt.Errorf("top block (%d) must be >= base block (%d) and a multiple of it",
+			topBlock, smallBlock)
 	}
-	useMacro := macroBlock > smallBlock
+	useMacro := topBlock > smallBlock
 
 	// --- Write header ---
 	if _, err := e.bw.WriteString(codec2); err != nil {
@@ -2010,7 +2059,7 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 	if err := writeU16BE(e.bw, uint16(smallBlock)); err != nil {
 		return nil, err
 	}
-	if err := writeU16BE(e.bw, uint16(macroBlock)); err != nil {
+	if err := writeU16BE(e.bw, uint16(topBlock)); err != nil {
 		return nil, err
 	}
 	if err := writeU16BE(e.bw, uint16(activePatternCount)); err != nil {
@@ -2220,8 +2269,13 @@ func drawBlockPlane(plane []uint8, stride int, x0, y0, bw, bh int, br *bitReader
 	if err != nil {
 		return err
 	}
-	for yy := 0; yy < bh; yy++ {
-		for xx := 0; xx < bw; xx++ {
+	height := 0
+	if stride > 0 {
+		height = len(plane) / stride
+	}
+	visW, visH := visibleBlockDims(stride, height, x0, y0, bw, bh)
+	for yy := 0; yy < visH; yy++ {
+		for xx := 0; xx < visW; xx++ {
 			val := bg
 			if testPatternBit(pattern, bw, bh, xx, yy) {
 				val = fg
@@ -2238,8 +2292,13 @@ func drawBlockPlane(plane []uint8, stride int, x0, y0, bw, bh int, br *bitReader
 
 // fillBlockPlane fills a block with a single value (no pattern bits).
 func fillBlockPlane(plane []uint8, stride int, x0, y0, bw, bh int, val uint8) error {
-	for yy := 0; yy < bh; yy++ {
-		for xx := 0; xx < bw; xx++ {
+	height := 0
+	if stride > 0 {
+		height = len(plane) / stride
+	}
+	visW, visH := visibleBlockDims(stride, height, x0, y0, bw, bh)
+	for yy := 0; yy < visH; yy++ {
+		for xx := 0; xx < visW; xx++ {
 			idx := (y0+yy)*stride + (x0 + xx)
 			if idx >= len(plane) {
 				return fmt.Errorf("fillBlockPlane: index out of range")
@@ -2255,6 +2314,18 @@ func drawBlockPix(pix []byte, strideBytes int, x0, y0, bw, bh int, br *bitReader
 	if err != nil {
 		return err
 	}
+	imgW := 0
+	if strideBytes > 0 {
+		imgW = strideBytes / 4
+	}
+	imgH := 0
+	if strideBytes > 0 {
+		imgH = len(pix) / strideBytes
+	}
+	visW, visH := visibleBlockDims(imgW, imgH, x0, y0, bw, bh)
+	if visW <= 0 || visH <= 0 {
+		return nil
+	}
 	if bw == 1 && bh == 1 {
 		o := y0*strideBytes + x0*4 + channelOffset
 		if o < 0 || o >= len(pix) {
@@ -2268,7 +2339,7 @@ func drawBlockPix(pix []byte, strideBytes int, x0, y0, bw, bh int, br *bitReader
 		return nil
 	}
 
-	if bw == 2 && bh == 2 {
+	if visW == 2 && visH == 2 {
 		var bits uint8
 		if len(pattern) > 0 {
 			bits = uint8(pattern[0])
@@ -2308,9 +2379,9 @@ func drawBlockPix(pix []byte, strideBytes int, x0, y0, bw, bh int, br *bitReader
 		return nil
 	}
 
-	for yy := 0; yy < bh; yy++ {
+	for yy := 0; yy < visH; yy++ {
 		row := (y0+yy)*strideBytes + x0*4 + channelOffset
-		for xx := 0; xx < bw; xx++ {
+		for xx := 0; xx < visW; xx++ {
 			val := bg
 			if testPatternBit(pattern, bw, bh, xx, yy) {
 				val = fg
@@ -2326,7 +2397,19 @@ func drawBlockPix(pix []byte, strideBytes int, x0, y0, bw, bh int, br *bitReader
 }
 
 func fillBlockPix(pix []byte, strideBytes int, x0, y0, bw, bh int, val uint8, channelOffset int) error {
-	if bw == 1 && bh == 1 {
+	imgW := 0
+	if strideBytes > 0 {
+		imgW = strideBytes / 4
+	}
+	imgH := 0
+	if strideBytes > 0 {
+		imgH = len(pix) / strideBytes
+	}
+	visW, visH := visibleBlockDims(imgW, imgH, x0, y0, bw, bh)
+	if visW <= 0 || visH <= 0 {
+		return nil
+	}
+	if visW == 1 && visH == 1 {
 		o := y0*strideBytes + x0*4 + channelOffset
 		if o < 0 || o >= len(pix) {
 			return fmt.Errorf("fillBlockPix: index out of range")
@@ -2335,7 +2418,7 @@ func fillBlockPix(pix []byte, strideBytes int, x0, y0, bw, bh int, val uint8, ch
 		return nil
 	}
 
-	if bw == 2 && bh == 2 {
+	if visW == 2 && visH == 2 {
 		row0 := y0*strideBytes + x0*4 + channelOffset
 		row1 := row0 + strideBytes
 		o00 := row0
@@ -2353,9 +2436,9 @@ func fillBlockPix(pix []byte, strideBytes int, x0, y0, bw, bh int, val uint8, ch
 		return nil
 	}
 
-	for yy := 0; yy < bh; yy++ {
+	for yy := 0; yy < visH; yy++ {
 		row := (y0+yy)*strideBytes + x0*4 + channelOffset
-		for xx := 0; xx < bw; xx++ {
+		for xx := 0; xx < visW; xx++ {
 			o := row + xx*4
 			if o < 0 || o >= len(pix) {
 				return fmt.Errorf("fillBlockPix: index out of range")
@@ -2545,10 +2628,13 @@ func decodeChannel(data []byte, imgW, imgH int) ([]uint8, error) {
 	// reconstruct the block geometry and fill the plane
 	plane := make([]uint8, imgW*imgH)
 
-	w4 := (imgW / smallBlock) * smallBlock
-	h4 := (imgH / smallBlock) * smallBlock
-	fullW := (w4 / macroBlock) * macroBlock
-	fullH := (h4 / macroBlock) * macroBlock
+	levels := activeLevels()
+	smallBlock := levels[0]
+	macroBlock := levels[len(levels)-1]
+	w4 := ceilToStep(imgW, smallBlock)
+	h4 := ceilToStep(imgH, smallBlock)
+	fullW := ceilToStep(imgW, macroBlock)
+	fullH := ceilToStep(imgH, macroBlock)
 	macroGroupCount := (fullW / macroBlock) * (fullH / macroBlock)
 	useMacro := macroBlock > smallBlock
 
@@ -2851,11 +2937,12 @@ func decodeChannelWithRects(data []byte, imgW, imgH int) ([]uint8, []image.Recta
 	rects := make([]image.Rectangle, 0, int(blockCount))
 
 	levels := activeLevels()
+	smallBlock := levels[0]
 	topBlock := levels[len(levels)-1]
-	w4 := (imgW / smallBlock) * smallBlock
-	h4 := (imgH / smallBlock) * smallBlock
-	fullW := (w4 / topBlock) * topBlock
-	fullH := (h4 / topBlock) * topBlock
+	w4 := ceilToStep(imgW, smallBlock)
+	h4 := ceilToStep(imgH, smallBlock)
+	fullW := ceilToStep(imgW, topBlock)
+	fullH := ceilToStep(imgH, topBlock)
 
 	blockIndex := 0
 
@@ -2872,7 +2959,12 @@ func decodeChannelWithRects(data []byte, imgW, imgH int) ([]uint8, []image.Recta
 				ratio := size / childSize
 				for by := 0; by < ratio; by++ {
 					for bx := 0; bx < ratio; bx++ {
-						if err := decodeNode(x+bx*childSize, y+by*childSize, levelIdx-1); err != nil {
+						cx := x + bx*childSize
+						cy := y + by*childSize
+						if vw, vh := visibleBlockDims(imgW, imgH, cx, cy, childSize, childSize); vw <= 0 || vh <= 0 {
+							continue
+						}
+						if err := decodeNode(cx, cy, levelIdx-1); err != nil {
 							return err
 						}
 					}
@@ -3118,12 +3210,13 @@ func decodeChannelToPix(data []byte, imgW, imgH int, pix []byte, strideBytes int
 	}
 
 	levels := activeLevels()
+	smallBlock := levels[0]
 	topBlock := levels[len(levels)-1]
-	w4 := (imgW / smallBlock) * smallBlock
-	h4 := (imgH / smallBlock) * smallBlock
-	fullW := (w4 / topBlock) * topBlock
-	fullH := (h4 / topBlock) * topBlock
-	useMacro := len(levels) == 2 && macroBlock > smallBlock
+	w4 := ceilToStep(imgW, smallBlock)
+	h4 := ceilToStep(imgH, smallBlock)
+	fullW := ceilToStep(imgW, topBlock)
+	fullH := ceilToStep(imgH, topBlock)
+	useMacro := len(levels) == 2 && topBlock > smallBlock
 
 	blockIndex := 0
 
@@ -3131,7 +3224,7 @@ func decodeChannelToPix(data []byte, imgW, imgH int, pix []byte, strideBytes int
 	// - macro blocks are 2x2
 	// - small blocks are 1x1 (always solid)
 	// BG is stored only for pattern blocks (type bit = 1), otherwise BG == FG.
-	if useMacro && smallBlock == 1 && macroBlock == 2 {
+	if useMacro && smallBlock == 1 && topBlock == 2 && fullW == w4 && fullH == h4 {
 		macroGroupsX := fullW / 2
 		macroGroupsY := fullH / 2
 		macroGroupCount := macroGroupsX * macroGroupsY
@@ -3286,7 +3379,12 @@ func decodeChannelToPix(data []byte, imgW, imgH int, pix []byte, strideBytes int
 				ratio := size / childSize
 				for by := 0; by < ratio; by++ {
 					for bx := 0; bx < ratio; bx++ {
-						if err := decodeNode(x+bx*childSize, y+by*childSize, levelIdx-1); err != nil {
+						cx := x + bx*childSize
+						cy := y + by*childSize
+						if vw, vh := visibleBlockDims(imgW, imgH, cx, cy, childSize, childSize); vw <= 0 || vh <= 0 {
+							continue
+						}
+						if err := decodeNode(cx, cy, levelIdx-1); err != nil {
 							return err
 						}
 					}
@@ -3526,10 +3624,13 @@ func (d *Decoder) decodeChannelInto(data []byte, imgW, imgH int, scratch *decode
 	}
 	plane := scratch.plane
 
-	w4 := (imgW / smallBlock) * smallBlock
-	h4 := (imgH / smallBlock) * smallBlock
-	fullW := (w4 / macroBlock) * macroBlock
-	fullH := (h4 / macroBlock) * macroBlock
+	levels := activeLevels()
+	smallBlock := levels[0]
+	macroBlock := levels[len(levels)-1]
+	w4 := ceilToStep(imgW, smallBlock)
+	h4 := ceilToStep(imgH, smallBlock)
+	fullW := ceilToStep(imgW, macroBlock)
+	fullH := ceilToStep(imgH, macroBlock)
 	macroGroupCount := (fullW / macroBlock) * (fullH / macroBlock)
 	useMacro := macroBlock > smallBlock
 
@@ -3836,10 +3937,8 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	if bwSize == 0 || bhSize == 0 {
 		return nil, fmt.Errorf("invalid block sizes in header: %dx%d", bwSize, bhSize)
 	}
-	smallBlock = int(bwSize)
-	macroBlock = int(bhSize)
 	if !useExtendedHeader {
-		blockLevels = append(blockLevels[:0], smallBlock, macroBlock)
+		blockLevels = append(blockLevels[:0], int(bwSize), int(bhSize))
 	}
 	if len(blockLevels) == 2 && blockLevels[0] == blockLevels[1] {
 		blockLevels = blockLevels[:1]
@@ -3912,8 +4011,9 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 		}
 	}
 
-	w4 := (imgW / smallBlock) * smallBlock
-	h4 := (imgH / smallBlock) * smallBlock
+	smallBlock := baseBlockSize()
+	w4 := ceilToStep(imgW, smallBlock)
+	h4 := ceilToStep(imgH, smallBlock)
 	if w4 != imgW || h4 != imgH {
 		for o := 0; o+3 < len(pix); o += 4 {
 			pix[o+0] = 0
@@ -4017,8 +4117,8 @@ func DecodeLayers(compData []byte) (int, int, []uint8, []image.Rectangle, []uint
 		return v
 	}
 
-	smallBlock = int(readU16())
-	macroBlock = int(readU16())
+	baseLevel := int(readU16())
+	topLevel := int(readU16())
 	activePatternCount = int(readU16())
 	blockLevels = blockLevels[:0]
 	if useExtendedHeader {
@@ -4027,7 +4127,7 @@ func DecodeLayers(compData []byte) (int, int, []uint8, []image.Rectangle, []uint
 			blockLevels = append(blockLevels, int(readU16()))
 		}
 	} else {
-		blockLevels = append(blockLevels, smallBlock, macroBlock)
+		blockLevels = append(blockLevels, baseLevel, topLevel)
 	}
 	if len(blockLevels) == 2 && blockLevels[0] == blockLevels[1] {
 		blockLevels = blockLevels[:1]
@@ -4237,6 +4337,7 @@ func Decode(compData []byte, postfilter bool) (image.Image, error) {
 func smoothJunctions(img *image.RGBA) *image.RGBA {
 	b := img.Bounds()
 	w, h := b.Dx(), b.Dy()
+	smallBlock := baseBlockSize()
 
 	// need at least 2x2 blocks to have internal junctions
 	if w < 2*smallBlock || h < 2*smallBlock {
@@ -4457,6 +4558,7 @@ func smoothJunctions(img *image.RGBA) *image.RGBA {
 func smoothFlatAreas(src *image.RGBA) *image.RGBA {
 	b := src.Bounds()
 	w, h := b.Dx(), b.Dy()
+	smallBlock := baseBlockSize()
 
 	// if the image is too small for at least two blocks in each direction, just return it as-is
 	if w < 2*smallBlock || h < 2*smallBlock {
@@ -4615,6 +4717,7 @@ func smoothFlatAreas(src *image.RGBA) *image.RGBA {
 // smoothBlocks runs both junction smoothing and light deblocking in a fixed order.
 // This keeps the post-process logic in one place for Decode().
 func smoothBlocks(src *image.RGBA) *image.RGBA {
+	smallBlock := baseBlockSize()
 	// If we are operating at the finest granularity (1x1 blocks),
 	// there are no visible block boundaries to smooth.
 	if smallBlock <= 1 {

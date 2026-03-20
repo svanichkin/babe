@@ -35,6 +35,44 @@ func makeTestImage(w, h int) *image.RGBA {
 	return img
 }
 
+func TestSetBlocksForQuality_KeepsDefaultBlocks(t *testing.T) {
+	prevLevels := append([]int(nil), blockLevels...)
+	prevQuality := encQuality
+	defer func() {
+		encQuality = prevQuality
+		blockLevels = prevLevels
+	}()
+
+	for _, quality := range []int{0, 15, 30, 45, 60, 75, 90, 100} {
+		if err := setBlocksForQuality(quality); err != nil {
+			t.Fatalf("setBlocksForQuality(%d): %v", quality, err)
+		}
+		levels := activeLevels()
+		if len(levels) != 2 || levels[0] != 1 || levels[1] != 2 {
+			t.Fatalf("quality %d: got levels %v want [1 2]", quality, levels)
+		}
+	}
+}
+
+func TestAllowedMacroSpreadForQuality_Monotonic(t *testing.T) {
+	prev := allowedMacroSpreadForQuality(0)
+	if prev != 64 {
+		t.Fatalf("quality 0 spread = %d, want 64", prev)
+	}
+
+	for q := 1; q <= 100; q++ {
+		cur := allowedMacroSpreadForQuality(q)
+		if cur > prev {
+			t.Fatalf("spread increased at quality %d: prev=%d cur=%d", q, prev, cur)
+		}
+		prev = cur
+	}
+
+	if got := allowedMacroSpreadForQuality(100); got != 8 {
+		t.Fatalf("quality 100 spread = %d, want 8", got)
+	}
+}
+
 func TestEncodeDecode_RoundTrip(t *testing.T) {
 	src := makeTestImage(64, 48)
 
@@ -73,10 +111,10 @@ func TestEncodeDecode_RoundTrip(t *testing.T) {
 }
 
 func TestEncode_ImageTooSmall(t *testing.T) {
-	// At quality=0, smallBlock becomes 4, so a 1x1 image cannot be encoded.
+	// Edge clipping now allows encoding even when the image is smaller than the nominal block size.
 	img := makeTestImage(1, 1)
-	if _, err := Encode(img, 0, false); err == nil {
-		t.Fatalf("expected error for too-small image, got nil")
+	if _, err := Encode(img, 0, false); err != nil {
+		t.Fatalf("unexpected error for clipped edge block: %v", err)
 	}
 }
 
@@ -131,20 +169,17 @@ func TestEncodeDecode_RoundTrip_SingleBlockLevel(t *testing.T) {
 }
 
 func TestPatternSetBasic_Order(t *testing.T) {
-	book := fixedPatternCodebook(8, 8, 8)
-	if len(book) != 8 {
-		t.Fatalf("unexpected codebook size: got %d want 8", len(book))
+	rows := basicPatternTemplates()
+	book := fixedPatternCodebook(8, 8, len(rows))
+	if len(book) != len(rows) {
+		t.Fatalf("unexpected codebook size: got %d want %d", len(book), len(rows))
 	}
 
-	expect := []patternMask{
-		buildPatternMask(8, 8, func(x, y int) bool { return true }),
-		buildPatternMask(8, 8, func(x, y int) bool { return x < 4 }),
-		buildPatternMask(8, 8, func(x, y int) bool { return y < 4 }),
-		buildPatternMask(8, 8, func(x, y int) bool { return x < 4 && y < 4 }),
-		buildPatternMask(8, 8, func(x, y int) bool { return x >= 4 && y < 4 }),
-		buildPatternMask(8, 8, func(x, y int) bool { return x < 4 && y >= 4 }),
-		buildPatternMask(8, 8, func(x, y int) bool { return x >= 4 && y >= 4 }),
-		buildPatternMask(8, 8, func(x, y int) bool { return (x < 4 && y < 4) || (x >= 4 && y >= 4) }),
+	expect := make([]patternMask, 0, len(rows))
+	for _, patternRows := range rows {
+		expect = append(expect, buildPatternMask(8, 8, func(x, y int) bool {
+			return patternRows[y][x] == '1'
+		}))
 	}
 	for i := range expect {
 		if patternMaskKey(book[i]) != patternMaskKey(expect[i]) {
