@@ -172,12 +172,12 @@ func writePatternSheets(basePath string) error {
 				img.Set(ox+cellW-1, y, grid)
 			}
 
-				for py := 0; py < bh; py++ {
-					for px := 0; px < bw; px++ {
-						c := color.Color(color.RGBA{250, 250, 250, 255})
-						if testPatternBit(bits, bw, bh, px, py) {
-							c = fg
-						}
+			for py := 0; py < bh; py++ {
+				for px := 0; px < bw; px++ {
+					c := color.Color(color.RGBA{250, 250, 250, 255})
+					if testPatternBit(bits, bw, bh, px, py) {
+						c = fg
+					}
 					for sy := 0; sy < cellScale; sy++ {
 						for sx := 0; sx < cellScale; sx++ {
 							img.Set(ox+padding+px*cellScale+sx, oy+padding+py*cellScale+sy, c)
@@ -207,7 +207,7 @@ func writePatternSheets(basePath string) error {
 
 func main() {
 	if len(os.Args) < 2 || len(os.Args) > 14 {
-		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png] [-patterns=N] [-blocks=A,B|A-B] [-color-quant=N] [-pattern-set=basic] [-pattern-index=per-channel|shared] [-log]\n  babe <input.babe> [-postfilter] [-layers]\n  (bw flag, decoded.png, -patterns=N, -blocks=A,B|A-B, -color-quant=N, -pattern-set=basic, -pattern-index=... and -log can appear anywhere after quality)\n")
+		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png] [-patterns=N] [-blocks=A,B|A-B] [-spreads=S1,S2,...] [-color-quant=N] [-pattern-set=basic] [-pattern-index=per-channel|shared] [-log]\n  babe <input.babe> [-postfilter] [-layers]\n  (bw flag, decoded.png, -patterns=N, -blocks=A,B|A-B, -spreads=S1,S2,..., -color-quant=N, -pattern-set=basic, -pattern-index=... and -log can appear anywhere after quality)\n")
 		os.Exit(1)
 	}
 
@@ -257,6 +257,7 @@ func main() {
 	layersOut := false
 	patternCount := defaultPatternCount
 	blockSpec := ""
+	spreadSpec := ""
 	colorQuantShift := 0
 	patternIndexMode := "per-channel"
 	logPatterns := false
@@ -284,6 +285,10 @@ func main() {
 		}
 		if strings.HasPrefix(a, "-blocks=") {
 			blockSpec = strings.TrimPrefix(a, "-blocks=")
+			continue
+		}
+		if strings.HasPrefix(a, "-spreads=") {
+			spreadSpec = strings.TrimPrefix(a, "-spreads=")
 			continue
 		}
 		if strings.HasPrefix(a, "-color-quant=") {
@@ -323,10 +328,17 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		defer func() {
-			forcedBlockSizes = nil
-		}()
 	}
+	if spreadSpec != "" {
+		if err := setSpreadFactorsFromSpec(spreadSpec); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+	defer func() {
+		forcedBlockSizes = nil
+		forcedSpreadFactors = nil
+	}()
 	if err := encodeToBabe(inputPath, outPath, quality, bwmode, patternCount, colorQuantShift, patternIndexMode, logPatterns); err != nil {
 		fmt.Fprintln(os.Stderr, "encode error:", err)
 		os.Exit(1)

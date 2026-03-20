@@ -38,9 +38,11 @@ func makeTestImage(w, h int) *image.RGBA {
 func TestSetBlocksForQuality_KeepsDefaultBlocks(t *testing.T) {
 	prevLevels := append([]int(nil), blockLevels...)
 	prevQuality := encQuality
+	prevSpreads := append([]float64(nil), forcedSpreadFactors...)
 	defer func() {
 		encQuality = prevQuality
 		blockLevels = prevLevels
+		forcedSpreadFactors = prevSpreads
 	}()
 
 	for _, quality := range []int{0, 15, 30, 45, 60, 75, 90, 100} {
@@ -51,6 +53,44 @@ func TestSetBlocksForQuality_KeepsDefaultBlocks(t *testing.T) {
 		if len(levels) != 2 || levels[0] != 1 || levels[1] != 2 {
 			t.Fatalf("quality %d: got levels %v want [1 2]", quality, levels)
 		}
+	}
+}
+
+func TestSetSpreadFactorsFromSpec_MatchesLevels(t *testing.T) {
+	prevLevels := append([]int(nil), blockLevels...)
+	prevSpreads := append([]float64(nil), forcedSpreadFactors...)
+	defer func() {
+		blockLevels = prevLevels
+		forcedSpreadFactors = prevSpreads
+	}()
+
+	blockLevels = append(blockLevels[:0], 1, 2, 4, 8)
+	if err := setSpreadFactorsFromSpec("1.2,0.8,0.2,0.1"); err != nil {
+		t.Fatalf("setSpreadFactorsFromSpec: %v", err)
+	}
+
+	if got, want := len(forcedSpreadFactors), 4; got != want {
+		t.Fatalf("spread factor count = %d, want %d", got, want)
+	}
+	if got := spreadForBlockSize(100, 8); got != 1 {
+		t.Fatalf("spreadForBlockSize(100, 8) = %d, want 1", got)
+	}
+	if got := spreadForBlockSize(100, 4); got != 2 {
+		t.Fatalf("spreadForBlockSize(100, 4) = %d, want 2", got)
+	}
+}
+
+func TestSetSpreadFactorsFromSpec_RejectsWrongCount(t *testing.T) {
+	prevLevels := append([]int(nil), blockLevels...)
+	prevSpreads := append([]float64(nil), forcedSpreadFactors...)
+	defer func() {
+		blockLevels = prevLevels
+		forcedSpreadFactors = prevSpreads
+	}()
+
+	blockLevels = append(blockLevels[:0], 1, 2, 4, 8)
+	if err := setSpreadFactorsFromSpec("1.0,0.5"); err == nil {
+		t.Fatalf("expected mismatch error for spreads count")
 	}
 }
 

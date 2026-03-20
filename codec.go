@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"image"
 	"io"
+	"math"
 	"math/bits"
 	"os"
 	"runtime"
@@ -62,6 +63,7 @@ const (
 var activePatternCount = defaultPatternCount
 var activeSharedPatternIndexes bool
 var forcedBlockSizes []int
+var forcedSpreadFactors []float64
 var activeColorQuantShift int
 
 // Quality mapping:
@@ -150,6 +152,25 @@ func setBlocksFromSpec(spec string) error {
 	return nil
 }
 
+func setSpreadFactorsFromSpec(spec string) error {
+	parts := strings.Split(spec, ",")
+	levels := activeLevels()
+	if len(parts) != len(levels) {
+		return fmt.Errorf("spreads count must match block levels count: got %d values for levels %v", len(parts), levels)
+	}
+
+	factors := make([]float64, 0, len(parts))
+	for _, part := range parts {
+		v, err := strconv.ParseFloat(strings.TrimSpace(part), 64)
+		if err != nil || v < 0 {
+			return fmt.Errorf("spreads must contain non-negative numbers like 1.2,0.8,0.2,0.1")
+		}
+		factors = append(factors, v)
+	}
+	forcedSpreadFactors = append(forcedSpreadFactors[:0], factors...)
+	return nil
+}
+
 func activeLevels() []int {
 	if len(blockLevels) > 0 {
 		if len(blockLevels) == 2 && blockLevels[0] == blockLevels[1] {
@@ -174,6 +195,30 @@ func topBlockSize() int {
 		return 0
 	}
 	return levels[len(levels)-1]
+}
+
+func spreadForBlockSize(quality, blockSize int) int32 {
+	base := float64(allowedMacroSpreadForQuality(quality))
+	if base <= 0 {
+		return 0
+	}
+
+	scale := 1.0
+	levels := activeLevels()
+	for i, level := range levels {
+		if level == blockSize {
+			if i < len(forcedSpreadFactors) {
+				scale = forcedSpreadFactors[i]
+			}
+			break
+		}
+	}
+
+	spread := base * scale
+	if spread <= 0 {
+		return 0
+	}
+	return int32(math.Ceil(spread))
 }
 
 func ceilToStep(v, step int) int {
@@ -1724,7 +1769,10 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 	if stride > 0 {
 		height = len(plane) / stride
 	}
-	spread := allowedMacroSpreadForQuality(encQuality)
+	levelSpreads := make([]int32, len(levels))
+	for i, size := range levels {
+		levelSpreads[i] = spreadForBlockSize(encQuality, size)
+	}
 	patternSizes := make(map[[2]int]int)
 	recordPatternSize := func(bw, bh int) {
 		patternSizes[[2]int{bw, bh}]++
@@ -1781,7 +1829,7 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 					maxV = v3
 				}
 
-				useBig := int32(maxV)-int32(minV) < spread
+				useBig := int32(maxV)-int32(minV) < levelSpreads[len(levelSpreads)-1]
 				sizeW.writeBit(useBig)
 
 				if useBig {
@@ -1912,7 +1960,7 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 			return nil
 		}
 
-		useHere := canUseBlockSizeChannel(plane, stride, height, x, y, size, spread)
+		useHere := canUseBlockSizeChannel(plane, stride, height, x, y, size, levelSpreads[levelIdx])
 		sizeW.writeBit(useHere)
 		if useHere {
 			fg, bg, bits, isPattern, err := encodeBlockPlane(plane, stride, height, x, y, size, size)
