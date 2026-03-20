@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/csv"
 	"fmt"
 	"image"
 	"image/color"
@@ -9,6 +10,7 @@ import (
 	_ "image/jpeg"
 	"image/png"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -123,6 +125,371 @@ func writePatternUsageSheets(basePath string) error {
 	return nil
 }
 
+type sweepResult struct {
+	Quality     int
+	Blocks      string
+	Spreads     string
+	SizeBytes   int
+	MAE         float64
+	RMSE        float64
+	MaxAbsDiff  uint8
+	Compression float64
+	Pareto      bool
+}
+
+func parseIntSweepSpec(spec string) ([]int, error) {
+	parts := strings.Split(spec, "..")
+	if len(parts) < 2 || len(parts) > 3 {
+		return nil, fmt.Errorf("range must look like 0..100 or 0..100..1")
+	}
+	start, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil {
+		return nil, err
+	}
+	end, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil {
+		return nil, err
+	}
+	step := 1
+	if len(parts) == 3 {
+		step, err = strconv.Atoi(strings.TrimSpace(parts[2]))
+		if err != nil {
+			return nil, err
+		}
+	}
+	if step <= 0 {
+		return nil, fmt.Errorf("step must be positive")
+	}
+	if end < start {
+		return nil, fmt.Errorf("range end must be >= start")
+	}
+	values := make([]int, 0, (end-start)/step+1)
+	for v := start; v <= end; v += step {
+		values = append(values, v)
+	}
+	return values, nil
+}
+
+func parseFloatSweepSpec(spec string) ([]float64, error) {
+	parts := strings.Split(spec, "..")
+	if len(parts) < 2 || len(parts) > 3 {
+		return nil, fmt.Errorf("range must look like 0.1..1 or 0.1..1..0.1")
+	}
+	start, err := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
+	if err != nil {
+		return nil, err
+	}
+	end, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+	if err != nil {
+		return nil, err
+	}
+	step := 1.0
+	if len(parts) == 3 {
+		step, err = strconv.ParseFloat(strings.TrimSpace(parts[2]), 64)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if step <= 0 {
+		return nil, fmt.Errorf("step must be positive")
+	}
+	if end < start {
+		return nil, fmt.Errorf("range end must be >= start")
+	}
+	values := make([]float64, 0, int(math.Floor((end-start)/step))+1)
+	for v := start; v <= end+step*0.5; v += step {
+		values = append(values, math.Round(v*1000)/1000)
+	}
+	return values, nil
+}
+
+func spreadFactorsToSpec(factors []float64) string {
+	parts := make([]string, len(factors))
+	for i, v := range factors {
+		parts[i] = strconv.FormatFloat(v, 'f', -1, 64)
+	}
+	return strings.Join(parts, ",")
+}
+
+func toRGBAImage(src image.Image) *image.RGBA {
+	if rgba, ok := src.(*image.RGBA); ok {
+		return rgba
+	}
+	b := src.Bounds()
+	dst := image.NewRGBA(b)
+	draw.Draw(dst, b, src, b.Min, draw.Src)
+	return dst
+}
+
+func diffMetrics(a, b image.Image) (mae float64, rmse float64, maxAbs uint8, err error) {
+	ab := a.Bounds()
+	bb := b.Bounds()
+	if ab.Dx() != bb.Dx() || ab.Dy() != bb.Dy() {
+		return 0, 0, 0, fmt.Errorf("image sizes differ: %v vs %v", ab, bb)
+	}
+
+	var absSum float64
+	var sqSum float64
+	pixels := float64(ab.Dx() * ab.Dy() * 3)
+	for y := 0; y < ab.Dy(); y++ {
+		for x := 0; x < ab.Dx(); x++ {
+			ar, ag, abv, _ := a.At(ab.Min.X+x, ab.Min.Y+y).RGBA()
+			br, bg, bbv, _ := b.At(bb.Min.X+x, bb.Min.Y+y).RGBA()
+			diffs := [3]int{
+				int(ar>>8) - int(br>>8),
+				int(ag>>8) - int(bg>>8),
+				int(abv>>8) - int(bbv>>8),
+			}
+			for _, d := range diffs {
+				ad := d
+				if ad < 0 {
+					ad = -ad
+				}
+				absSum += float64(ad)
+				sqSum += float64(d * d)
+				if uint8(ad) > maxAbs {
+					maxAbs = uint8(ad)
+				}
+			}
+		}
+	}
+
+	if pixels == 0 {
+		return 0, 0, 0, nil
+	}
+	return absSum / pixels, math.Sqrt(sqSum / pixels), maxAbs, nil
+}
+
+func markPareto(results []sweepResult) []sweepResult {
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].SizeBytes != results[j].SizeBytes {
+			return results[i].SizeBytes < results[j].SizeBytes
+		}
+		return results[i].RMSE < results[j].RMSE
+	})
+
+	bestRMSE := math.Inf(1)
+	for i := range results {
+		if results[i].RMSE < bestRMSE {
+			results[i].Pareto = true
+			bestRMSE = results[i].RMSE
+		}
+	}
+	return results
+}
+
+func writeSweepCSV(path string, results []sweepResult) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	w := csv.NewWriter(f)
+	defer w.Flush()
+
+	if err := w.Write([]string{"quality", "blocks", "spreads", "size_bytes", "compression_ratio", "mae", "rmse", "max_abs_diff", "pareto"}); err != nil {
+		return err
+	}
+	for _, r := range results {
+		row := []string{
+			strconv.Itoa(r.Quality),
+			r.Blocks,
+			r.Spreads,
+			strconv.Itoa(r.SizeBytes),
+			strconv.FormatFloat(r.Compression, 'f', 6, 64),
+			strconv.FormatFloat(r.MAE, 'f', 6, 64),
+			strconv.FormatFloat(r.RMSE, 'f', 6, 64),
+			strconv.Itoa(int(r.MaxAbsDiff)),
+			strconv.FormatBool(r.Pareto),
+		}
+		if err := w.Write(row); err != nil {
+			return err
+		}
+	}
+	return w.Error()
+}
+
+func runSweep(inPath string, qualities []int, spreadValues []float64, blockSpec string, bwmode bool, patternCount int, colorQuantShift int, patternIndexMode string, logPatterns bool, csvPath string) error {
+	in, err := os.Open(inPath)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	src, _, err := image.Decode(in)
+	if err != nil {
+		return err
+	}
+	srcRGBA := toRGBAImage(src)
+
+	info, err := os.Stat(inPath)
+	if err != nil {
+		return err
+	}
+	inputBytes := info.Size()
+
+	if blockSpec != "" {
+		if err := setBlocksFromSpec(blockSpec); err != nil {
+			return err
+		}
+	} else {
+		blockLevels = append(blockLevels[:0], defaultBlockLevels[:]...)
+	}
+	levels := append([]int(nil), activeLevels()...)
+
+	blockLabel := make([]string, len(levels))
+	for i, v := range levels {
+		blockLabel[i] = strconv.Itoa(v)
+	}
+
+	fixedSpreadMode := len(spreadValues) == 0
+	totalCombos := len(qualities)
+	if fixedSpreadMode {
+		totalCombos *= 1
+	} else {
+		for range levels {
+			totalCombos *= len(spreadValues)
+		}
+	}
+	fmt.Printf("sweep: qualities=%d block-levels=%v spread-values=%d total-combinations=%d\n", len(qualities), levels, len(spreadValues), totalCombos)
+
+	results := make([]sweepResult, 0, min(totalCombos, 4096))
+	current := make([]float64, len(levels))
+	startedAt := time.Now()
+	completed := 0
+	lastProgressAt := time.Time{}
+	progressInterval := 2 * time.Second
+
+	printProgress := func(force bool) {
+		now := time.Now()
+		if !force && !lastProgressAt.IsZero() && now.Sub(lastProgressAt) < progressInterval {
+			return
+		}
+		lastProgressAt = now
+		if totalCombos <= 0 || completed <= 0 {
+			fmt.Fprintf(os.Stderr, "[sweep] %d/%d\n", completed, totalCombos)
+			return
+		}
+
+		elapsed := now.Sub(startedAt)
+		rate := float64(completed) / elapsed.Seconds()
+		remaining := totalCombos - completed
+		eta := time.Duration(0)
+		if rate > 0 && remaining > 0 {
+			eta = time.Duration(float64(time.Second) * float64(remaining) / rate)
+		}
+		percent := 100 * float64(completed) / float64(totalCombos)
+		fmt.Fprintf(os.Stderr, "[sweep] %d/%d %.2f%% elapsed=%s rate=%.2f iter/s eta=%s\n",
+			completed, totalCombos, percent, elapsed.Round(time.Second), rate, eta.Round(time.Second))
+	}
+
+	var visit func(levelIdx int) error
+	visit = func(levelIdx int) error {
+		if levelIdx == len(levels) {
+			spreadSpec := spreadFactorsToSpec(current)
+			if err := setSpreadFactorsFromSpec(spreadSpec); err != nil {
+				return err
+			}
+			for _, quality := range qualities {
+				activePatternCount = patternCount
+				activeColorQuantShift = colorQuantShift
+				activeSharedPatternIndexes = patternIndexMode == "shared"
+				encodeLog = logPatterns
+
+				comp, err := Encode(srcRGBA, quality, bwmode)
+				if err != nil {
+					return err
+				}
+				dec, err := Decode(comp, false)
+				if err != nil {
+					return err
+				}
+				mae, rmse, maxAbs, err := diffMetrics(srcRGBA, dec)
+				if err != nil {
+					return err
+				}
+
+				results = append(results, sweepResult{
+					Quality:     quality,
+					Blocks:      strings.Join(blockLabel, ","),
+					Spreads:     spreadSpec,
+					SizeBytes:   len(comp),
+					MAE:         mae,
+					RMSE:        rmse,
+					MaxAbsDiff:  maxAbs,
+					Compression: float64(len(comp)) / float64(inputBytes),
+				})
+				completed++
+				printProgress(false)
+			}
+			return nil
+		}
+
+		if fixedSpreadMode {
+			copy(current, forcedSpreadFactors)
+			return visit(len(levels))
+		}
+
+		for _, v := range spreadValues {
+			current[levelIdx] = v
+			if err := visit(levelIdx + 1); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	if fixedSpreadMode {
+		if len(forcedSpreadFactors) != len(levels) {
+			forcedSpreadFactors = make([]float64, len(levels))
+			for i := range forcedSpreadFactors {
+				forcedSpreadFactors[i] = 1
+			}
+		}
+	}
+
+	if err := visit(0); err != nil {
+		return err
+	}
+	printProgress(true)
+
+	results = markPareto(results)
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Pareto != results[j].Pareto {
+			return results[i].Pareto
+		}
+		if results[i].RMSE != results[j].RMSE {
+			return results[i].RMSE < results[j].RMSE
+		}
+		return results[i].SizeBytes < results[j].SizeBytes
+	})
+
+	if csvPath == "" {
+		base := strings.TrimSuffix(inPath, filepath.Ext(inPath))
+		csvPath = base + ".sweep.csv"
+	}
+	if err := writeSweepCSV(csvPath, results); err != nil {
+		return err
+	}
+
+	fmt.Printf("wrote %s\n", csvPath)
+	fmt.Println("top pareto results:")
+	printed := 0
+	for _, r := range results {
+		if !r.Pareto {
+			continue
+		}
+		fmt.Printf("q=%d blocks=%s spreads=%s size=%d ratio=%.4f mae=%.4f rmse=%.4f maxdiff=%d\n",
+			r.Quality, r.Blocks, r.Spreads, r.SizeBytes, r.Compression, r.MAE, r.RMSE, r.MaxAbsDiff)
+		printed++
+		if printed == 20 {
+			break
+		}
+	}
+	return nil
+}
+
 func writePatternSheets(basePath string) error {
 	if len(lastPatternSizesUsed) == 0 {
 		return nil
@@ -207,7 +574,7 @@ func writePatternSheets(basePath string) error {
 
 func main() {
 	if len(os.Args) < 2 || len(os.Args) > 14 {
-		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png] [-patterns=N] [-blocks=A,B|A-B] [-spreads=S1,S2,...] [-color-quant=N] [-pattern-set=basic] [-pattern-index=per-channel|shared] [-log]\n  babe <input.babe> [-postfilter] [-layers]\n  (bw flag, decoded.png, -patterns=N, -blocks=A,B|A-B, -spreads=S1,S2,..., -color-quant=N, -pattern-set=basic, -pattern-index=... and -log can appear anywhere after quality)\n")
+		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png] [-patterns=N] [-blocks=A,B|A-B] [-spreads=S1,S2,...] [-sweep] [-quality-range=0..100..1] [-spread-range=0.1..1..0.1] [-csv=results.csv] [-color-quant=N] [-pattern-set=basic] [-pattern-index=per-channel|shared] [-log]\n  babe <input.babe> [-postfilter] [-layers]\n  (bw flag, decoded.png, -patterns=N, -blocks=A,B|A-B, -spreads=S1,S2,..., -sweep, -quality-range=..., -spread-range=..., -csv=..., -color-quant=N, -pattern-set=basic, -pattern-index=... and -log can appear anywhere after quality)\n")
 		os.Exit(1)
 	}
 
@@ -258,6 +625,10 @@ func main() {
 	patternCount := defaultPatternCount
 	blockSpec := ""
 	spreadSpec := ""
+	sweepMode := false
+	qualityRangeSpec := ""
+	spreadRangeSpec := ""
+	csvPath := ""
 	colorQuantShift := 0
 	patternIndexMode := "per-channel"
 	logPatterns := false
@@ -268,6 +639,10 @@ func main() {
 		}
 		if a == "-log" {
 			logPatterns = true
+			continue
+		}
+		if a == "-sweep" {
+			sweepMode = true
 			continue
 		}
 		if a == "-layers" {
@@ -289,6 +664,18 @@ func main() {
 		}
 		if strings.HasPrefix(a, "-spreads=") {
 			spreadSpec = strings.TrimPrefix(a, "-spreads=")
+			continue
+		}
+		if strings.HasPrefix(a, "-quality-range=") {
+			qualityRangeSpec = strings.TrimPrefix(a, "-quality-range=")
+			continue
+		}
+		if strings.HasPrefix(a, "-spread-range=") {
+			spreadRangeSpec = strings.TrimPrefix(a, "-spread-range=")
+			continue
+		}
+		if strings.HasPrefix(a, "-csv=") {
+			csvPath = strings.TrimPrefix(a, "-csv=")
 			continue
 		}
 		if strings.HasPrefix(a, "-color-quant=") {
@@ -339,6 +726,35 @@ func main() {
 		forcedBlockSizes = nil
 		forcedSpreadFactors = nil
 	}()
+	if sweepMode {
+		qualities := []int{quality}
+		if qualityRangeSpec != "" {
+			values, err := parseIntSweepSpec(qualityRangeSpec)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "quality-range:", err)
+				os.Exit(1)
+			}
+			qualities = values
+		}
+
+		spreadValues := []float64{1}
+		if spreadRangeSpec != "" {
+			values, err := parseFloatSweepSpec(spreadRangeSpec)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "spread-range:", err)
+				os.Exit(1)
+			}
+			spreadValues = values
+		} else if spreadSpec != "" {
+			spreadValues = nil
+		}
+
+		if err := runSweep(inputPath, qualities, spreadValues, blockSpec, bwmode, patternCount, colorQuantShift, patternIndexMode, logPatterns, csvPath); err != nil {
+			fmt.Fprintln(os.Stderr, "sweep error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := encodeToBabe(inputPath, outPath, quality, bwmode, patternCount, colorQuantShift, patternIndexMode, logPatterns); err != nil {
 		fmt.Fprintln(os.Stderr, "encode error:", err)
 		os.Exit(1)
