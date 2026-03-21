@@ -574,7 +574,7 @@ func writePatternSheets(basePath string) error {
 
 func main() {
 	if len(os.Args) < 2 || len(os.Args) > 16 {
-		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png] [-patterns=N] [-blocks=A,B|A-B] [-spreads=S1,S2,...] [-sweep] [-quality-range=0..100..1] [-spread-range=0.1..1..0.1] [-csv=results.csv] [-color-quant=N] [-pattern-set=basic] [-pattern-index=per-channel|shared] [-backgroundTile N] [-log]\n  babe <input.babe> [-postfilter] [-layers]\n  (bw flag, decoded.png, -patterns=N, -blocks=A,B|A-B, -spreads=S1,S2,..., -sweep, -quality-range=..., -spread-range=..., -csv=..., -color-quant=N, -pattern-set=basic, -pattern-index=..., -backgroundTile N and -log can appear anywhere after quality)\n")
+		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png] [-patterns=N] [-blocks=A,B|A-B] [-spreads=S1,S2,...] [-sweep] [-quality-range=0..100..1] [-spread-range=0.1..1..0.1] [-csv=results.csv] [-color-quant=N] [-pattern-set=basic] [-pattern-index=per-channel|shared] [-tile N] [-log]\n  babe <input.babe> [-postfilter] [-layers]\n  (bw flag, decoded.png, -patterns=N, -blocks=A,B|A-B, -spreads=S1,S2,..., -sweep, -quality-range=..., -spread-range=..., -csv=..., -color-quant=N, -pattern-set=basic, -pattern-index=..., -tile N and -log can appear anywhere after quality)\n")
 		os.Exit(1)
 	}
 
@@ -631,7 +631,7 @@ func main() {
 	csvPath := ""
 	colorQuantShift := 0
 	patternIndexMode := "per-channel"
-	backgroundTile := 0
+	tile := 0
 	logPatterns := false
 	for i := 0; i < len(encodeArgs); i++ {
 		a := encodeArgs[i]
@@ -706,27 +706,27 @@ func main() {
 			patternIndexMode = v
 			continue
 		}
-		if a == "-backgroundTile" {
+		if a == "-tile" {
 			if i+1 >= len(encodeArgs) {
-				fmt.Fprintln(os.Stderr, "backgroundTile requires a value between 2 and 255")
+				fmt.Fprintln(os.Stderr, "tile requires a value between 2 and 255")
 				os.Exit(1)
 			}
 			v, err := strconv.Atoi(encodeArgs[i+1])
 			if err != nil || v < 2 || v > 255 {
-				fmt.Fprintln(os.Stderr, "backgroundTile must be an integer between 2 and 255")
+				fmt.Fprintln(os.Stderr, "tile must be an integer between 2 and 255")
 				os.Exit(1)
 			}
-			backgroundTile = v
+			tile = v
 			i++
 			continue
 		}
-		if strings.HasPrefix(a, "-backgroundTile=") {
-			v, err := strconv.Atoi(strings.TrimPrefix(a, "-backgroundTile="))
+		if strings.HasPrefix(a, "-tile=") {
+			v, err := strconv.Atoi(strings.TrimPrefix(a, "-tile="))
 			if err != nil || v < 2 || v > 255 {
-				fmt.Fprintln(os.Stderr, "backgroundTile must be an integer between 2 and 255")
+				fmt.Fprintln(os.Stderr, "tile must be an integer between 2 and 255")
 				os.Exit(1)
 			}
-			backgroundTile = v
+			tile = v
 			continue
 		}
 		if strings.EqualFold(filepath.Ext(a), ".png") {
@@ -780,7 +780,7 @@ func main() {
 		}
 		return
 	}
-	if err := encodeToBabe(inputPath, outPath, quality, bwmode, patternCount, colorQuantShift, patternIndexMode, backgroundTile, logPatterns); err != nil {
+	if err := encodeToBabe(inputPath, outPath, quality, bwmode, patternCount, colorQuantShift, patternIndexMode, tile, logPatterns); err != nil {
 		fmt.Fprintln(os.Stderr, "encode error:", err)
 		os.Exit(1)
 	}
@@ -798,7 +798,7 @@ func main() {
 	}
 }
 
-func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount int, colorQuantShift int, patternIndexMode string, backgroundTile int, logPatterns bool) error {
+func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount int, colorQuantShift int, patternIndexMode string, tile int, logPatterns bool) error {
 	info, err := os.Stat(inPath)
 	if err != nil {
 		return err
@@ -820,7 +820,7 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount
 	activePatternCount = patternCount
 	activeColorQuantShift = colorQuantShift
 	activeSharedPatternIndexes = patternIndexMode == "shared"
-	activeBackgroundTile = backgroundTile
+	activeBackgroundTile = tile
 	encodeLog = logPatterns
 	defer func() {
 		activePatternCount = defaultPatternCount
@@ -870,13 +870,13 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount
 		outPath,
 		formatSize(encSize),
 	)
-	fmt.Printf("quality=%d, patterns=%d, color-quant=%d, pattern-set=%s, pattern-index=%s, backgroundTile=%d, ratio=%.3f, time=%s\n",
+	fmt.Printf("quality=%d, patterns=%d, color-quant=%d, pattern-set=%s, pattern-index=%s, tile=%d, ratio=%.3f, time=%s\n",
 		quality,
 		patternCount,
 		colorQuantShift,
 		patternSetBasic,
 		patternIndexMode,
-		backgroundTile,
+		tile,
 		ratio,
 		finish,
 	)

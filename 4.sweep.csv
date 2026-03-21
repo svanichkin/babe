@@ -1,2 +1,0 @@
-quality,blocks,spreads,size_bytes,compression_ratio,mae,rmse,max_abs_diff,pareto
-100,"1,2,4,8,16","1,0.6,0.1,0.3,0.1",62960,1.845901,1.520114,1.798123,8,true
