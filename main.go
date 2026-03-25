@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/csv"
 	"fmt"
 	"image"
 	"image/color"
@@ -10,674 +9,16 @@ import (
 	_ "image/jpeg"
 	"image/png"
 	"io"
-	"math"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
-func writePatternUsageSheets(basePath string) error {
-	if len(lastPatternUsageByChannel) == 0 {
-		return nil
-	}
-
-	const (
-		cellScale = 8
-		padding   = 4
-		cols      = 8
-	)
-
-	channels := make([]string, 0, len(lastPatternUsageByChannel))
-	for channel := range lastPatternUsageByChannel {
-		channels = append(channels, channel)
-	}
-	sort.Strings(channels)
-
-	for _, channel := range channels {
-		sizeUsage := lastPatternUsageByChannel[channel]
-		sizes := make([][2]int, 0, len(sizeUsage))
-		for size := range sizeUsage {
-			sizes = append(sizes, size)
-		}
-		sort.Slice(sizes, func(i, j int) bool {
-			if sizes[i][0] != sizes[j][0] {
-				return sizes[i][0] < sizes[j][0]
-			}
-			return sizes[i][1] < sizes[j][1]
-		})
-
-		for _, size := range sizes {
-			entries := sizeUsage[size]
-			if len(entries) == 0 {
-				continue
-			}
-
-			bw, bh := size[0], size[1]
-			rows := (len(entries) + cols - 1) / cols
-			cellW := bw*cellScale + padding*2
-			cellH := bh*cellScale + padding*2
-			img := image.NewRGBA(image.Rect(0, 0, cols*cellW, rows*cellH))
-
-			bg := color.RGBA{245, 245, 245, 255}
-			cellBG := color.RGBA{225, 225, 225, 255}
-			fg := color.RGBA{20, 20, 20, 255}
-			grid := color.RGBA{120, 120, 120, 255}
-			for y := 0; y < img.Bounds().Dy(); y++ {
-				for x := 0; x < img.Bounds().Dx(); x++ {
-					img.Set(x, y, bg)
-				}
-			}
-
-			for i, entry := range entries {
-				col := i % cols
-				row := i / cols
-				ox := col * cellW
-				oy := row * cellH
-
-				for y := oy; y < oy+cellH; y++ {
-					for x := ox; x < ox+cellW; x++ {
-						img.Set(x, y, cellBG)
-					}
-				}
-				for x := ox; x < ox+cellW; x++ {
-					img.Set(x, oy, grid)
-					img.Set(x, oy+cellH-1, grid)
-				}
-				for y := oy; y < oy+cellH; y++ {
-					img.Set(ox, y, grid)
-					img.Set(ox+cellW-1, y, grid)
-				}
-
-				for py := 0; py < bh; py++ {
-					for px := 0; px < bw; px++ {
-						c := color.Color(color.RGBA{250, 250, 250, 255})
-						if testPatternBit(entry.bits, bw, bh, px, py) {
-							c = fg
-						}
-						for sy := 0; sy < cellScale; sy++ {
-							for sx := 0; sx < cellScale; sx++ {
-								img.Set(ox+padding+px*cellScale+sx, oy+padding+py*cellScale+sy, c)
-							}
-						}
-					}
-				}
-			}
-
-			outPath := fmt.Sprintf("%s.pattern-usage.%s.%dx%d.png", basePath, strings.ToLower(channel), bw, bh)
-			f, err := os.Create(outPath)
-			if err != nil {
-				return err
-			}
-			if err := png.Encode(f, img); err != nil {
-				_ = f.Close()
-				return err
-			}
-			if err := f.Close(); err != nil {
-				return err
-			}
-			fmt.Fprintf(os.Stderr, "[log] wrote %s\n", outPath)
-		}
-	}
-
-	return nil
-}
-
-func writeByteGraphPNG(path string, values []uint8) error {
-	if len(values) == 0 {
-		return nil
-	}
-	w := len(values)
-	h := 256
-	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			img.Set(x, y, color.RGBA{255, 255, 255, 255})
-		}
-	}
-	prevY := h - 1 - int(values[0])
-	if prevY < 0 {
-		prevY = 0
-	} else if prevY >= h {
-		prevY = h - 1
-	}
-	img.Set(0, prevY, color.RGBA{0, 0, 0, 255})
-	for x := 1; x < w; x++ {
-		y := h - 1 - int(values[x])
-		if y < 0 {
-			y = 0
-		} else if y >= h {
-			y = h - 1
-		}
-		y0, y1 := prevY, y
-		if y0 > y1 {
-			y0, y1 = y1, y0
-		}
-		for yy := y0; yy <= y1; yy++ {
-			img.Set(x, yy, color.RGBA{0, 0, 0, 255})
-		}
-		prevY = y
-	}
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if err := png.Encode(f, img); err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stderr, "[log] wrote %s\n", path)
-	return nil
-}
-
-func writeDualByteGraphPNG(path string, fg, bg []uint8) error {
-	if len(fg) == 0 || len(bg) == 0 {
-		return nil
-	}
-	n := len(fg)
-	if len(bg) < n {
-		n = len(bg)
-	}
-	if n == 0 {
-		return nil
-	}
-	w := n
-	h := 256
-	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	// white background
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			img.Set(x, y, color.RGBA{255, 255, 255, 255})
-		}
-	}
-	for x := 0; x < w; x++ {
-		yFG := h - 1 - int(fg[x])
-		yBG := h - 1 - int(bg[x])
-		if yFG < 0 {
-			yFG = 0
-		} else if yFG >= h {
-			yFG = h - 1
-		}
-		if yBG < 0 {
-			yBG = 0
-		} else if yBG >= h {
-			yBG = h - 1
-		}
-		y0, y1 := yFG, yBG
-		if y0 > y1 {
-			y0, y1 = y1, y0
-		}
-		for yy := y0; yy <= y1; yy++ {
-			img.Set(x, yy, color.RGBA{0, 0, 0, 255})
-		}
-		img.Set(x, yFG, color.RGBA{0, 120, 255, 255}) // fg endpoint
-		img.Set(x, yBG, color.RGBA{255, 0, 0, 255})   // bg endpoint
-	}
-
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if err := png.Encode(f, img); err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stderr, "[log] wrote %s\n", path)
-	return nil
-}
-
-type sweepResult struct {
-	Quality     int
-	Blocks      string
-	Spreads     string
-	SizeBytes   int
-	MAE         float64
-	RMSE        float64
-	MaxAbsDiff  uint8
-	Compression float64
-	Pareto      bool
-}
-
-func parseIntSweepSpec(spec string) ([]int, error) {
-	parts := strings.Split(spec, "..")
-	if len(parts) < 2 || len(parts) > 3 {
-		return nil, fmt.Errorf("range must look like 0..100 or 0..100..1")
-	}
-	start, err := strconv.Atoi(strings.TrimSpace(parts[0]))
-	if err != nil {
-		return nil, err
-	}
-	end, err := strconv.Atoi(strings.TrimSpace(parts[1]))
-	if err != nil {
-		return nil, err
-	}
-	step := 1
-	if len(parts) == 3 {
-		step, err = strconv.Atoi(strings.TrimSpace(parts[2]))
-		if err != nil {
-			return nil, err
-		}
-	}
-	if step <= 0 {
-		return nil, fmt.Errorf("step must be positive")
-	}
-	if end < start {
-		return nil, fmt.Errorf("range end must be >= start")
-	}
-	values := make([]int, 0, (end-start)/step+1)
-	for v := start; v <= end; v += step {
-		values = append(values, v)
-	}
-	return values, nil
-}
-
-func parseFloatSweepSpec(spec string) ([]float64, error) {
-	parts := strings.Split(spec, "..")
-	if len(parts) < 2 || len(parts) > 3 {
-		return nil, fmt.Errorf("range must look like 0.1..1 or 0.1..1..0.1")
-	}
-	start, err := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
-	if err != nil {
-		return nil, err
-	}
-	end, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
-	if err != nil {
-		return nil, err
-	}
-	step := 1.0
-	if len(parts) == 3 {
-		step, err = strconv.ParseFloat(strings.TrimSpace(parts[2]), 64)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if step <= 0 {
-		return nil, fmt.Errorf("step must be positive")
-	}
-	if end < start {
-		return nil, fmt.Errorf("range end must be >= start")
-	}
-	values := make([]float64, 0, int(math.Floor((end-start)/step))+1)
-	for v := start; v <= end+step*0.5; v += step {
-		values = append(values, math.Round(v*1000)/1000)
-	}
-	return values, nil
-}
-
-func spreadFactorsToSpec(factors []float64) string {
-	parts := make([]string, len(factors))
-	for i, v := range factors {
-		parts[i] = strconv.FormatFloat(v, 'f', -1, 64)
-	}
-	return strings.Join(parts, ",")
-}
-
-func toRGBAImage(src image.Image) *image.RGBA {
-	if rgba, ok := src.(*image.RGBA); ok {
-		return rgba
-	}
-	b := src.Bounds()
-	dst := image.NewRGBA(b)
-	draw.Draw(dst, b, src, b.Min, draw.Src)
-	return dst
-}
-
-func diffMetrics(a, b image.Image) (mae float64, rmse float64, maxAbs uint8, err error) {
-	ab := a.Bounds()
-	bb := b.Bounds()
-	if ab.Dx() != bb.Dx() || ab.Dy() != bb.Dy() {
-		return 0, 0, 0, fmt.Errorf("image sizes differ: %v vs %v", ab, bb)
-	}
-
-	var absSum float64
-	var sqSum float64
-	pixels := float64(ab.Dx() * ab.Dy() * 3)
-	for y := 0; y < ab.Dy(); y++ {
-		for x := 0; x < ab.Dx(); x++ {
-			ar, ag, abv, _ := a.At(ab.Min.X+x, ab.Min.Y+y).RGBA()
-			br, bg, bbv, _ := b.At(bb.Min.X+x, bb.Min.Y+y).RGBA()
-			diffs := [3]int{
-				int(ar>>8) - int(br>>8),
-				int(ag>>8) - int(bg>>8),
-				int(abv>>8) - int(bbv>>8),
-			}
-			for _, d := range diffs {
-				ad := d
-				if ad < 0 {
-					ad = -ad
-				}
-				absSum += float64(ad)
-				sqSum += float64(d * d)
-				if uint8(ad) > maxAbs {
-					maxAbs = uint8(ad)
-				}
-			}
-		}
-	}
-
-	if pixels == 0 {
-		return 0, 0, 0, nil
-	}
-	return absSum / pixels, math.Sqrt(sqSum / pixels), maxAbs, nil
-}
-
-func markPareto(results []sweepResult) []sweepResult {
-	sort.Slice(results, func(i, j int) bool {
-		if results[i].SizeBytes != results[j].SizeBytes {
-			return results[i].SizeBytes < results[j].SizeBytes
-		}
-		return results[i].RMSE < results[j].RMSE
-	})
-
-	bestRMSE := math.Inf(1)
-	for i := range results {
-		if results[i].RMSE < bestRMSE {
-			results[i].Pareto = true
-			bestRMSE = results[i].RMSE
-		}
-	}
-	return results
-}
-
-func writeSweepCSV(path string, results []sweepResult) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	w := csv.NewWriter(f)
-	defer w.Flush()
-
-	if err := w.Write([]string{"quality", "blocks", "spreads", "size_bytes", "compression_ratio", "mae", "rmse", "max_abs_diff", "pareto"}); err != nil {
-		return err
-	}
-	for _, r := range results {
-		row := []string{
-			strconv.Itoa(r.Quality),
-			r.Blocks,
-			r.Spreads,
-			strconv.Itoa(r.SizeBytes),
-			strconv.FormatFloat(r.Compression, 'f', 6, 64),
-			strconv.FormatFloat(r.MAE, 'f', 6, 64),
-			strconv.FormatFloat(r.RMSE, 'f', 6, 64),
-			strconv.Itoa(int(r.MaxAbsDiff)),
-			strconv.FormatBool(r.Pareto),
-		}
-		if err := w.Write(row); err != nil {
-			return err
-		}
-	}
-	return w.Error()
-}
-
-func runSweep(inPath string, qualities []int, spreadValues []float64, blockSpec string, bwmode bool, patternCount int, colorQuantShift int, patternIndexMode string, logPatterns bool, csvPath string) error {
-	in, err := os.Open(inPath)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	src, _, err := image.Decode(in)
-	if err != nil {
-		return err
-	}
-	srcRGBA := toRGBAImage(src)
-
-	info, err := os.Stat(inPath)
-	if err != nil {
-		return err
-	}
-	inputBytes := info.Size()
-
-	if blockSpec != "" {
-		if err := setBlocksFromSpec(blockSpec); err != nil {
-			return err
-		}
-	} else {
-		blockLevels = append(blockLevels[:0], defaultBlockLevels[:]...)
-	}
-	levels := append([]int(nil), activeLevels()...)
-
-	blockLabel := make([]string, len(levels))
-	for i, v := range levels {
-		blockLabel[i] = strconv.Itoa(v)
-	}
-
-	fixedSpreadMode := len(spreadValues) == 0
-	totalCombos := len(qualities)
-	if fixedSpreadMode {
-		totalCombos *= 1
-	} else {
-		for range levels {
-			totalCombos *= len(spreadValues)
-		}
-	}
-	fmt.Printf("sweep: qualities=%d block-levels=%v spread-values=%d total-combinations=%d\n", len(qualities), levels, len(spreadValues), totalCombos)
-
-	results := make([]sweepResult, 0, min(totalCombos, 4096))
-	current := make([]float64, len(levels))
-	startedAt := time.Now()
-	completed := 0
-	lastProgressAt := time.Time{}
-	progressInterval := 2 * time.Second
-
-	printProgress := func(force bool) {
-		now := time.Now()
-		if !force && !lastProgressAt.IsZero() && now.Sub(lastProgressAt) < progressInterval {
-			return
-		}
-		lastProgressAt = now
-		if totalCombos <= 0 || completed <= 0 {
-			fmt.Fprintf(os.Stderr, "[sweep] %d/%d\n", completed, totalCombos)
-			return
-		}
-
-		elapsed := now.Sub(startedAt)
-		rate := float64(completed) / elapsed.Seconds()
-		remaining := totalCombos - completed
-		eta := time.Duration(0)
-		if rate > 0 && remaining > 0 {
-			eta = time.Duration(float64(time.Second) * float64(remaining) / rate)
-		}
-		percent := 100 * float64(completed) / float64(totalCombos)
-		fmt.Fprintf(os.Stderr, "[sweep] %d/%d %.2f%% elapsed=%s rate=%.2f iter/s eta=%s\n",
-			completed, totalCombos, percent, elapsed.Round(time.Second), rate, eta.Round(time.Second))
-	}
-
-	var visit func(levelIdx int) error
-	visit = func(levelIdx int) error {
-		if levelIdx == len(levels) {
-			spreadSpec := spreadFactorsToSpec(current)
-			if err := setSpreadFactorsFromSpec(spreadSpec); err != nil {
-				return err
-			}
-			for _, quality := range qualities {
-				activePatternCount = patternCount
-				activeColorQuantShift = colorQuantShift
-				activeSharedPatternIndexes = patternIndexMode == "shared"
-				encodeLog = logPatterns
-
-				comp, err := Encode(srcRGBA, quality, bwmode)
-				if err != nil {
-					return err
-				}
-				dec, err := Decode(comp, false)
-				if err != nil {
-					return err
-				}
-				mae, rmse, maxAbs, err := diffMetrics(srcRGBA, dec)
-				if err != nil {
-					return err
-				}
-
-				results = append(results, sweepResult{
-					Quality:     quality,
-					Blocks:      strings.Join(blockLabel, ","),
-					Spreads:     spreadSpec,
-					SizeBytes:   len(comp),
-					MAE:         mae,
-					RMSE:        rmse,
-					MaxAbsDiff:  maxAbs,
-					Compression: float64(len(comp)) / float64(inputBytes),
-				})
-				completed++
-				printProgress(false)
-			}
-			return nil
-		}
-
-		if fixedSpreadMode {
-			copy(current, forcedSpreadFactors)
-			return visit(len(levels))
-		}
-
-		for _, v := range spreadValues {
-			current[levelIdx] = v
-			if err := visit(levelIdx + 1); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
-	if fixedSpreadMode {
-		if len(forcedSpreadFactors) != len(levels) {
-			forcedSpreadFactors = make([]float64, len(levels))
-			for i := range forcedSpreadFactors {
-				forcedSpreadFactors[i] = 1
-			}
-		}
-	}
-
-	if err := visit(0); err != nil {
-		return err
-	}
-	printProgress(true)
-
-	results = markPareto(results)
-	sort.Slice(results, func(i, j int) bool {
-		if results[i].Pareto != results[j].Pareto {
-			return results[i].Pareto
-		}
-		if results[i].RMSE != results[j].RMSE {
-			return results[i].RMSE < results[j].RMSE
-		}
-		return results[i].SizeBytes < results[j].SizeBytes
-	})
-
-	if csvPath == "" {
-		base := strings.TrimSuffix(inPath, filepath.Ext(inPath))
-		csvPath = base + ".sweep.csv"
-	}
-	if err := writeSweepCSV(csvPath, results); err != nil {
-		return err
-	}
-
-	fmt.Printf("wrote %s\n", csvPath)
-	fmt.Println("top pareto results:")
-	printed := 0
-	for _, r := range results {
-		if !r.Pareto {
-			continue
-		}
-		fmt.Printf("q=%d blocks=%s spreads=%s size=%d ratio=%.4f mae=%.4f rmse=%.4f maxdiff=%d\n",
-			r.Quality, r.Blocks, r.Spreads, r.SizeBytes, r.Compression, r.MAE, r.RMSE, r.MaxAbsDiff)
-		printed++
-		if printed == 20 {
-			break
-		}
-	}
-	return nil
-}
-
-func writePatternSheets(basePath string) error {
-	if len(lastPatternSizesUsed) == 0 {
-		return nil
-	}
-
-	const (
-		cellScale = 8
-		padding   = 4
-		cols      = 8
-	)
-
-	for size := range lastPatternSizesUsed {
-		bw, bh := size[0], size[1]
-		book := fixedPatternCodebook(bw, bh, activePatternCount)
-		rows := (len(book) + cols - 1) / cols
-		cellW := bw*cellScale + padding*2
-		cellH := bh*cellScale + padding*2
-		img := image.NewRGBA(image.Rect(0, 0, cols*cellW, rows*cellH))
-
-		bg := color.RGBA{245, 245, 245, 255}
-		cellBG := color.RGBA{225, 225, 225, 255}
-		fg := color.RGBA{20, 20, 20, 255}
-		grid := color.RGBA{120, 120, 120, 255}
-		for y := 0; y < img.Bounds().Dy(); y++ {
-			for x := 0; x < img.Bounds().Dx(); x++ {
-				img.Set(x, y, bg)
-			}
-		}
-
-		for i, bits := range book {
-			col := i % cols
-			row := i / cols
-			ox := col * cellW
-			oy := row * cellH
-
-			for y := oy; y < oy+cellH; y++ {
-				for x := ox; x < ox+cellW; x++ {
-					img.Set(x, y, cellBG)
-				}
-			}
-			for x := ox; x < ox+cellW; x++ {
-				img.Set(x, oy, grid)
-				img.Set(x, oy+cellH-1, grid)
-			}
-			for y := oy; y < oy+cellH; y++ {
-				img.Set(ox, y, grid)
-				img.Set(ox+cellW-1, y, grid)
-			}
-
-			for py := 0; py < bh; py++ {
-				for px := 0; px < bw; px++ {
-					c := color.Color(color.RGBA{250, 250, 250, 255})
-					if testPatternBit(bits, bw, bh, px, py) {
-						c = fg
-					}
-					for sy := 0; sy < cellScale; sy++ {
-						for sx := 0; sx < cellScale; sx++ {
-							img.Set(ox+padding+px*cellScale+sx, oy+padding+py*cellScale+sy, c)
-						}
-					}
-				}
-			}
-		}
-
-		outPath := fmt.Sprintf("%s.patterns.%dx%d.png", basePath, bw, bh)
-		f, err := os.Create(outPath)
-		if err != nil {
-			return err
-		}
-		if err := png.Encode(f, img); err != nil {
-			_ = f.Close()
-			return err
-		}
-		if err := f.Close(); err != nil {
-			return err
-		}
-		fmt.Fprintf(os.Stderr, "[log] wrote %s\n", outPath)
-	}
-
-	return nil
-}
-
 func main() {
 	if len(os.Args) < 2 || len(os.Args) > 16 {
-		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png] [-patterns=N] [-blocks=A,B|A-B] [-spreads=S1,S2,...] [-sweep] [-quality-range=0..100..1] [-spread-range=0.1..1..0.1] [-csv=results.csv] [-color-quant=N] [-pattern-set=basic] [-pattern-index=per-channel|shared] [-tile N] [-log]\n  babe <input.babe> [-postfilter] [-layers]\n  (bw flag, decoded.png, -patterns=N, -blocks=A,B|A-B, -spreads=S1,S2,..., -sweep, -quality-range=..., -spread-range=..., -csv=..., -color-quant=N, -pattern-set=basic, -pattern-index=..., -tile N and -log can appear anywhere after quality)\n")
+		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png] [-patterns=N] [-blocks=A,B|A-B] [-spreads=S1,S2,...] [-color-quant=N] [-pattern-set=basic] [-pattern-index=per-channel|shared] [-tile N]\n  babe <input.babe> [-postfilter] [-layers]\n  (bw flag, decoded.png, -patterns=N, -blocks=A,B|A-B, -spreads=S1,S2,..., -color-quant=N, -pattern-set=basic, -pattern-index=..., -tile N can appear anywhere after quality)\n")
 		os.Exit(1)
 	}
 
@@ -728,27 +69,18 @@ func main() {
 	patternCount := defaultPatternCount
 	blockSpec := ""
 	spreadSpec := ""
-	sweepMode := false
-	qualityRangeSpec := ""
-	spreadRangeSpec := ""
-	csvPath := ""
 	colorQuantShift := 0
 	patternIndexMode := "per-channel"
 	tile := 0
-	logPatterns := false
 	for i := 0; i < len(encodeArgs); i++ {
 		a := encodeArgs[i]
 		if a == "bw" {
 			bwmode = true
 			continue
 		}
-		if a == "-log" {
-			logPatterns = true
-			continue
-		}
-		if a == "-sweep" {
-			sweepMode = true
-			continue
+		if a == "-log" || a == "-sweep" {
+			fmt.Fprintln(os.Stderr, "flag is not supported in this build")
+			os.Exit(1)
 		}
 		if a == "-layers" {
 			layersOut = true
@@ -771,17 +103,9 @@ func main() {
 			spreadSpec = strings.TrimPrefix(a, "-spreads=")
 			continue
 		}
-		if strings.HasPrefix(a, "-quality-range=") {
-			qualityRangeSpec = strings.TrimPrefix(a, "-quality-range=")
-			continue
-		}
-		if strings.HasPrefix(a, "-spread-range=") {
-			spreadRangeSpec = strings.TrimPrefix(a, "-spread-range=")
-			continue
-		}
-		if strings.HasPrefix(a, "-csv=") {
-			csvPath = strings.TrimPrefix(a, "-csv=")
-			continue
+		if strings.HasPrefix(a, "-quality-range=") || strings.HasPrefix(a, "-spread-range=") || strings.HasPrefix(a, "-csv=") {
+			fmt.Fprintln(os.Stderr, "sweep flags are not supported in this build")
+			os.Exit(1)
 		}
 		if strings.HasPrefix(a, "-color-quant=") {
 			v, err := strconv.Atoi(strings.TrimPrefix(a, "-color-quant="))
@@ -854,36 +178,7 @@ func main() {
 		forcedBlockSizes = nil
 		forcedSpreadFactors = nil
 	}()
-	if sweepMode {
-		qualities := []int{quality}
-		if qualityRangeSpec != "" {
-			values, err := parseIntSweepSpec(qualityRangeSpec)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "quality-range:", err)
-				os.Exit(1)
-			}
-			qualities = values
-		}
-
-		spreadValues := []float64{1}
-		if spreadRangeSpec != "" {
-			values, err := parseFloatSweepSpec(spreadRangeSpec)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "spread-range:", err)
-				os.Exit(1)
-			}
-			spreadValues = values
-		} else if spreadSpec != "" {
-			spreadValues = nil
-		}
-
-		if err := runSweep(inputPath, qualities, spreadValues, blockSpec, bwmode, patternCount, colorQuantShift, patternIndexMode, logPatterns, csvPath); err != nil {
-			fmt.Fprintln(os.Stderr, "sweep error:", err)
-			os.Exit(1)
-		}
-		return
-	}
-	if err := encodeToBabe(inputPath, outPath, quality, bwmode, patternCount, colorQuantShift, patternIndexMode, tile, logPatterns); err != nil {
+	if err := encodeToBabe(inputPath, outPath, quality, bwmode, patternCount, colorQuantShift, patternIndexMode, tile); err != nil {
 		fmt.Fprintln(os.Stderr, "encode error:", err)
 		os.Exit(1)
 	}
@@ -901,7 +196,7 @@ func main() {
 	}
 }
 
-func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount int, colorQuantShift int, patternIndexMode string, tile int, logPatterns bool) error {
+func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount int, colorQuantShift int, patternIndexMode string, tile int) error {
 	info, err := os.Stat(inPath)
 	if err != nil {
 		return err
@@ -924,13 +219,11 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount
 	activeColorQuantShift = colorQuantShift
 	activeSharedPatternIndexes = patternIndexMode == "shared"
 	activeBackgroundTile = tile
-	encodeLog = logPatterns
 	defer func() {
 		activePatternCount = defaultPatternCount
 		activeColorQuantShift = 0
 		activeSharedPatternIndexes = false
 		activeBackgroundTile = 0
-		encodeLog = false
 	}()
 	enc, err := Encode(img, quality, bwmode)
 	if err != nil {
@@ -947,23 +240,6 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount
 	if _, err := out.Write(enc); err != nil {
 		return err
 	}
-	if logPatterns {
-		base := strings.TrimSuffix(outPath, filepath.Ext(outPath))
-		if err := writePatternUsageSheets(base); err != nil {
-			return err
-		}
-		if err := writePatternSheets(base); err != nil {
-			return err
-		}
-		fg := LastYFGVals()
-		bg := LastYBGVals()
-		if len(fg) > 0 && len(bg) > 0 {
-			if err := writeDualByteGraphPNG(base+".y-fg-bg.png", fg, bg); err != nil {
-				return err
-			}
-		}
-	}
-
 	encSize := int64(len(enc))
 	ratio := float64(encSize) / float64(inSize)
 
@@ -980,16 +256,7 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount
 		outPath,
 		formatSize(encSize),
 	)
-	fmt.Printf("quality=%d, patterns=%d, color-quant=%d, pattern-set=%s, pattern-index=%s, tile=%d, ratio=%.3f, time=%s\n",
-		quality,
-		patternCount,
-		colorQuantShift,
-		patternSetBasic,
-		patternIndexMode,
-		tile,
-		ratio,
-		finish,
-	)
+	fmt.Printf("ratio=%.3f, time=%s\n", ratio, finish)
 
 	return nil
 }

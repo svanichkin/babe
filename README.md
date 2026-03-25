@@ -2,7 +2,7 @@
 
 `Babe` is an experimental lossy image codec based on adaptive block subdivision, two-tone block approximation, and Zstandard compression.
 
-The current on-disk format written by the encoder is `BABE3`.
+The current on-disk format written by the encoder is `BABE-L` (BABE Light).
 
 ## What It Does
 
@@ -27,14 +27,12 @@ zstd( raw_babe_stream )
 The raw stream begins with the magic:
 
 ```text
-BABE3\n
+BABE-L\n
 ```
 
 Then the file header:
 
 ```text
-u16  base block size
-u16  top block size
 u16  pattern count
 u16  block level count
 u16  block levels[levelCount]
@@ -79,9 +77,7 @@ Meaning of each stream:
 
 ## Important Format Detail
 
-`BABE3` no longer stores a separate block-type bitstream.
-
-Instead, block type is encoded in the parity of the stored `fg` byte:
+Block type is encoded in the parity of the stored `fg` byte:
 
 - odd `fg` => patterned block
 - even `fg` => solid block
@@ -248,8 +244,7 @@ Convenience constructors are also available:
 ## Notes
 
 - The format is experimental and intentionally unstable.
-- `BABE`, `BABE2`, and `BABE3` are different on-disk layouts.
-- `BABE3` removes the old type-bit stream and derives block type from `fg` parity.
+- `BABE-L` is the only on-disk layout supported in this branch.
 - The README describes the current codebase, not a stable public specification.
 
 ## License
