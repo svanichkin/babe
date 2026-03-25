@@ -526,6 +526,58 @@ func BenchmarkBABEEncodeQ0Patterns64Blocks8_128Tile32Q4(b *testing.B) {
 	}
 }
 
+func BenchmarkBABEDecodeQ0Patterns64Blocks16_128Tile32Q4Benchmark(b *testing.B) {
+	img := loadTestImagePrefer(b, "benchmark.jpg")
+	levels, err := blocksFromSpec("16-128")
+	if err != nil {
+		b.Fatalf("blocksFromSpec: %v", err)
+	}
+	enc := NewEncoder()
+	enc.patternCount = 64
+	enc.backgroundTile = 32
+	enc.yQuantShift = 4
+	enc.levels = levels
+	comp, err := enc.Encode(img, 0, false)
+	if err != nil {
+		b.Fatalf("Encode: %v", err)
+	}
+	dec := NewDecoder()
+	if _, err := dec.Decode(comp); err != nil {
+		b.Fatalf("warmup decode: %v", err)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := dec.Decode(comp); err != nil {
+			b.Fatalf("Decode: %v", err)
+		}
+	}
+}
+
+func BenchmarkBABEEncodeQ0Patterns64Blocks16_128Tile32Q4Benchmark(b *testing.B) {
+	img := loadTestImagePrefer(b, "benchmark.jpg")
+	levels, err := blocksFromSpec("16-128")
+	if err != nil {
+		b.Fatalf("blocksFromSpec: %v", err)
+	}
+	enc := NewEncoder()
+	enc.patternCount = 64
+	enc.backgroundTile = 32
+	enc.yQuantShift = 4
+	enc.levels = levels
+
+	if _, err := enc.Encode(img, 0, false); err != nil {
+		b.Fatalf("warmup Encode: %v", err)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := enc.Encode(img, 0, false); err != nil {
+			b.Fatalf("Encode: %v", err)
+		}
+	}
+}
+
 // -----------------------------
 // Summary table (single output)
 // -----------------------------

@@ -921,8 +921,7 @@ func (d *Decoder) decodeChromaGridOverlayIntoPix(data []byte, pos, w, h int, pix
 	invertPermutationInto(d.chromaTemp, crGrid, order)
 	copy(crGrid, d.chromaTemp)
 
-	d.decodeChromaGridPlaneValuesIntoRGBA(cbGrid, step, gridW, gridH, w, h, pix, strideBytes, 1)
-	d.decodeChromaGridPlaneValuesIntoRGBA(crGrid, step, gridW, gridH, w, h, pix, strideBytes, 2)
+	d.decodeChromaGridIntoRGB(cbGrid, crGrid, step, gridW, gridH, w, h, pix, strideBytes)
 	return pos, nil
 }
 
@@ -958,6 +957,30 @@ func (d *Decoder) fillChromaX(step, gridW, w int) {
 		d.chromaXFX[x] = uint16(fx)
 		d.chromaXFXInv[x] = uint16(256 - fx)
 	}
+}
+
+func (d *Decoder) ensureChromaBandScratch(workers, w int) []decoderChromaBandScratch {
+	if workers < 1 {
+		workers = 1
+	}
+	if len(d.chromaBands) < workers {
+		d.chromaBands = make([]decoderChromaBandScratch, workers)
+	}
+	bands := d.chromaBands[:workers]
+	for i := range bands {
+		if cap(bands[i].cbTop) < w {
+			bands[i].cbTop = make([]uint32, w)
+			bands[i].cbBot = make([]uint32, w)
+			bands[i].crTop = make([]uint32, w)
+			bands[i].crBot = make([]uint32, w)
+			continue
+		}
+		bands[i].cbTop = bands[i].cbTop[:w]
+		bands[i].cbBot = bands[i].cbBot[:w]
+		bands[i].crTop = bands[i].crTop[:w]
+		bands[i].crBot = bands[i].crBot[:w]
+	}
+	return bands
 }
 
 func (d *Decoder) decodeChromaGridPlaneValuesIntoRGBA(grid []byte, step, gridW, gridH, w, h int, pix []byte, strideBytes int, channelOffset int) {
@@ -1008,6 +1031,124 @@ func (d *Decoder) decodeChromaGridPlaneValuesIntoRGBA(grid []byte, step, gridW, 
 			pix[row+x*4] = uint8(v)
 		}
 	}
+}
+
+func (d *Decoder) decodeChromaGridIntoRGB(cbGrid, crGrid []byte, step, gridW, gridH, w, h int, pix []byte, strideBytes int) {
+	if w == 0 || h == 0 || step <= 0 {
+		return
+	}
+	d.ensureChromaX(w)
+	d.fillChromaX(step, gridW, w)
+	initYCbCrTables()
+
+	workers := 1
+	if d.Parallel && w*h >= 512*512 {
+		workers = runtime.GOMAXPROCS(0)
+		if workers < 1 {
+			workers = 1
+		}
+		maxWorkers := max(h/64, 1)
+		if workers > maxWorkers {
+			workers = maxWorkers
+		}
+	}
+	bands := d.ensureChromaBandScratch(workers, w)
+
+	render := func(yStart, yEnd int, band *decoderChromaBandScratch) {
+		for bandStart := yStart; bandStart < yEnd; {
+			cellY := bandStart / step
+			if cellY >= gridH-1 {
+				cellY = gridH - 2
+			}
+			rowBase := cellY * gridW
+			cbRow0 := cbGrid[rowBase : rowBase+gridW]
+			cbRow1 := cbGrid[rowBase+gridW : rowBase+2*gridW]
+			crRow0 := crGrid[rowBase : rowBase+gridW]
+			crRow1 := crGrid[rowBase+gridW : rowBase+2*gridW]
+			for x := 0; x < w; x++ {
+				cellX := d.chromaXCell[x]
+				fx := uint32(d.chromaXFX[x])
+				fxInv := uint32(d.chromaXFXInv[x])
+
+				band.cbTop[x] = uint32(cbRow0[cellX])*fxInv + uint32(cbRow0[cellX+1])*fx
+				band.cbBot[x] = uint32(cbRow1[cellX])*fxInv + uint32(cbRow1[cellX+1])*fx
+				band.crTop[x] = uint32(crRow0[cellX])*fxInv + uint32(crRow0[cellX+1])*fx
+				band.crBot[x] = uint32(crRow1[cellX])*fxInv + uint32(crRow1[cellX+1])*fx
+			}
+
+			bandEnd := min((cellY+1)*step, yEnd)
+			y0 := cellY * step
+			for y := bandStart; y < bandEnd; y++ {
+				fy := ((y - y0) << 8) / step
+				if fy < 0 {
+					fy = 0
+				} else if fy > 255 {
+					fy = 255
+				}
+				fyInv := 256 - fy
+				row := y * strideBytes
+				fyU := uint32(fy)
+				fyInvU := uint32(fyInv)
+				cbTop := band.cbTop
+				cbBot := band.cbBot
+				crTop := band.crTop
+				crBot := band.crBot
+				for x := 0; x < w; x++ {
+					cb := uint8((cbTop[x]*fyInvU + cbBot[x]*fyU + 32768) >> 16)
+					cr := uint8((crTop[x]*fyInvU + crBot[x]*fyU + 32768) >> 16)
+
+					o := row + x*4
+					Y := int(pix[o+0])
+					R := Y + int(crToR[cr])
+					G := Y - int(cbToG[cb]) - int(crToG[cr])
+					B := Y + int(cbToB[cb])
+
+					if R < 0 {
+						R = 0
+					} else if R > 255 {
+						R = 255
+					}
+					if G < 0 {
+						G = 0
+					} else if G > 255 {
+						G = 255
+					}
+					if B < 0 {
+						B = 0
+					} else if B > 255 {
+						B = 255
+					}
+
+					pix[o+0] = uint8(R)
+					pix[o+1] = uint8(G)
+					pix[o+2] = uint8(B)
+					pix[o+3] = 255
+				}
+			}
+			bandStart = bandEnd
+		}
+	}
+
+	if workers == 1 {
+		render(0, h, &bands[0])
+		return
+	}
+
+	rowsPerWorker := (h + workers - 1) / workers
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		y0 := i * rowsPerWorker
+		if y0 >= h {
+			break
+		}
+		y1 := min(y0+rowsPerWorker, h)
+		wg.Add(1)
+		go func(worker, y0, y1 int) {
+			defer wg.Done()
+			render(y0, y1, &bands[worker])
+		}(i, y0, y1)
+	}
+	wg.Wait()
 }
 
 func (d *Decoder) decodeChromaGridPlaneValuesIntoPlane(grid []byte, step, gridW, gridH, w, h int, plane []uint8, stride int) {
@@ -2605,22 +2746,7 @@ func drawBlockIntoPix(pix []byte, strideBytes, imgW, imgH int, x0, y0, bw, bh in
 	if err != nil {
 		return err
 	}
-	visW, visH := visibleBlockDims(imgW, imgH, x0, y0, bw, bh)
-	for yy := 0; yy < visH; yy++ {
-		row := (y0+yy)*strideBytes + x0*4 + channelOffset
-		for xx := 0; xx < visW; xx++ {
-			val := bg
-			if testPatternBit(pattern, bw, bh, xx, yy) {
-				val = fg
-			}
-			o := row + xx*4
-			if o < 0 || o >= len(pix) {
-				return fmt.Errorf("drawBlockIntoPix: index out of range")
-			}
-			pix[o] = val
-		}
-	}
-	return nil
+	return drawBlockIntoPixMask(pix, strideBytes, imgW, imgH, x0, y0, bw, bh, pattern, fg, bg, channelOffset)
 }
 
 // drawBlockIntoPixFull assumes the block is fully inside the image.
@@ -2629,16 +2755,7 @@ func drawBlockIntoPixFull(pix []byte, strideBytes, imgW int, x0, y0, bw, bh int,
 	if err != nil {
 		return err
 	}
-	for yy := 0; yy < bh; yy++ {
-		row := (y0+yy)*strideBytes + x0*4 + channelOffset
-		for xx := 0; xx < bw; xx++ {
-			val := bg
-			if testPatternBit(pattern, bw, bh, xx, yy) {
-				val = fg
-			}
-			pix[row+xx*4] = val
-		}
-	}
+	drawBlockIntoPixFullMask(pix, strideBytes, x0, y0, bw, bh, pattern, fg, bg, channelOffset)
 	return nil
 }
 
@@ -2984,11 +3101,19 @@ type Decoder struct {
 	chromaXCell  []int
 	chromaXFX    []uint16
 	chromaXFXInv []uint16
+	chromaBands  []decoderChromaBandScratch
 
 	payload []byte
 	zdec    *zstd.Decoder
 
 	dst *image.RGBA
+}
+
+type decoderChromaBandScratch struct {
+	cbTop []uint32
+	cbBot []uint32
+	crTop []uint32
+	crBot []uint32
 }
 
 func NewDecoder() *Decoder {
@@ -3007,11 +3132,16 @@ type blockDesc struct {
 
 func drawBlockIntoPixMask(pix []byte, strideBytes, imgW, imgH int, x0, y0, bw, bh int, pattern patternMask, fg, bg uint8, channelOffset int) error {
 	visW, visH := visibleBlockDims(imgW, imgH, x0, y0, bw, bh)
+	total := bw * bh
 	for yy := 0; yy < visH; yy++ {
 		row := (y0+yy)*strideBytes + x0*4 + channelOffset
+		shift := total - 1 - yy*bw
+		word := shift >> 6
+		bit := uint(shift & 63)
+		wordVal := pattern[word]
 		for xx := 0; xx < visW; xx++ {
 			val := bg
-			if testPatternBit(pattern, bw, bh, xx, yy) {
+			if ((wordVal >> bit) & 1) != 0 {
 				val = fg
 			}
 			o := row + xx*4
@@ -3019,20 +3149,43 @@ func drawBlockIntoPixMask(pix []byte, strideBytes, imgW, imgH int, x0, y0, bw, b
 				return fmt.Errorf("drawBlockIntoPixMask: index out of range")
 			}
 			pix[o] = val
+			if bit == 0 {
+				if word > 0 {
+					word--
+					wordVal = pattern[word]
+				}
+				bit = 63
+			} else {
+				bit--
+			}
 		}
 	}
 	return nil
 }
 
 func drawBlockIntoPixFullMask(pix []byte, strideBytes int, x0, y0, bw, bh int, pattern patternMask, fg, bg uint8, channelOffset int) {
+	total := bw * bh
 	for yy := 0; yy < bh; yy++ {
 		row := (y0+yy)*strideBytes + x0*4 + channelOffset
+		shift := total - 1 - yy*bw
+		word := shift >> 6
+		bit := uint(shift & 63)
+		wordVal := pattern[word]
 		for xx := 0; xx < bw; xx++ {
 			val := bg
-			if testPatternBit(pattern, bw, bh, xx, yy) {
+			if ((wordVal >> bit) & 1) != 0 {
 				val = fg
 			}
 			pix[row+xx*4] = val
+			if bit == 0 {
+				if word > 0 {
+					word--
+					wordVal = pattern[word]
+				}
+				bit = 63
+			} else {
+				bit--
+			}
 		}
 	}
 }
@@ -3703,6 +3856,7 @@ func (d *Decoder) Decode(compData []byte) (*image.RGBA, error) {
 	}
 
 	var errY, errCb, errCr error
+	rgbReady := false
 	parallelDraw := d.Parallel && !hasCb && !hasCr
 	if hasChromaGrid {
 		errY = decodeChannelToPix(ySeg, imgW, imgH, levels, d.patternCount, pix, stride, 0, parallelDraw)
@@ -3714,6 +3868,7 @@ func (d *Decoder) Decode(compData []byte) (*image.RGBA, error) {
 			return nil, err
 		}
 		pos = nextPos
+		rgbReady = true
 	} else if d.Parallel && imgW*imgH >= 256*256 {
 		var wg sync.WaitGroup
 		wg.Add(1)
@@ -3747,32 +3902,34 @@ func (d *Decoder) Decode(compData []byte) (*image.RGBA, error) {
 		return nil, errCr
 	}
 
-	parallelRGB := d.Parallel && imgW*imgH >= 512*512
-	if parallelRGB {
-		workers := runtime.GOMAXPROCS(0)
-		if workers < 1 {
-			workers = 1
-		}
-		maxWorkers := max(imgH/128, 1)
-		if workers > maxWorkers {
-			workers = maxWorkers
-		}
-		rowsPerWorker := (imgH + workers - 1) / workers
-
-		var wgRGB sync.WaitGroup
-		for i := 0; i < workers; i++ {
-			y0 := i * rowsPerWorker
-			if y0 >= imgH {
-				break
+	if !rgbReady {
+		parallelRGB := d.Parallel && imgW*imgH >= 512*512
+		if parallelRGB {
+			workers := runtime.GOMAXPROCS(0)
+			if workers < 1 {
+				workers = 1
 			}
-			y1 := min(y0+rowsPerWorker, imgH)
+			maxWorkers := max(imgH/128, 1)
+			if workers > maxWorkers {
+				workers = maxWorkers
+			}
+			rowsPerWorker := (imgH + workers - 1) / workers
 
-			wgRGB.Add(1)
-			go ycbcrToRGBStripe(pix, stride, imgW, y0, y1, hasCb, hasCr, &wgRGB)
+			var wgRGB sync.WaitGroup
+			for i := 0; i < workers; i++ {
+				y0 := i * rowsPerWorker
+				if y0 >= imgH {
+					break
+				}
+				y1 := min(y0+rowsPerWorker, imgH)
+
+				wgRGB.Add(1)
+				go ycbcrToRGBStripe(pix, stride, imgW, y0, y1, hasCb, hasCr, &wgRGB)
+			}
+			wgRGB.Wait()
+		} else {
+			ycbcrToRGB(pix, stride, imgW, 0, imgH, hasCb, hasCr)
 		}
-		wgRGB.Wait()
-	} else {
-		ycbcrToRGB(pix, stride, imgW, 0, imgH, hasCb, hasCr)
 	}
 
 	return dst, nil
