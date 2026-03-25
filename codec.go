@@ -56,6 +56,8 @@ const (
 // encodeBW toggles grayscale mode; when true, only the Y channel is stored.
 var encodeBW bool
 var encodeLog bool
+var lastYFGVals []uint8
+var lastYBGVals []uint8
 var lastPatternSizesUsed map[[2]int]struct{}
 var lastPatternUsageByChannel map[string]map[[2]int][]patternUsageEntry
 
@@ -70,12 +72,17 @@ var forcedBlockSizes []int
 var forcedSpreadFactors []float64
 var activeColorQuantShift int
 var activeBackgroundTile int
+var lastEncodeStructureReport string
 
 // Quality mapping:
 // - quality is in [0..100]
 // - block sizes stay fixed unless they are explicitly overridden.
 
 var defaultBlockLevels = [...]int{1, 2}
+
+func LastYFGVals() []uint8              { return append([]uint8(nil), lastYFGVals...) }
+func LastYBGVals() []uint8              { return append([]uint8(nil), lastYBGVals...) }
+func LastEncodeStructureReport() string { return lastEncodeStructureReport }
 
 // setBlocksForQuality configures the active block hierarchy for a quality in [0..100].
 // Quality affects only the spread heuristics; block sizes remain fixed unless forcedBlockSizes is set.
@@ -896,6 +903,67 @@ func decodeRingDeltaBytesInPlace(data []byte) {
 	}
 }
 
+func powerOfTwoCeil(v int) int {
+	if v <= 0 {
+		return 1
+	}
+	n := 1
+	for n < v {
+		n <<= 1
+	}
+	return n
+}
+
+// hilbertIndices returns raster indices (y*gridW+x) in Hilbert order clipped to gridW x gridH.
+func hilbertIndices(gridW, gridH int) []int {
+	n := powerOfTwoCeil(max(gridW, gridH))
+	total := gridW * gridH
+	order := make([]int, 0, total)
+	for i := 0; len(order) < total; i++ {
+		x, y := hilbertXY(i, n)
+		if x < gridW && y < gridH {
+			order = append(order, y*gridW+x)
+		}
+	}
+	return order
+}
+
+// hilbertXY maps distance d to (x,y) for an n x n Hilbert curve, n is power of two.
+func hilbertXY(d, n int) (int, int) {
+	x, y := 0, 0
+	for s := 1; s < n; s <<= 1 {
+		rx := (d / 2) & 1
+		ry := (d ^ rx) & 1
+		if ry == 0 {
+			if rx == 1 {
+				x = s - 1 - x
+				y = s - 1 - y
+			}
+			x, y = y, x
+		}
+		x += s * rx
+		y += s * ry
+		d >>= 2
+	}
+	return x, y
+}
+
+func applyPermutation(src []byte, order []int) []byte {
+	dst := make([]byte, len(order))
+	for i, idx := range order {
+		dst[i] = src[idx]
+	}
+	return dst
+}
+
+func invertPermutation(src []byte, order []int) []byte {
+	dst := make([]byte, len(order))
+	for i, idx := range order {
+		dst[idx] = src[i]
+	}
+	return dst
+}
+
 func encodeChromaGridOverlay(dst *bytes.Buffer, cbPlane, crPlane []uint8, w, h, step int) {
 	if step <= 0 {
 		step = 16
@@ -923,8 +991,18 @@ func encodeChromaGridOverlay(dst *bytes.Buffer, cbPlane, crPlane []uint8, w, h, 
 		}
 	}
 	gridStart := cbGridEnd - gridW*gridH
-	encodeRingDeltaBytesInPlace(dst.Bytes()[gridStart:cbGridEnd])
-	encodeRingDeltaBytesInPlace(dst.Bytes()[cbGridEnd : cbGridEnd+gridW*gridH])
+	cbGrid := dst.Bytes()[gridStart:cbGridEnd]
+	crGrid := dst.Bytes()[cbGridEnd : cbGridEnd+gridW*gridH]
+
+	order := hilbertIndices(gridW, gridH)
+	cbHilb := applyPermutation(cbGrid, order)
+	crHilb := applyPermutation(crGrid, order)
+	encodeRingDeltaBytesInPlace(cbHilb)
+	encodeRingDeltaBytesInPlace(crHilb)
+
+	// overwrite payload with permuted+delta data
+	copy(cbGrid, cbHilb)
+	copy(crGrid, crHilb)
 }
 
 func decodeChromaGridOverlay(data []byte, pos, w, h int) ([]uint8, []uint8, int, error) {
@@ -950,8 +1028,11 @@ func decodeChromaGridOverlay(data []byte, pos, w, h int) ([]uint8, []uint8, int,
 	pos += nodeCount
 	crGrid := append([]byte(nil), data[pos:pos+nodeCount]...)
 	pos += nodeCount
+	order := hilbertIndices(gridW, gridH)
 	decodeRingDeltaBytesInPlace(cbGrid)
 	decodeRingDeltaBytesInPlace(crGrid)
+	cbGrid = invertPermutation(cbGrid, order)
+	crGrid = invertPermutation(crGrid, order)
 	cbPlane := decodeChromaGridPlaneValues(cbGrid, step, gridW, gridH, w, h)
 	crPlane := decodeChromaGridPlaneValues(crGrid, step, gridW, gridH, w, h)
 	return cbPlane, crPlane, pos, nil
@@ -2313,6 +2394,8 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 	}
 	lastPatternSizesUsed = make(map[[2]int]struct{})
 	lastPatternUsageByChannel = make(map[string]map[[2]int][]patternUsageEntry)
+	lastYFGVals = lastYFGVals[:0]
+	lastYBGVals = lastYBGVals[:0]
 
 	if e.Parallel {
 		// Encode channels in parallel; scratch is per-channel so it's safe to reuse.
@@ -2329,6 +2412,10 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 			res := results[i]
 			if res.err != nil {
 				return nil, res.err
+			}
+			if encodeLog && channels[i].id == chY {
+				lastYFGVals = append(lastYFGVals[:0], res.fgVals...)
+				lastYBGVals = append(lastYBGVals[:0], res.bgVals...)
 			}
 
 			// number of blocks for this channel
@@ -2384,6 +2471,10 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 			blockCount, sizeBytes, patternBytes, fgVals, bgVals, patternSizes, err := e.encodeChannelReuse(ch.id, ch.plane, w, w4, h4, fullW, fullH, useMacro, scratch, sharedPatternIndexes)
 			if err != nil {
 				return nil, err
+			}
+			if encodeLog && ch.id == chY {
+				lastYFGVals = append(lastYFGVals[:0], fgVals...)
+				lastYBGVals = append(lastYBGVals[:0], bgVals...)
 			}
 
 			if err := writeU32BE(e.bw, blockCount); err != nil {

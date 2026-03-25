@@ -125,6 +125,109 @@ func writePatternUsageSheets(basePath string) error {
 	return nil
 }
 
+func writeByteGraphPNG(path string, values []uint8) error {
+	if len(values) == 0 {
+		return nil
+	}
+	w := len(values)
+	h := 256
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.Set(x, y, color.RGBA{255, 255, 255, 255})
+		}
+	}
+	prevY := h - 1 - int(values[0])
+	if prevY < 0 {
+		prevY = 0
+	} else if prevY >= h {
+		prevY = h - 1
+	}
+	img.Set(0, prevY, color.RGBA{0, 0, 0, 255})
+	for x := 1; x < w; x++ {
+		y := h - 1 - int(values[x])
+		if y < 0 {
+			y = 0
+		} else if y >= h {
+			y = h - 1
+		}
+		y0, y1 := prevY, y
+		if y0 > y1 {
+			y0, y1 = y1, y0
+		}
+		for yy := y0; yy <= y1; yy++ {
+			img.Set(x, yy, color.RGBA{0, 0, 0, 255})
+		}
+		prevY = y
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := png.Encode(f, img); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "[log] wrote %s\n", path)
+	return nil
+}
+
+func writeDualByteGraphPNG(path string, fg, bg []uint8) error {
+	if len(fg) == 0 || len(bg) == 0 {
+		return nil
+	}
+	n := len(fg)
+	if len(bg) < n {
+		n = len(bg)
+	}
+	if n == 0 {
+		return nil
+	}
+	w := n
+	h := 256
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	// white background
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.Set(x, y, color.RGBA{255, 255, 255, 255})
+		}
+	}
+	for x := 0; x < w; x++ {
+		yFG := h - 1 - int(fg[x])
+		yBG := h - 1 - int(bg[x])
+		if yFG < 0 {
+			yFG = 0
+		} else if yFG >= h {
+			yFG = h - 1
+		}
+		if yBG < 0 {
+			yBG = 0
+		} else if yBG >= h {
+			yBG = h - 1
+		}
+		y0, y1 := yFG, yBG
+		if y0 > y1 {
+			y0, y1 = y1, y0
+		}
+		for yy := y0; yy <= y1; yy++ {
+			img.Set(x, yy, color.RGBA{0, 0, 0, 255})
+		}
+		img.Set(x, yFG, color.RGBA{0, 120, 255, 255}) // fg endpoint
+		img.Set(x, yBG, color.RGBA{255, 0, 0, 255})   // bg endpoint
+	}
+
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := png.Encode(f, img); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "[log] wrote %s\n", path)
+	return nil
+}
+
 type sweepResult struct {
 	Quality     int
 	Blocks      string
@@ -851,6 +954,13 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount
 		}
 		if err := writePatternSheets(base); err != nil {
 			return err
+		}
+		fg := LastYFGVals()
+		bg := LastYBGVals()
+		if len(fg) > 0 && len(bg) > 0 {
+			if err := writeDualByteGraphPNG(base+".y-fg-bg.png", fg, bg); err != nil {
+				return err
+			}
 		}
 	}
 
