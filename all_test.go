@@ -35,21 +35,15 @@ func makeTestImage(w, h int) *image.RGBA {
 	return img
 }
 
-func TestSetBlocksForQuality_KeepsDefaultBlocks(t *testing.T) {
-	prevLevels := append([]int(nil), blockLevels...)
-	prevQuality := encQuality
-	defer func() {
-		encQuality = prevQuality
-		blockLevels = prevLevels
-	}()
-
+func TestDefaultLevels(t *testing.T) {
 	for _, quality := range []int{0, 15, 30, 45, 60, 75, 90, 100} {
-		if err := setBlocksForQuality(quality); err != nil {
-			t.Fatalf("setBlocksForQuality(%d): %v", quality, err)
+		enc := NewEncoder()
+		img := makeTestImage(8, 8)
+		if _, err := enc.Encode(img, quality, false); err != nil {
+			t.Fatalf("Encode(quality=%d): %v", quality, err)
 		}
-		levels := activeLevels()
-		if len(levels) != 2 || levels[0] != 1 || levels[1] != 2 {
-			t.Fatalf("quality %d: got levels %v want [1 2]", quality, levels)
+		if len(enc.levels) != 2 || enc.levels[0] != 1 || enc.levels[1] != 2 {
+			t.Fatalf("quality %d: got levels %v want [1 2]", quality, enc.levels)
 		}
 	}
 }
@@ -113,13 +107,9 @@ func TestEncodeDecode_RoundTrip(t *testing.T) {
 func TestEncodeDecode_RoundTrip_BackgroundTile(t *testing.T) {
 	src := makeTestImage(64, 48)
 
-	prevBackgroundTile := activeBackgroundTile
-	activeBackgroundTile = 10
-	defer func() {
-		activeBackgroundTile = prevBackgroundTile
-	}()
-
-	comp, err := Encode(src, 70, false)
+	enc := NewEncoder()
+	enc.backgroundTile = 10
+	comp, err := enc.Encode(src, 70, false)
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
@@ -164,15 +154,13 @@ func TestEncode_ImageTooSmall(t *testing.T) {
 func TestEncodeDecode_RoundTrip_BlockRange(t *testing.T) {
 	src := makeTestImage(64, 64)
 
-	if err := setBlocksFromSpec("2-64"); err != nil {
-		t.Fatalf("setBlocksFromSpec: %v", err)
+	levels, err := blocksFromSpec("2-64")
+	if err != nil {
+		t.Fatalf("blocksFromSpec: %v", err)
 	}
-	defer func() {
-		forcedBlockSizes = nil
-		blockLevels = nil
-	}()
-
-	comp, err := Encode(src, 70, false)
+	enc := NewEncoder()
+	enc.levels = levels
+	comp, err := enc.Encode(src, 70, false)
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
@@ -189,15 +177,13 @@ func TestEncodeDecode_RoundTrip_BlockRange(t *testing.T) {
 func TestEncodeDecode_RoundTrip_SingleBlockLevel(t *testing.T) {
 	src := makeTestImage(64, 64)
 
-	if err := setBlocksFromSpec("16-16"); err != nil {
-		t.Fatalf("setBlocksFromSpec: %v", err)
+	levels, err := blocksFromSpec("16-16")
+	if err != nil {
+		t.Fatalf("blocksFromSpec: %v", err)
 	}
-	defer func() {
-		forcedBlockSizes = nil
-		blockLevels = nil
-	}()
-
-	comp, err := Encode(src, 0, true)
+	enc := NewEncoder()
+	enc.levels = levels
+	comp, err := enc.Encode(src, 0, true)
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}

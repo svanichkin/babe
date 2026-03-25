@@ -63,6 +63,7 @@ func main() {
 	layersOut := false
 	patternCount := defaultPatternCount
 	blockSpec := ""
+	var levels []int
 	tile := 0
 	yQuantShift := 0
 	for i := 0; i < len(encodeArgs); i++ {
@@ -141,15 +142,14 @@ func main() {
 
 	outPath := base + ".babe"
 	if blockSpec != "" {
-		if err := setBlocksFromSpec(blockSpec); err != nil {
+		parsed, err := blocksFromSpec(blockSpec)
+		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+		levels = parsed
 	}
-	defer func() {
-		forcedBlockSizes = nil
-	}()
-	if err := encodeToBabe(inputPath, outPath, quality, bwmode, patternCount, yQuantShift, tile); err != nil {
+	if err := encodeToBabe(inputPath, outPath, quality, bwmode, patternCount, yQuantShift, tile, levels); err != nil {
 		fmt.Fprintln(os.Stderr, "encode error:", err)
 		os.Exit(1)
 	}
@@ -167,7 +167,7 @@ func main() {
 	}
 }
 
-func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount int, yQuantShift int, tile int) error {
+func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount int, yQuantShift int, tile int, levels []int) error {
 	info, err := os.Stat(inPath)
 	if err != nil {
 		return err
@@ -186,15 +186,14 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount
 	}
 
 	start := time.Now()
-	activePatternCount = patternCount
-	activeYQuantShift = yQuantShift
-	activeBackgroundTile = tile
-	defer func() {
-		activePatternCount = defaultPatternCount
-		activeYQuantShift = 0
-		activeBackgroundTile = 0
-	}()
-	enc, err := Encode(img, quality, bwmode)
+	enc := NewEncoder()
+	enc.patternCount = patternCount
+	enc.yQuantShift = yQuantShift
+	enc.backgroundTile = tile
+	if len(levels) > 0 {
+		enc.levels = append([]int(nil), levels...)
+	}
+	encBytes, err := enc.Encode(img, quality, bwmode)
 	if err != nil {
 		return err
 	}
@@ -206,10 +205,10 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount
 	}
 	defer out.Close()
 
-	if _, err := out.Write(enc); err != nil {
+	if _, err := out.Write(encBytes); err != nil {
 		return err
 	}
-	encSize := int64(len(enc))
+	encSize := int64(len(encBytes))
 	ratio := float64(encSize) / float64(inSize)
 
 	formatSize := func(size int64) string {
