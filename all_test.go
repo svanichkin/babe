@@ -79,15 +79,13 @@ func TestEncodeDecode_RoundTrip(t *testing.T) {
 	src := makeTestImage(64, 48)
 
 	for _, tc := range []struct {
-		name       string
-		quality    int
-		bw         bool
-		postfilter bool
+		name    string
+		quality int
+		bw      bool
 	}{
-		{name: "color_no_postfilter", quality: 70, bw: false, postfilter: false},
-		{name: "color_postfilter", quality: 70, bw: false, postfilter: true},
-		{name: "color_no_postfilter_q80", quality: 80, bw: false, postfilter: false},
-		{name: "bw_no_postfilter", quality: 70, bw: true, postfilter: false},
+		{name: "color", quality: 70, bw: false},
+		{name: "color_q80", quality: 80, bw: false},
+		{name: "bw", quality: 70, bw: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			comp, err := Encode(src, tc.quality, tc.bw)
@@ -98,7 +96,7 @@ func TestEncodeDecode_RoundTrip(t *testing.T) {
 				t.Fatalf("Encode returned empty payload")
 			}
 
-			dec, err := Decode(comp, tc.postfilter)
+			dec, err := NewDecoder().Decode(comp)
 			if err != nil {
 				t.Fatalf("Decode: %v", err)
 			}
@@ -129,7 +127,7 @@ func TestEncodeDecode_RoundTrip_BackgroundTile(t *testing.T) {
 		t.Fatalf("Encode returned empty payload")
 	}
 
-	dec, err := Decode(comp, false)
+	dec, err := NewDecoder().Decode(comp)
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
@@ -179,7 +177,7 @@ func TestEncodeDecode_RoundTrip_BlockRange(t *testing.T) {
 		t.Fatalf("Encode: %v", err)
 	}
 
-	dec, err := Decode(comp, false)
+	dec, err := NewDecoder().Decode(comp)
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
@@ -204,7 +202,7 @@ func TestEncodeDecode_RoundTrip_SingleBlockLevel(t *testing.T) {
 		t.Fatalf("Encode: %v", err)
 	}
 
-	dec, err := Decode(comp, false)
+	dec, err := NewDecoder().Decode(comp)
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
@@ -350,7 +348,7 @@ func BenchmarkCodecs(b *testing.B) {
 			encTime := time.Since(startEnc)
 
 			startDec := time.Now()
-			if _, err := dec.Decode(encBytes, false); err != nil {
+			if _, err := dec.Decode(encBytes); err != nil {
 				b.Fatalf("decode failed: %v", err)
 			}
 			decTime := time.Since(startDec)
@@ -367,7 +365,7 @@ func BenchmarkCodecs(b *testing.B) {
 				return buf.Bytes(), nil
 			},
 			func(encBytes []byte) error {
-				_, err := dec.Decode(encBytes, false)
+				_, err := dec.Decode(encBytes)
 				return err
 			},
 		)
@@ -433,7 +431,7 @@ func benchmarkBABEQuality(b *testing.B, quality int, bw bool) {
 		encTime := time.Since(startEnc)
 
 		startDec := time.Now()
-		if _, err := dec.Decode(encBytes, false); err != nil {
+		if _, err := dec.Decode(encBytes); err != nil {
 			b.Fatalf("decode failed: %v", err)
 		}
 		decTime := time.Since(startDec)
@@ -450,7 +448,7 @@ func benchmarkBABEQuality(b *testing.B, quality int, bw bool) {
 			return buf.Bytes(), nil
 		},
 		func(encBytes []byte) error {
-			_, err := dec.Decode(encBytes, false)
+			_, err := dec.Decode(encBytes)
 			return err
 		},
 	)
@@ -586,7 +584,7 @@ func benchBABE(img image.Image) summaryBenchFn {
 			b.Fatalf("encode failed: %v", err)
 		}
 		encBytes := buf.Bytes()
-		if _, err := dec.Decode(encBytes, false); err != nil {
+		if _, err := dec.Decode(encBytes); err != nil {
 			b.Fatalf("decode failed: %v", err)
 		}
 		b.ResetTimer()
@@ -602,7 +600,7 @@ func benchBABE(img image.Image) summaryBenchFn {
 			sizeB = len(encBytes)
 
 			startDec := time.Now()
-			if _, err := dec.Decode(encBytes, false); err != nil {
+			if _, err := dec.Decode(encBytes); err != nil {
 				b.Fatalf("decode failed: %v", err)
 			}
 			decTotal += time.Since(startDec)

@@ -246,7 +246,7 @@ func decodeBabe(inPath, outPath string, splitChannels bool) error {
 	compSize := len(compData)
 
 	start := time.Now()
-	dec, err := Decode(compData, false)
+	dec, err := NewDecoder().Decode(compData)
 	if err != nil {
 		return err
 	}
