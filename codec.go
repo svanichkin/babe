@@ -54,14 +54,10 @@ var encodeBW bool
 
 const (
 	defaultPatternCount = 64
-	patternSetBasic     = "basic"
 )
 
 var activePatternCount = defaultPatternCount
-var activeSharedPatternIndexes bool
 var forcedBlockSizes []int
-var forcedSpreadFactors []float64
-var activeColorQuantShift int
 var activeBackgroundTile int
 
 // Quality mapping:
@@ -150,25 +146,6 @@ func setBlocksFromSpec(spec string) error {
 	return nil
 }
 
-func setSpreadFactorsFromSpec(spec string) error {
-	parts := strings.Split(spec, ",")
-	levels := activeLevels()
-	if len(parts) != len(levels) {
-		return fmt.Errorf("spreads count must match block levels count: got %d values for levels %v", len(parts), levels)
-	}
-
-	factors := make([]float64, 0, len(parts))
-	for _, part := range parts {
-		v, err := strconv.ParseFloat(strings.TrimSpace(part), 64)
-		if err != nil || v < 0 {
-			return fmt.Errorf("spreads must contain non-negative numbers like 1.2,0.8,0.2,0.1")
-		}
-		factors = append(factors, v)
-	}
-	forcedSpreadFactors = append(forcedSpreadFactors[:0], factors...)
-	return nil
-}
-
 func activeLevels() []int {
 	if len(blockLevels) > 0 {
 		if len(blockLevels) == 2 && blockLevels[0] == blockLevels[1] {
@@ -193,18 +170,7 @@ func spreadForBlockSize(quality, blockSize int) int32 {
 		return 0
 	}
 
-	scale := 1.0
-	levels := activeLevels()
-	for i, level := range levels {
-		if level == blockSize {
-			if i < len(forcedSpreadFactors) {
-				scale = forcedSpreadFactors[i]
-			}
-			break
-		}
-	}
-
-	spread := base * scale
+	spread := base
 	if spread <= 0 {
 		return 0
 	}
@@ -254,19 +220,7 @@ func invertPatternBits(bits patternMask, bw, bh int) patternMask {
 }
 
 func quantizeColor(v uint8) uint8 {
-	if activeColorQuantShift <= 0 {
-		return v
-	}
-	if activeColorQuantShift >= 8 {
-		return 128
-	}
-	step := 1 << activeColorQuantShift
-	base := int(v>>activeColorQuantShift) << activeColorQuantShift
-	center := base + step/2
-	if center > 255 {
-		center = 255
-	}
-	return uint8(center)
+	return v
 }
 
 // bitWriter writes bits to a bytes.Buffer (msb-first in each byte).
@@ -1110,13 +1064,6 @@ type patternToken struct {
 	has  bool
 }
 
-type patternBlockKey struct {
-	x  int
-	y  int
-	bw int
-	bh int
-}
-
 var (
 	fixedPatternCacheMu sync.RWMutex
 	fixedPatternCache   = map[string][]patternMask{}
@@ -1653,7 +1600,7 @@ func encodeBlockFlagIntoFG(fg uint8, isPattern bool, bg uint8) uint8 {
 
 func encodeChannelWorker(e *Encoder, dst *encodeChannelResult, channelID int, plane []uint8, stride, w4, h4, fullW, fullH int, useMacro bool, scratch *encoderChannelScratch, wg *sync.WaitGroup) {
 	defer wg.Done()
-	blockCount, sizeBytes, patternBytes, fgVals, bgVals, err := e.encodeChannelReuse(channelID, plane, stride, w4, h4, fullW, fullH, useMacro, scratch, nil)
+	blockCount, sizeBytes, patternBytes, fgVals, bgVals, err := e.encodeChannelReuse(channelID, plane, stride, w4, h4, fullW, fullH, useMacro, scratch)
 	dst.blockCount = blockCount
 	dst.sizeBytes = sizeBytes
 	dst.patternBytes = patternBytes
@@ -1718,7 +1665,7 @@ func (e *Encoder) ensurePlanes(w, h int) {
 	e.crPlane = e.crPlane[:n]
 }
 
-func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h4, fullW, fullH int, useMacro bool, scratch *encoderChannelScratch, sharedPatternIndexes map[patternBlockKey]uint64) (uint32, []byte, []byte, []uint8, []uint8, error) {
+func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h4, fullW, fullH int, useMacro bool, scratch *encoderChannelScratch) (uint32, []byte, []byte, []uint8, []uint8, error) {
 	levels := activeLevels()
 	smallBlock := levels[0]
 	topBlock := levels[len(levels)-1]
@@ -1781,17 +1728,6 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 	}
 	recordPatternToken := func(x, y int, bits patternMask, bw, bh int) {
 		tok := patternToken{bits: clonePatternMask(bits), bw: bw, bh: bh, x: x, y: y}
-		if activeSharedPatternIndexes && sharedPatternIndexes != nil {
-			key := patternBlockKey{x: x, y: y, bw: bw, bh: bh}
-			if channelID == chY {
-				tok.idx = nearestPatternIndex(bits, bw, bh)
-				tok.has = true
-				sharedPatternIndexes[key] = tok.idx
-			} else if idx, ok := sharedPatternIndexes[key]; ok {
-				tok.idx = idx
-				tok.has = true
-			}
-		}
 		patternTokens = append(patternTokens, tok)
 	}
 
@@ -2056,7 +1992,7 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 	h := b.Dy()
 
 	e.ensurePlanes(w, h)
-	if e.Parallel && !activeSharedPatternIndexes {
+	if e.Parallel {
 		extractYCbCrPlanesInto(img, e.yPlane, e.cbPlane, e.crPlane)
 	} else {
 		extractYCbCrPlanesIntoSerial(img, e.yPlane, e.cbPlane, e.crPlane)
@@ -2187,14 +2123,10 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 		}
 	} else {
 		// Encode channels sequentially (no additional goroutines).
-		var sharedPatternIndexes map[patternBlockKey]uint64
-		if activeSharedPatternIndexes {
-			sharedPatternIndexes = make(map[patternBlockKey]uint64)
-		}
 		for i := 0; i < chCount; i++ {
 			ch := channels[i]
 			scratch := &e.ch[ch.id]
-			blockCount, sizeBytes, patternBytes, fgVals, bgVals, err := e.encodeChannelReuse(ch.id, ch.plane, w, w4, h4, fullW, fullH, useMacro, scratch, sharedPatternIndexes)
+			blockCount, sizeBytes, patternBytes, fgVals, bgVals, err := e.encodeChannelReuse(ch.id, ch.plane, w, w4, h4, fullW, fullH, useMacro, scratch)
 			if err != nil {
 				return nil, err
 			}

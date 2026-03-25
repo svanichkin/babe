@@ -124,7 +124,6 @@ func main() {
 	}
 	defer func() {
 		forcedBlockSizes = nil
-		forcedSpreadFactors = nil
 	}()
 	if err := encodeToBabe(inputPath, outPath, quality, bwmode, patternCount, tile); err != nil {
 		fmt.Fprintln(os.Stderr, "encode error:", err)
@@ -167,7 +166,6 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount
 	activeBackgroundTile = tile
 	defer func() {
 		activePatternCount = defaultPatternCount
-		activeSharedPatternIndexes = false
 		activeBackgroundTile = 0
 	}()
 	enc, err := Encode(img, quality, bwmode)
