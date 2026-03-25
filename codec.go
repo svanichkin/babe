@@ -1609,17 +1609,22 @@ func encodeBlockPlaneReuse(plane []uint8, stride, height, x0, y0, bw, bh int, sc
 		return fg, bg, mask, true, nil
 	}
 
-	// Read the block once into a small buffer.
+	visibleCount := visW * visH
+	if visibleCount <= 0 {
+		return 0, 0, nil, false, fmt.Errorf("encodeBlockPlane: empty visible block")
+	}
+
+	// Read the visible part of the block once into a small buffer.
 	var vals []uint8
-	if total <= 64 {
+	if visibleCount <= 64 {
 		var valsBuf [64]uint8
-		vals = valsBuf[:total]
+		vals = valsBuf[:visibleCount]
 		_ = valsBuf
 	} else {
-		if cap(scratch.valsBuf) < total {
-			scratch.valsBuf = make([]uint8, total)
+		if cap(scratch.valsBuf) < visibleCount {
+			scratch.valsBuf = make([]uint8, visibleCount)
 		}
-		scratch.valsBuf = scratch.valsBuf[:total]
+		scratch.valsBuf = scratch.valsBuf[:visibleCount]
 		vals = scratch.valsBuf
 	}
 
@@ -1634,7 +1639,7 @@ func encodeBlockPlaneReuse(plane []uint8, stride, height, x0, y0, bw, bh int, sc
 			i++
 		}
 	}
-	thr := uint8(sum / uint64(total))
+	thr := uint8(sum / uint64(visibleCount))
 
 	var fgSum, bgSum uint64
 	var fgCnt, bgCnt uint32
@@ -1647,19 +1652,23 @@ func encodeBlockPlaneReuse(plane []uint8, stride, height, x0, y0, bw, bh int, sc
 	for i := range mask {
 		mask[i] = 0
 	}
-	for i, v := range vals {
-		isFg := v >= thr
-		if isFg {
-			setPatternBit(mask, total-1-i)
-			fgSum += uint64(v)
-			fgCnt++
-		} else {
-			bgSum += uint64(v)
-			bgCnt++
+	i = 0
+	for yy := 0; yy < visH; yy++ {
+		for xx := 0; xx < visW; xx++ {
+			v := vals[i]
+			if v >= thr {
+				setPatternBit(mask, total-1-(yy*bw+xx))
+				fgSum += uint64(v)
+				fgCnt++
+			} else {
+				bgSum += uint64(v)
+				bgCnt++
+			}
+			i++
 		}
 	}
 
-	avg := uint8(sum / uint64(total))
+	avg := uint8(sum / uint64(visibleCount))
 	if fgCnt == 0 || bgCnt == 0 {
 		return avg, avg, nil, false, nil
 	}
