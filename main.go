@@ -18,7 +18,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 || len(os.Args) > 16 {
-		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png] [-patterns=N] [-blocks=A,B|A-B] [-spreads=S1,S2,...] [-color-quant=N] [-pattern-set=basic] [-pattern-index=per-channel|shared] [-tile N]\n  babe <input.babe> [-postfilter] [-layers]\n  (bw flag, decoded.png, -patterns=N, -blocks=A,B|A-B, -spreads=S1,S2,..., -color-quant=N, -pattern-set=basic, -pattern-index=..., -tile N can appear anywhere after quality)\n")
+		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png] [-patterns=N] [-blocks=A,B|A-B] [-tile N]\n  babe <input.babe> [-layers]\n  (bw flag, decoded.png, -patterns=N, -blocks=A,B|A-B, -tile N can appear anywhere after quality)\n")
 		os.Exit(1)
 	}
 
@@ -28,18 +28,13 @@ func main() {
 
 	// If input is .babe → decode to PNG
 	if ext == ".babe" {
-		postfilter := false
 		splitChannels := false
 		for _, a := range os.Args[2:] {
-			if a == "-postfilter" {
-				postfilter = true
-				continue
-			}
 			if a == "-layers" {
 				splitChannels = true
 			}
 		}
-		if err := decodeBabe(inputPath, base+".png", splitChannels, postfilter); err != nil {
+		if err := decodeBabe(inputPath, base+".png", splitChannels); err != nil {
 			fmt.Fprintln(os.Stderr, "decode error:", err)
 			os.Exit(1)
 		}
@@ -68,19 +63,12 @@ func main() {
 	layersOut := false
 	patternCount := defaultPatternCount
 	blockSpec := ""
-	spreadSpec := ""
-	colorQuantShift := 0
-	patternIndexMode := "per-channel"
 	tile := 0
 	for i := 0; i < len(encodeArgs); i++ {
 		a := encodeArgs[i]
 		if a == "bw" {
 			bwmode = true
 			continue
-		}
-		if a == "-log" || a == "-sweep" {
-			fmt.Fprintln(os.Stderr, "flag is not supported in this build")
-			os.Exit(1)
 		}
 		if a == "-layers" {
 			layersOut = true
@@ -97,40 +85,6 @@ func main() {
 		}
 		if strings.HasPrefix(a, "-blocks=") {
 			blockSpec = strings.TrimPrefix(a, "-blocks=")
-			continue
-		}
-		if strings.HasPrefix(a, "-spreads=") {
-			spreadSpec = strings.TrimPrefix(a, "-spreads=")
-			continue
-		}
-		if strings.HasPrefix(a, "-quality-range=") || strings.HasPrefix(a, "-spread-range=") || strings.HasPrefix(a, "-csv=") {
-			fmt.Fprintln(os.Stderr, "sweep flags are not supported in this build")
-			os.Exit(1)
-		}
-		if strings.HasPrefix(a, "-color-quant=") {
-			v, err := strconv.Atoi(strings.TrimPrefix(a, "-color-quant="))
-			if err != nil || v < 0 || v > 7 {
-				fmt.Fprintln(os.Stderr, "color-quant must be an integer between 0 and 7")
-				os.Exit(1)
-			}
-			colorQuantShift = v
-			continue
-		}
-		if strings.HasPrefix(a, "-pattern-set=") {
-			v := strings.TrimPrefix(a, "-pattern-set=")
-			if v != patternSetBasic {
-				fmt.Fprintf(os.Stderr, "pattern-set must be %s\n", patternSetBasic)
-				os.Exit(1)
-			}
-			continue
-		}
-		if strings.HasPrefix(a, "-pattern-index=") {
-			v := strings.TrimPrefix(a, "-pattern-index=")
-			if v != "per-channel" && v != "shared" {
-				fmt.Fprintln(os.Stderr, "pattern-index must be per-channel or shared")
-				os.Exit(1)
-			}
-			patternIndexMode = v
 			continue
 		}
 		if a == "-tile" {
@@ -168,35 +122,29 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	if spreadSpec != "" {
-		if err := setSpreadFactorsFromSpec(spreadSpec); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-	}
 	defer func() {
 		forcedBlockSizes = nil
 		forcedSpreadFactors = nil
 	}()
-	if err := encodeToBabe(inputPath, outPath, quality, bwmode, patternCount, colorQuantShift, patternIndexMode, tile); err != nil {
+	if err := encodeToBabe(inputPath, outPath, quality, bwmode, patternCount, tile); err != nil {
 		fmt.Fprintln(os.Stderr, "encode error:", err)
 		os.Exit(1)
 	}
 	if decodeOutPath != "" {
-		if err := decodeBabe(outPath, decodeOutPath, false, false); err != nil {
+		if err := decodeBabe(outPath, decodeOutPath, false); err != nil {
 			fmt.Fprintln(os.Stderr, "decode error:", err)
 			os.Exit(1)
 		}
 	}
 	if layersOut {
-		if err := decodeBabe(outPath, base+".png", true, false); err != nil {
+		if err := decodeBabe(outPath, base+".png", true); err != nil {
 			fmt.Fprintln(os.Stderr, "decode error:", err)
 			os.Exit(1)
 		}
 	}
 }
 
-func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount int, colorQuantShift int, patternIndexMode string, tile int) error {
+func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount int, tile int) error {
 	info, err := os.Stat(inPath)
 	if err != nil {
 		return err
@@ -216,12 +164,9 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount
 
 	start := time.Now()
 	activePatternCount = patternCount
-	activeColorQuantShift = colorQuantShift
-	activeSharedPatternIndexes = patternIndexMode == "shared"
 	activeBackgroundTile = tile
 	defer func() {
 		activePatternCount = defaultPatternCount
-		activeColorQuantShift = 0
 		activeSharedPatternIndexes = false
 		activeBackgroundTile = 0
 	}()
@@ -261,7 +206,7 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount
 	return nil
 }
 
-func decodeBabe(inPath, outPath string, splitChannels, postfilter bool) error {
+func decodeBabe(inPath, outPath string, splitChannels bool) error {
 
 	in, err := os.Open(inPath)
 	if err != nil {
@@ -277,7 +222,7 @@ func decodeBabe(inPath, outPath string, splitChannels, postfilter bool) error {
 	compSize := len(compData)
 
 	start := time.Now()
-	dec, err := Decode(compData, postfilter)
+	dec, err := Decode(compData, false)
 	if err != nil {
 		return err
 	}

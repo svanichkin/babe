@@ -117,27 +117,13 @@ Relevant knobs:
 - `-patterns=N`
   default: `64`
   valid range: `1..1024`
-- `-pattern-set=basic`
-  currently the only supported pattern set
-- `-pattern-index=per-channel|shared`
-  default: `per-channel`
-  `shared` lets chroma channels reuse Y-channel pattern indices for matching block positions
-
-## Color Quantization
-
-The encoder can quantize stored block colors before packing:
-
-- `-color-quant=N`
-  default: `0`
-  valid range: `0..7`
-
-Larger values mean more aggressive color reduction.
+ 
 
 ## Chroma Grid Overlay
 
 Optional chroma simplification can be enabled with:
 
-- `-backgroundTile N`
+- `-tile N`
   valid range: `2..255`
   default: disabled (`0`)
 
@@ -158,7 +144,6 @@ Decode:
 
 ```bash
 babe input.babe
-babe input.babe -postfilter
 babe input.babe -layers
 ```
 
@@ -176,39 +161,16 @@ babe input.babe -layers
   explicit block hierarchy
 - `-blocks=A-B`
   power-of-two hierarchy from `A` to `B`
-- `-spreads=S1,S2,...`
-  explicit per-level spread factors
-- `-color-quant=N`
-  color quantization shift, `0..7`
-- `-pattern-set=basic`
-  select pattern family
-- `-pattern-index=per-channel|shared`
-  pattern index reuse mode
-- `-backgroundTile N`
-  or `-backgroundTile=N`
+- `-tile N`
+  or `-tile=N`
   chroma grid tile size, `2..255`
-- `-log`
-  writes pattern diagnostics and pattern images
 - `-layers`
   after encode, also writes layer debug output through the decode path
 - `<decoded.png>`
   if a `.png` path is present in encode args, the freshly encoded file is decoded to that PNG
 
-### Sweep Keys
-
-- `-sweep`
-  run a parameter sweep instead of a single encode
-- `-quality-range=A..B..STEP`
-  example: `0..100..1`
-- `-spread-range=A..B..STEP`
-  example: `0.1..1..0.1`
-- `-csv=results.csv`
-  write sweep results to CSV
-
 ### Decode Keys
 
-- `-postfilter`
-  runs smoothing after decode
 - `-layers`
   writes split/layer debug output
 
@@ -226,7 +188,7 @@ if err != nil {
 Decode:
 
 ```go
-img, err := Decode(comp, postfilter)
+img, err := Decode(comp, false)
 if err != nil {
     // handle error
 }
