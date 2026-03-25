@@ -122,7 +122,7 @@ func defaultLevels() []int {
 	return append([]int(nil), defaultBlockLevels[:]...)
 }
 
-func spreadForBlockSize(quality, blockSize int) int32 {
+func spreadForBlockSize(quality int) int32 {
 	base := float64(allowedMacroSpreadForQuality(quality))
 	if base <= 0 {
 		return 0
@@ -285,19 +285,6 @@ func (br *bitReader) readBit() (bool, error) {
 		br.idx++
 	}
 	return isSet, nil
-}
-
-// readBitFast is a no-error variant of readBit. The caller must ensure
-// there is enough input data remaining.
-func (br *bitReader) readBitFast() bool {
-	b := br.data[br.idx]
-	isSet := (b & (1 << (7 - br.bit))) != 0
-	br.bit++
-	if br.bit == 8 {
-		br.bit = 0
-		br.idx++
-	}
-	return isSet
 }
 
 // readBits reads n bits (1..8) and returns them in the low n bits of the result,
@@ -1697,8 +1684,8 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 		height = len(plane) / stride
 	}
 	levelSpreads := make([]int32, len(levels))
-	for i, size := range levels {
-		levelSpreads[i] = spreadForBlockSize(e.quality, size)
+	for i := range levels {
+		levelSpreads[i] = spreadForBlockSize(e.quality)
 	}
 	recordPatternToken := func(x, y int, bits patternMask, bw, bh int) {
 		tok := patternToken{bits: clonePatternMask(bits), bw: bw, bh: bh, x: x, y: y}
@@ -2246,146 +2233,6 @@ func fillBlockPlane(plane []uint8, stride int, x0, y0, bw, bh int, val uint8) er
 				return fmt.Errorf("fillBlockPlane: index out of range")
 			}
 			plane[idx] = val
-		}
-	}
-	return nil
-}
-
-func drawBlockPix(pix []byte, strideBytes int, x0, y0, bw, bh int, br *bitReader, fg, bg uint8, channelOffset int, patternCount int) error {
-	pattern, err := readPatternComposite(br, bw, bh, patternCount)
-	if err != nil {
-		return err
-	}
-	imgW := 0
-	if strideBytes > 0 {
-		imgW = strideBytes / 4
-	}
-	imgH := 0
-	if strideBytes > 0 {
-		imgH = len(pix) / strideBytes
-	}
-	visW, visH := visibleBlockDims(imgW, imgH, x0, y0, bw, bh)
-	if visW <= 0 || visH <= 0 {
-		return nil
-	}
-	if bw == 1 && bh == 1 {
-		o := y0*strideBytes + x0*4 + channelOffset
-		if o < 0 || o >= len(pix) {
-			return fmt.Errorf("drawBlockPix: index out of range")
-		}
-		if testPatternBit(pattern, bw, bh, 0, 0) {
-			pix[o] = fg
-		} else {
-			pix[o] = bg
-		}
-		return nil
-	}
-
-	if visW == 2 && visH == 2 {
-		var bits uint8
-		if len(pattern) > 0 {
-			bits = uint8(pattern[0])
-		}
-
-		row0 := y0*strideBytes + x0*4 + channelOffset
-		row1 := row0 + strideBytes
-		o00 := row0
-		o01 := row0 + 4
-		o10 := row1
-		o11 := row1 + 4
-
-		if o00 < 0 || o11 >= len(pix) {
-			return fmt.Errorf("drawBlockPix: index out of range")
-		}
-
-		if (bits & 0b1000) != 0 {
-			pix[o00] = fg
-		} else {
-			pix[o00] = bg
-		}
-		if (bits & 0b0100) != 0 {
-			pix[o01] = fg
-		} else {
-			pix[o01] = bg
-		}
-		if (bits & 0b0010) != 0 {
-			pix[o10] = fg
-		} else {
-			pix[o10] = bg
-		}
-		if (bits & 0b0001) != 0 {
-			pix[o11] = fg
-		} else {
-			pix[o11] = bg
-		}
-		return nil
-	}
-
-	for yy := 0; yy < visH; yy++ {
-		row := (y0+yy)*strideBytes + x0*4 + channelOffset
-		for xx := 0; xx < visW; xx++ {
-			val := bg
-			if testPatternBit(pattern, bw, bh, xx, yy) {
-				val = fg
-			}
-			o := row + xx*4
-			if o < 0 || o >= len(pix) {
-				return fmt.Errorf("drawBlockPix: index out of range")
-			}
-			pix[o] = val
-		}
-	}
-	return nil
-}
-
-func fillBlockPix(pix []byte, strideBytes int, x0, y0, bw, bh int, val uint8, channelOffset int) error {
-	imgW := 0
-	if strideBytes > 0 {
-		imgW = strideBytes / 4
-	}
-	imgH := 0
-	if strideBytes > 0 {
-		imgH = len(pix) / strideBytes
-	}
-	visW, visH := visibleBlockDims(imgW, imgH, x0, y0, bw, bh)
-	if visW <= 0 || visH <= 0 {
-		return nil
-	}
-	if visW == 1 && visH == 1 {
-		o := y0*strideBytes + x0*4 + channelOffset
-		if o < 0 || o >= len(pix) {
-			return fmt.Errorf("fillBlockPix: index out of range")
-		}
-		pix[o] = val
-		return nil
-	}
-
-	if visW == 2 && visH == 2 {
-		row0 := y0*strideBytes + x0*4 + channelOffset
-		row1 := row0 + strideBytes
-		o00 := row0
-		o01 := row0 + 4
-		o10 := row1
-		o11 := row1 + 4
-
-		if o00 < 0 || o11 >= len(pix) {
-			return fmt.Errorf("fillBlockPix: index out of range")
-		}
-		pix[o00] = val
-		pix[o01] = val
-		pix[o10] = val
-		pix[o11] = val
-		return nil
-	}
-
-	for yy := 0; yy < visH; yy++ {
-		row := (y0+yy)*strideBytes + x0*4 + channelOffset
-		for xx := 0; xx < visW; xx++ {
-			o := row + xx*4
-			if o < 0 || o >= len(pix) {
-				return fmt.Errorf("fillBlockPix: index out of range")
-			}
-			pix[o] = val
 		}
 	}
 	return nil
@@ -3330,17 +3177,4 @@ func (ds *deltaStream) next() (byte, error) {
 	ds.prev = v
 	ds.i++
 	return v, nil
-}
-
-// nextFast is a no-error variant of next. The caller must ensure the stream
-// has at least one remaining value.
-func (ds *deltaStream) nextFast() byte {
-	if ds.i == 0 {
-		ds.i = 1
-		return ds.prev
-	}
-	d := int8(ds.packed[ds.i])
-	ds.prev = decodeDelta8(ds.prev, d)
-	ds.i++
-	return ds.prev
 }
