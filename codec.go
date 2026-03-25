@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"image"
 	"io"
-	"math"
 	"math/bits"
 	"runtime"
 	"strconv"
@@ -123,16 +122,7 @@ func defaultLevels() []int {
 }
 
 func spreadForBlockSize(quality int) int32 {
-	base := float64(allowedMacroSpreadForQuality(quality))
-	if base <= 0 {
-		return 0
-	}
-
-	spread := base
-	if spread <= 0 {
-		return 0
-	}
-	return int32(math.Ceil(spread))
+	return allowedMacroSpreadForQuality(quality)
 }
 
 func ceilToStep(v, step int) int {
@@ -757,6 +747,14 @@ func powerOfTwoCeil(v int) int {
 
 // hilbertIndices returns raster indices (y*gridW+x) in Hilbert order clipped to gridW x gridH.
 func hilbertIndices(gridW, gridH int) []int {
+	key := [2]int{gridW, gridH}
+	hilbertCacheMu.RLock()
+	cached, ok := hilbertCache[key]
+	hilbertCacheMu.RUnlock()
+	if ok {
+		return cached
+	}
+
 	n := powerOfTwoCeil(max(gridW, gridH))
 	total := gridW * gridH
 	order := make([]int, 0, total)
@@ -766,6 +764,9 @@ func hilbertIndices(gridW, gridH int) []int {
 			order = append(order, y*gridW+x)
 		}
 	}
+	hilbertCacheMu.Lock()
+	hilbertCache[key] = order
+	hilbertCacheMu.Unlock()
 	return order
 }
 
@@ -789,20 +790,16 @@ func hilbertXY(d, n int) (int, int) {
 	return x, y
 }
 
-func applyPermutation(src []byte, order []int) []byte {
-	dst := make([]byte, len(order))
+func applyPermutationInto(dst, src []byte, order []int) {
 	for i, idx := range order {
 		dst[i] = src[idx]
 	}
-	return dst
 }
 
-func invertPermutation(src []byte, order []int) []byte {
-	dst := make([]byte, len(order))
+func invertPermutationInto(dst, src []byte, order []int) {
 	for i, idx := range order {
 		dst[idx] = src[i]
 	}
-	return dst
 }
 
 func encodeChromaGridOverlay(dst *bytes.Buffer, cbPlane, crPlane []uint8, w, h, step int) {
@@ -836,17 +833,16 @@ func encodeChromaGridOverlay(dst *bytes.Buffer, cbPlane, crPlane []uint8, w, h, 
 	crGrid := dst.Bytes()[cbGridEnd : cbGridEnd+gridW*gridH]
 
 	order := hilbertIndices(gridW, gridH)
-	cbHilb := applyPermutation(cbGrid, order)
-	crHilb := applyPermutation(crGrid, order)
-	encodeRingDeltaBytesInPlace(cbHilb)
-	encodeRingDeltaBytesInPlace(crHilb)
-
-	// overwrite payload with permuted+delta data
-	copy(cbGrid, cbHilb)
-	copy(crGrid, crHilb)
+	tmp := make([]byte, gridW*gridH)
+	applyPermutationInto(tmp, cbGrid, order)
+	encodeRingDeltaBytesInPlace(tmp)
+	copy(cbGrid, tmp)
+	applyPermutationInto(tmp, crGrid, order)
+	encodeRingDeltaBytesInPlace(tmp)
+	copy(crGrid, tmp)
 }
 
-func decodeChromaGridOverlay(data []byte, pos, w, h int) ([]uint8, []uint8, int, error) {
+func (d *Decoder) decodeChromaGridOverlay(data []byte, pos, w, h int) ([]uint8, []uint8, int, error) {
 	if len(data)-pos < 5 {
 		return nil, nil, pos, fmt.Errorf("decode: truncated chroma grid header")
 	}
@@ -865,15 +861,27 @@ func decodeChromaGridOverlay(data []byte, pos, w, h int) ([]uint8, []uint8, int,
 	if len(data)-pos < nodeCount*2 {
 		return nil, nil, pos, fmt.Errorf("decode: truncated chroma grid payload")
 	}
-	cbGrid := append([]byte(nil), data[pos:pos+nodeCount]...)
+	if cap(d.chromaGrid) < nodeCount*2 {
+		d.chromaGrid = make([]byte, nodeCount*2)
+	}
+	d.chromaGrid = d.chromaGrid[:nodeCount*2]
+	cbGrid := d.chromaGrid[:nodeCount]
+	crGrid := d.chromaGrid[nodeCount:]
+	copy(cbGrid, data[pos:pos+nodeCount])
 	pos += nodeCount
-	crGrid := append([]byte(nil), data[pos:pos+nodeCount]...)
+	copy(crGrid, data[pos:pos+nodeCount])
 	pos += nodeCount
 	order := hilbertIndices(gridW, gridH)
 	decodeRingDeltaBytesInPlace(cbGrid)
 	decodeRingDeltaBytesInPlace(crGrid)
-	cbGrid = invertPermutation(cbGrid, order)
-	crGrid = invertPermutation(crGrid, order)
+	if cap(d.chromaTemp) < nodeCount {
+		d.chromaTemp = make([]byte, nodeCount)
+	}
+	d.chromaTemp = d.chromaTemp[:nodeCount]
+	invertPermutationInto(d.chromaTemp, cbGrid, order)
+	copy(cbGrid, d.chromaTemp)
+	invertPermutationInto(d.chromaTemp, crGrid, order)
+	copy(crGrid, d.chromaTemp)
 	cbPlane := decodeChromaGridPlaneValues(cbGrid, step, gridW, gridH, w, h)
 	crPlane := decodeChromaGridPlaneValues(crGrid, step, gridW, gridH, w, h)
 	return cbPlane, crPlane, pos, nil
@@ -884,46 +892,67 @@ func decodeChromaGridPlaneValues(grid []byte, step, gridW, gridH, w, h int) []ui
 	if w == 0 || h == 0 {
 		return out
 	}
+	if step <= 0 {
+		return out
+	}
+
+	type xInfo struct {
+		cellX int
+		fx    int
+		fxInv int
+	}
+	xInfos := make([]xInfo, w)
+	for x := 0; x < w; x++ {
+		cellX := x / step
+		if cellX >= gridW-1 {
+			cellX = gridW - 2
+		}
+		x0 := cellX * step
+		fx := ((x - x0) << 8) / step
+		if fx < 0 {
+			fx = 0
+		} else if fx > 255 {
+			fx = 255
+		}
+		xInfos[x] = xInfo{cellX: cellX, fx: fx, fxInv: 256 - fx}
+	}
+
 	for y := 0; y < h; y++ {
 		cellY := y / step
 		if cellY >= gridH-1 {
 			cellY = gridH - 2
 		}
 		y0 := cellY * step
-		fy := 0.0
-		if step > 0 {
-			fy = float64(y-y0) / float64(step)
+		fy := ((y - y0) << 8) / step
+		if fy < 0 {
+			fy = 0
+		} else if fy > 255 {
+			fy = 255
 		}
+		fyInv := 256 - fy
+		rowBase := cellY * gridW
 		for x := 0; x < w; x++ {
-			cellX := x / step
-			if cellX >= gridW-1 {
-				cellX = gridW - 2
-			}
-			x0 := cellX * step
-			fx := 0.0
-			if step > 0 {
-				fx = float64(x-x0) / float64(step)
-			}
+			info := xInfos[x]
 
-			i00 := cellY*gridW + cellX
+			i00 := rowBase + info.cellX
 			i10 := i00 + 1
 			i01 := i00 + gridW
 			i11 := i01 + 1
 
-			v00 := float64(grid[i00])
-			v10 := float64(grid[i10])
-			v01 := float64(grid[i01])
-			v11 := float64(grid[i11])
+			v00 := int(grid[i00])
+			v10 := int(grid[i10])
+			v01 := int(grid[i01])
+			v11 := int(grid[i11])
 
-			top := v00 + (v10-v00)*fx
-			bot := v01 + (v11-v01)*fx
-			v := top + (bot-top)*fy
+			top := (v00*info.fxInv + v10*info.fx)
+			bot := (v01*info.fxInv + v11*info.fx)
+			v := (top*fyInv + bot*fy + 32768) >> 16
 			if v < 0 {
 				v = 0
 			} else if v > 255 {
 				v = 255
 			}
-			out[y*w+x] = uint8(v + 0.5)
+			out[y*w+x] = uint8(v)
 		}
 	}
 	return out
@@ -1021,9 +1050,18 @@ type patternToken struct {
 	has  bool
 }
 
+type patternCacheKey struct {
+	bw    int
+	bh    int
+	count int
+}
+
 var (
 	fixedPatternCacheMu sync.RWMutex
-	fixedPatternCache   = map[string][]patternMask{}
+	fixedPatternCache   = map[patternCacheKey][]patternMask{}
+
+	hilbertCacheMu sync.RWMutex
+	hilbertCache   = map[[2]int][]int{}
 )
 
 type patternMask []uint64
@@ -1265,7 +1303,7 @@ func readPatternIndex(br *bitReader, bitCount uint8) (uint64, error) {
 }
 
 func fixedPatternCodebook(bw, bh, count int) []patternMask {
-	key := fmt.Sprintf("%d:%d:%d", bw, bh, count)
+	key := patternCacheKey{bw: bw, bh: bh, count: count}
 
 	fixedPatternCacheMu.RLock()
 	book, ok := fixedPatternCache[key]
@@ -2187,9 +2225,9 @@ func readPatternComposite(br *bitReader, bw, bh, patternCount int) (patternMask,
 	}
 	book := fixedPatternCodebook(bw, bh, limit)
 	if int(idx) >= len(book) {
-		return clonePatternMask(book[len(book)-1]), nil
+		return book[len(book)-1], nil
 	}
-	return clonePatternMask(book[idx]), nil
+	return book[idx], nil
 }
 
 // drawBlockPlane decodes a single block for one channel into a planar buffer.
@@ -2219,6 +2257,30 @@ func drawBlockPlane(plane []uint8, stride int, x0, y0, bw, bh int, br *bitReader
 	return nil
 }
 
+// drawBlockIntoPix decodes a single block and writes into the packed RGBA buffer.
+func drawBlockIntoPix(pix []byte, strideBytes, imgW, imgH int, x0, y0, bw, bh int, br *bitReader, fg, bg uint8, patternCount int, channelOffset int) error {
+	pattern, err := readPatternComposite(br, bw, bh, patternCount)
+	if err != nil {
+		return err
+	}
+	visW, visH := visibleBlockDims(imgW, imgH, x0, y0, bw, bh)
+	for yy := 0; yy < visH; yy++ {
+		row := (y0+yy)*strideBytes + x0*4 + channelOffset
+		for xx := 0; xx < visW; xx++ {
+			val := bg
+			if testPatternBit(pattern, bw, bh, xx, yy) {
+				val = fg
+			}
+			o := row + xx*4
+			if o < 0 || o >= len(pix) {
+				return fmt.Errorf("drawBlockIntoPix: index out of range")
+			}
+			pix[o] = val
+		}
+	}
+	return nil
+}
+
 // fillBlockPlane fills a block with a single value (no pattern bits).
 func fillBlockPlane(plane []uint8, stride int, x0, y0, bw, bh int, val uint8) error {
 	height := 0
@@ -2233,6 +2295,22 @@ func fillBlockPlane(plane []uint8, stride int, x0, y0, bw, bh int, val uint8) er
 				return fmt.Errorf("fillBlockPlane: index out of range")
 			}
 			plane[idx] = val
+		}
+	}
+	return nil
+}
+
+// fillBlockIntoPix fills a block with a single value (no pattern bits).
+func fillBlockIntoPix(pix []byte, strideBytes, imgW, imgH int, x0, y0, bw, bh int, val uint8, channelOffset int) error {
+	visW, visH := visibleBlockDims(imgW, imgH, x0, y0, bw, bh)
+	for yy := 0; yy < visH; yy++ {
+		row := (y0+yy)*strideBytes + x0*4 + channelOffset
+		for xx := 0; xx < visW; xx++ {
+			o := row + xx*4
+			if o < 0 || o >= len(pix) {
+				return fmt.Errorf("fillBlockIntoPix: index out of range")
+			}
+			pix[o] = val
 		}
 	}
 	return nil
@@ -2440,11 +2518,11 @@ func decodeChannelWithRects(data []byte, imgW, imgH int, levels []int, patternCo
 					return err
 				}
 			}
-				if err := drawBlockPlane(plane, imgW, x, y, size, size, &patternBR, fg, bg, patternCount); err != nil {
-					return err
-				}
-			} else {
-				if err := fillBlockPlane(plane, imgW, x, y, size, size, fg); err != nil {
+			if err := drawBlockPlane(plane, imgW, x, y, size, size, &patternBR, fg, bg, patternCount); err != nil {
+				return err
+			}
+		} else {
+			if err := fillBlockPlane(plane, imgW, x, y, size, size, fg); err != nil {
 				return err
 			}
 		}
@@ -2530,6 +2608,9 @@ type Decoder struct {
 	patternCount int
 	levels       []int
 
+	chromaGrid []byte
+	chromaTemp []byte
+
 	payload []byte
 	zdec    *zstd.Decoder
 
@@ -2541,11 +2622,208 @@ func NewDecoder() *Decoder {
 }
 
 func decodeChannelToPix(data []byte, imgW, imgH int, levels []int, patternCount int, pix []byte, strideBytes int, channelOffset int) error {
-	plane, _, err := decodeChannelWithRects(data, imgW, imgH, levels, patternCount)
+	pos := 0
+	if len(levels) == 0 {
+		return fmt.Errorf("decodeChannel: missing block levels")
+	}
+
+	readU32 := func(label string) (uint32, error) {
+		if len(data)-pos < 4 {
+			return 0, fmt.Errorf("decodeChannel: truncated while reading %s", label)
+		}
+		v := binary.BigEndian.Uint32(data[pos : pos+4])
+		pos += 4
+		return v, nil
+	}
+
+	readSlice := func(n uint32, label string) ([]byte, error) {
+		if n > uint32(len(data)-pos) {
+			return nil, fmt.Errorf("decodeChannel: truncated while reading %s", label)
+		}
+		end := pos + int(n)
+		s := data[pos:end]
+		pos = end
+		return s, nil
+	}
+
+	blockCount, err := readU32("blockCount")
 	if err != nil {
 		return err
 	}
-	blitPlaneToPix(plane, pix, strideBytes, imgW, imgH, channelOffset)
+	sizeStreamLen, err := readU32("sizeStreamLen")
+	if err != nil {
+		return err
+	}
+	sizeBytes, err := readSlice(sizeStreamLen, "sizeStream")
+	if err != nil {
+		return err
+	}
+	sizeBR := newBitReader(sizeBytes)
+	patternLen, err := readU32("patternLen")
+	if err != nil {
+		return err
+	}
+	patternBytes, err := readSlice(patternLen, "patternStream")
+	if err != nil {
+		return err
+	}
+	patternBR := newBitReader(patternBytes)
+	fgPackedLen, err := readU32("FG packedLen")
+	if err != nil {
+		return err
+	}
+	fgPacked, err := readSlice(fgPackedLen, "FG packed data")
+	if err != nil {
+		return err
+	}
+	if blockCount > 0 && fgPackedLen < blockCount {
+		return fmt.Errorf("decodeChannel: FG packed data too short")
+	}
+	fgStream, err := newDeltaStream(fgPacked, int(blockCount))
+	if err != nil {
+		return err
+	}
+	bgPackedLen, err := readU32("BG packedLen")
+	if err != nil {
+		return err
+	}
+	bgPacked, err := readSlice(bgPackedLen, "BG packed data")
+	if err != nil {
+		return err
+	}
+	if bgPackedLen > blockCount {
+		return fmt.Errorf("decodeChannel: BG packed data too long")
+	}
+	bgStream, err := newDeltaStream(bgPacked, int(bgPackedLen))
+	if err != nil {
+		return err
+	}
+	bgPerPattern := true
+
+	smallBlock := levels[0]
+	topBlock := levels[len(levels)-1]
+	w4 := ceilToStep(imgW, smallBlock)
+	h4 := ceilToStep(imgH, smallBlock)
+	fullW := ceilToStep(imgW, topBlock)
+	fullH := ceilToStep(imgH, topBlock)
+
+	blockIndex := 0
+
+	var decodeNode func(x, y, levelIdx int) error
+	decodeNode = func(x, y, levelIdx int) error {
+		size := levels[levelIdx]
+		if levelIdx > 0 {
+			useHere, err := sizeBR.readBit()
+			if err != nil {
+				return err
+			}
+			if !useHere {
+				childSize := levels[levelIdx-1]
+				ratio := size / childSize
+				for by := 0; by < ratio; by++ {
+					for bx := 0; bx < ratio; bx++ {
+						cx := x + bx*childSize
+						cy := y + by*childSize
+						if vw, vh := visibleBlockDims(imgW, imgH, cx, cy, childSize, childSize); vw <= 0 || vh <= 0 {
+							continue
+						}
+						if err := decodeNode(cx, cy, levelIdx-1); err != nil {
+							return err
+						}
+					}
+				}
+				return nil
+			}
+		}
+
+		if blockIndex >= int(blockCount) {
+			return fmt.Errorf("unexpected end of blocks in main area")
+		}
+		fg, err := fgStream.next()
+		if err != nil {
+			return err
+		}
+		if encodedBlockIsPattern(fg) {
+			var bg uint8
+			if bgPerPattern {
+				bg, err = bgStream.next()
+				if err != nil {
+					return err
+				}
+			}
+			if err := drawBlockIntoPix(pix, strideBytes, imgW, imgH, x, y, size, size, &patternBR, fg, bg, patternCount, channelOffset); err != nil {
+				return err
+			}
+		} else {
+			if err := fillBlockIntoPix(pix, strideBytes, imgW, imgH, x, y, size, size, fg, channelOffset); err != nil {
+				return err
+			}
+		}
+		blockIndex++
+		return nil
+	}
+
+	for my := 0; my < fullH; my += topBlock {
+		for mx := 0; mx < fullW; mx += topBlock {
+			if err := decodeNode(mx, my, len(levels)-1); err != nil {
+				return err
+			}
+		}
+	}
+	for my := 0; my < fullH; my += smallBlock {
+		for mx := fullW; mx < w4; mx += smallBlock {
+			if blockIndex >= int(blockCount) {
+				return fmt.Errorf("unexpected end of blocks in right stripe")
+			}
+			fg, err := fgStream.next()
+			if err != nil {
+				return err
+			}
+			if encodedBlockIsPattern(fg) {
+				bg, err := bgStream.next()
+				if err != nil {
+					return err
+				}
+				if err := drawBlockIntoPix(pix, strideBytes, imgW, imgH, mx, my, smallBlock, smallBlock, &patternBR, fg, bg, patternCount, channelOffset); err != nil {
+					return err
+				}
+			} else {
+				if err := fillBlockIntoPix(pix, strideBytes, imgW, imgH, mx, my, smallBlock, smallBlock, fg, channelOffset); err != nil {
+					return err
+				}
+			}
+			blockIndex++
+		}
+	}
+	for my := fullH; my < h4; my += smallBlock {
+		for mx := 0; mx < w4; mx += smallBlock {
+			if blockIndex >= int(blockCount) {
+				return fmt.Errorf("unexpected end of blocks in bottom stripe")
+			}
+			fg, err := fgStream.next()
+			if err != nil {
+				return err
+			}
+			if encodedBlockIsPattern(fg) {
+				bg, err := bgStream.next()
+				if err != nil {
+					return err
+				}
+				if err := drawBlockIntoPix(pix, strideBytes, imgW, imgH, mx, my, smallBlock, smallBlock, &patternBR, fg, bg, patternCount, channelOffset); err != nil {
+					return err
+				}
+			} else {
+				if err := fillBlockIntoPix(pix, strideBytes, imgW, imgH, mx, my, smallBlock, smallBlock, fg, channelOffset); err != nil {
+					return err
+				}
+			}
+			blockIndex++
+		}
+	}
+
+	if blockIndex != int(blockCount) {
+		return fmt.Errorf("block count mismatch: used %d of %d", blockIndex, blockCount)
+	}
 	return nil
 }
 
@@ -2704,7 +2982,7 @@ func (d *Decoder) Decode(compData []byte) (*image.RGBA, error) {
 		if errY != nil {
 			return nil, errY
 		}
-		cbPlane, crPlane, nextPos, err := decodeChromaGridOverlay(payload, pos, imgW, imgH)
+		cbPlane, crPlane, nextPos, err := d.decodeChromaGridOverlay(payload, pos, imgW, imgH)
 		if err != nil {
 			return nil, err
 		}
@@ -2744,7 +3022,8 @@ func (d *Decoder) Decode(compData []byte) (*image.RGBA, error) {
 		return nil, errCr
 	}
 
-	if d.Parallel {
+	parallelRGB := d.Parallel && imgW*imgH >= 256*256
+	if parallelRGB {
 		workers := max(min(runtime.NumCPU(), imgH), 1)
 		rowsPerWorker := (imgH + workers - 1) / workers
 
@@ -2820,7 +3099,8 @@ func DecodeLayers(compData []byte) (int, int, []uint8, []image.Rectangle, []uint
 	var cbPlane, crPlane []uint8
 	var cbRects, crRects []image.Rectangle
 	if hasChromaGrid {
-		cbPlane, crPlane, pos, err = decodeChromaGridOverlay(payload, pos, imgW, imgH)
+		var scratch Decoder
+		cbPlane, crPlane, pos, err = scratch.decodeChromaGridOverlay(payload, pos, imgW, imgH)
 		if err != nil {
 			return 0, 0, nil, nil, nil, nil, nil, nil, false, false, err
 		}

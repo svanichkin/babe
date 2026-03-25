@@ -237,6 +237,24 @@ func loadTestImage(t testing.TB) image.Image {
 	return toRGBA(img)
 }
 
+func loadTestImagePrefer(t testing.TB, paths ...string) image.Image {
+	t.Helper()
+	for _, path := range paths {
+		f, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		img, _, err := image.Decode(f)
+		_ = f.Close()
+		if err != nil {
+			continue
+		}
+		return toRGBA(img)
+	}
+	t.Skipf("benchmark image missing: tried %v", paths)
+	return nil
+}
+
 func toRGBA(src image.Image) *image.RGBA {
 	b := src.Bounds()
 	dst := image.NewRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
@@ -453,6 +471,34 @@ func BenchmarkBABEQualityStepsBW(b *testing.B) {
 		b.Run(fmt.Sprintf("Q%d_BW", quality), func(b *testing.B) {
 			benchmarkBABEQuality(b, quality, true)
 		})
+	}
+}
+
+func BenchmarkBABEDecodeQ0Patterns64Blocks8_128Tile32Q4(b *testing.B) {
+	img := loadTestImagePrefer(b, "4.jpg", "benchmark.jpg")
+	levels, err := blocksFromSpec("8-128")
+	if err != nil {
+		b.Fatalf("blocksFromSpec: %v", err)
+	}
+	enc := NewEncoder()
+	enc.patternCount = 64
+	enc.backgroundTile = 32
+	enc.yQuantShift = 4
+	enc.levels = levels
+	comp, err := enc.Encode(img, 0, false)
+	if err != nil {
+		b.Fatalf("Encode: %v", err)
+	}
+	dec := NewDecoder()
+	if _, err := dec.Decode(comp); err != nil {
+		b.Fatalf("warmup decode: %v", err)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := dec.Decode(comp); err != nil {
+			b.Fatalf("Decode: %v", err)
+		}
 	}
 }
 
