@@ -147,24 +147,35 @@ func visibleBlockDims(width, height, x0, y0, bw, bh int) (int, int) {
 	return visW, visH
 }
 
-func invertPatternBits(bits patternMask, bw, bh int) patternMask {
+func invertPatternBitsInPlace(bits patternMask, bw, bh int) {
 	total := bw * bh
-	if total <= 0 {
-		return nil
+	if total <= 0 || len(bits) == 0 {
+		return
 	}
-	out := clonePatternMask(bits)
-	if len(out) == 0 {
-		out = newPatternMask(total)
-	}
-	for i := range out {
-		out[i] = ^out[i]
+	for i := range bits {
+		bits[i] = ^bits[i]
 	}
 	usedBits := total % 64
 	if usedBits != 0 {
 		mask := uint64(1)<<usedBits - 1
-		out[len(out)-1] &= mask
+		bits[len(bits)-1] &= mask
 	}
-	return out
+}
+
+func patternMaskFromUint64Into(dst patternMask, bits uint64, total int) patternMask {
+	if total <= 0 {
+		return nil
+	}
+	words := (total + 63) / 64
+	if cap(dst) < words {
+		dst = make(patternMask, words)
+	}
+	dst = dst[:words]
+	for i := range dst {
+		dst[i] = 0
+	}
+	dst[0] = bits
+	return dst
 }
 
 func quantizeY(v uint8, shift int) uint8 {
@@ -191,8 +202,18 @@ type bitWriter struct {
 	n    uint8 // number of bits written (0..8)
 }
 
+type bitStream struct {
+	buf  []byte
+	byte byte
+	n    uint8 // number of bits written (0..8) in byte
+}
+
 func newBitWriter(buf *bytes.Buffer) bitWriter {
 	return bitWriter{buf: buf}
+}
+
+func newBitStream(buf []byte) bitStream {
+	return bitStream{buf: buf[:0]}
 }
 
 // writeBit writes a single bit (msb-first in byte).
@@ -207,6 +228,58 @@ func (bw *bitWriter) writeBit(bit bool) {
 		bw.byte = 0
 		bw.n = 0
 	}
+}
+
+func (bs *bitStream) writeBit(bit bool) {
+	bs.byte <<= 1
+	if bit {
+		bs.byte |= 1
+	}
+	bs.n++
+	if bs.n == 8 {
+		bs.buf = append(bs.buf, bs.byte)
+		bs.byte = 0
+		bs.n = 0
+	}
+}
+
+func (bs *bitStream) writeBits(bits uint64, n uint8) {
+	for i := int(n) - 1; i >= 0; i-- {
+		bs.writeBit(((bits >> i) & 1) != 0)
+	}
+}
+
+func (bs *bitStream) appendStream(other *bitStream) {
+	for _, b := range other.buf {
+		for i := 7; i >= 0; i-- {
+			bs.writeBit(((b >> i) & 1) != 0)
+		}
+	}
+	if other.n > 0 {
+		for i := int(other.n) - 1; i >= 0; i-- {
+			bs.writeBit(((other.byte >> i) & 1) != 0)
+		}
+	}
+}
+
+func (bs *bitStream) appendBytesPadded(data []byte) {
+	if len(data) == 0 {
+		return
+	}
+	if bs.n == 0 {
+		bs.buf = append(bs.buf, data...)
+		return
+	}
+	for _, b := range data {
+		bs.writeBits(uint64(b), 8)
+	}
+}
+
+func (bs *bitStream) bytesPadded() []byte {
+	if bs.n == 0 {
+		return bs.buf
+	}
+	return append(bs.buf, bs.byte<<(8-bs.n))
 }
 
 // writeBits writes n bits from bits (msb-first within the provided n bits).
@@ -887,13 +960,55 @@ func (d *Decoder) decodeChromaGridOverlay(data []byte, pos, w, h int) ([]uint8, 
 	return cbPlane, crPlane, pos, nil
 }
 
-func decodeChromaGridPlaneValues(grid []byte, step, gridW, gridH, w, h int) []uint8 {
-	out := make([]uint8, w*h)
-	if w == 0 || h == 0 {
-		return out
+func (d *Decoder) decodeChromaGridOverlayIntoPix(data []byte, pos, w, h int, pix []byte, strideBytes int) (int, error) {
+	if len(data)-pos < 5 {
+		return pos, fmt.Errorf("decode: truncated chroma grid header")
 	}
-	if step <= 0 {
-		return out
+	step := int(data[pos])
+	pos++
+	if step < 1 {
+		return pos, fmt.Errorf("decode: invalid chroma grid step")
+	}
+	gridW := int(binary.BigEndian.Uint16(data[pos : pos+2]))
+	gridH := int(binary.BigEndian.Uint16(data[pos+2 : pos+4]))
+	pos += 4
+	if gridW < 2 || gridH < 2 {
+		return pos, fmt.Errorf("decode: invalid chroma grid size")
+	}
+	nodeCount := gridW * gridH
+	if len(data)-pos < nodeCount*2 {
+		return pos, fmt.Errorf("decode: truncated chroma grid payload")
+	}
+	if cap(d.chromaGrid) < nodeCount*2 {
+		d.chromaGrid = make([]byte, nodeCount*2)
+	}
+	d.chromaGrid = d.chromaGrid[:nodeCount*2]
+	cbGrid := d.chromaGrid[:nodeCount]
+	crGrid := d.chromaGrid[nodeCount:]
+	copy(cbGrid, data[pos:pos+nodeCount])
+	pos += nodeCount
+	copy(crGrid, data[pos:pos+nodeCount])
+	pos += nodeCount
+	order := hilbertIndices(gridW, gridH)
+	decodeRingDeltaBytesInPlace(cbGrid)
+	decodeRingDeltaBytesInPlace(crGrid)
+	if cap(d.chromaTemp) < nodeCount {
+		d.chromaTemp = make([]byte, nodeCount)
+	}
+	d.chromaTemp = d.chromaTemp[:nodeCount]
+	invertPermutationInto(d.chromaTemp, cbGrid, order)
+	copy(cbGrid, d.chromaTemp)
+	invertPermutationInto(d.chromaTemp, crGrid, order)
+	copy(crGrid, d.chromaTemp)
+
+	decodeChromaGridPlaneValuesIntoRGBA(cbGrid, step, gridW, gridH, w, h, pix, strideBytes, 1)
+	decodeChromaGridPlaneValuesIntoRGBA(crGrid, step, gridW, gridH, w, h, pix, strideBytes, 2)
+	return pos, nil
+}
+
+func decodeChromaGridPlaneValuesIntoRGBA(grid []byte, step, gridW, gridH, w, h int, pix []byte, strideBytes int, channelOffset int) {
+	if w == 0 || h == 0 || step <= 0 {
+		return
 	}
 
 	type xInfo struct {
@@ -931,6 +1046,7 @@ func decodeChromaGridPlaneValues(grid []byte, step, gridW, gridH, w, h int) []ui
 		}
 		fyInv := 256 - fy
 		rowBase := cellY * gridW
+		row := y*strideBytes + channelOffset
 		for x := 0; x < w; x++ {
 			info := xInfos[x]
 
@@ -952,9 +1068,86 @@ func decodeChromaGridPlaneValues(grid []byte, step, gridW, gridH, w, h int) []ui
 			} else if v > 255 {
 				v = 255
 			}
-			out[y*w+x] = uint8(v)
+			pix[row+x*4] = uint8(v)
 		}
 	}
+}
+
+func decodeChromaGridPlaneValuesIntoPlane(grid []byte, step, gridW, gridH, w, h int, plane []uint8, stride int) {
+	if w == 0 || h == 0 || step <= 0 {
+		return
+	}
+	type xInfo struct {
+		cellX int
+		fx    int
+		fxInv int
+	}
+	xInfos := make([]xInfo, w)
+	for x := 0; x < w; x++ {
+		cellX := x / step
+		if cellX >= gridW-1 {
+			cellX = gridW - 2
+		}
+		x0 := cellX * step
+		fx := ((x - x0) << 8) / step
+		if fx < 0 {
+			fx = 0
+		} else if fx > 255 {
+			fx = 255
+		}
+		xInfos[x] = xInfo{cellX: cellX, fx: fx, fxInv: 256 - fx}
+	}
+
+	for y := 0; y < h; y++ {
+		cellY := y / step
+		if cellY >= gridH-1 {
+			cellY = gridH - 2
+		}
+		y0 := cellY * step
+		fy := ((y - y0) << 8) / step
+		if fy < 0 {
+			fy = 0
+		} else if fy > 255 {
+			fy = 255
+		}
+		fyInv := 256 - fy
+		rowBase := cellY * gridW
+		row := y * stride
+		for x := 0; x < w; x++ {
+			info := xInfos[x]
+
+			i00 := rowBase + info.cellX
+			i10 := i00 + 1
+			i01 := i00 + gridW
+			i11 := i01 + 1
+
+			v00 := int(grid[i00])
+			v10 := int(grid[i10])
+			v01 := int(grid[i01])
+			v11 := int(grid[i11])
+
+			top := (v00*info.fxInv + v10*info.fx)
+			bot := (v01*info.fxInv + v11*info.fx)
+			v := (top*fyInv + bot*fy + 32768) >> 16
+			if v < 0 {
+				v = 0
+			} else if v > 255 {
+				v = 255
+			}
+			plane[row+x] = uint8(v)
+		}
+	}
+}
+
+func decodeChromaGridPlaneValues(grid []byte, step, gridW, gridH, w, h int) []uint8 {
+	out := make([]uint8, w*h)
+	if w == 0 || h == 0 {
+		return out
+	}
+	if step <= 0 {
+		return out
+	}
+	decodeChromaGridPlaneValuesIntoPlane(grid, step, gridW, gridH, w, h, out, w)
 	return out
 }
 
@@ -1040,16 +1233,6 @@ func canUseBlockSizeChannel(plane []uint8, stride, height, x0, y0, blockSize int
 	return int32(maxV)-int32(minV) < spread
 }
 
-type patternToken struct {
-	bits patternMask
-	bw   int
-	bh   int
-	x    int
-	y    int
-	idx  uint64
-	has  bool
-}
-
 type patternCacheKey struct {
 	bw    int
 	bh    int
@@ -1059,6 +1242,9 @@ type patternCacheKey struct {
 var (
 	fixedPatternCacheMu sync.RWMutex
 	fixedPatternCache   = map[patternCacheKey][]patternMask{}
+
+	patternIndexCacheMu sync.RWMutex
+	patternIndexCache   = map[patternCacheKey]map[uint64]uint16{}
 
 	hilbertCacheMu sync.RWMutex
 	hilbertCache   = map[[2]int][]int{}
@@ -1329,6 +1515,9 @@ func fixedPatternCodebook(bw, bh, count int) []patternMask {
 }
 
 func patternDistance(a, b patternMask) int {
+	if len(a) == 1 && len(b) == 1 {
+		return bits.OnesCount64(a[0] ^ b[0])
+	}
 	n := len(a)
 	if len(b) > n {
 		n = len(b)
@@ -1355,31 +1544,47 @@ func nearestPatternIndex(patternBits patternMask, bw, bh, patternCount int) uint
 	book := fixedPatternCodebook(bw, bh, limit)
 	bestIdx := 0
 	bestDist := bw*bh + 1
-	for i := 0; i < len(book); i++ {
-		candidate := book[i]
-		dist := patternDistance(patternBits, candidate)
-		if dist < bestDist {
-			bestDist = dist
-			bestIdx = i
+	if len(patternBits) == 1 {
+		p := patternBits[0]
+		key := patternCacheKey{bw: bw, bh: bh, count: limit}
+		patternIndexCacheMu.RLock()
+		if m, ok := patternIndexCache[key]; ok {
+			if idx, ok := m[p]; ok {
+				patternIndexCacheMu.RUnlock()
+				return uint64(idx)
+			}
+		}
+		patternIndexCacheMu.RUnlock()
+
+		for i := 0; i < len(book); i++ {
+			dist := bits.OnesCount64(p ^ book[i][0])
+			if dist < bestDist {
+				bestDist = dist
+				bestIdx = i
+			}
+		}
+		patternIndexCacheMu.Lock()
+		m, ok := patternIndexCache[key]
+		if !ok {
+			m = map[uint64]uint16{}
+			patternIndexCache[key] = m
+		}
+		m[p] = uint16(bestIdx)
+		patternIndexCacheMu.Unlock()
+	} else {
+		for i := 0; i < len(book); i++ {
+			candidate := book[i]
+			dist := patternDistance(patternBits, candidate)
+			if dist < bestDist {
+				bestDist = dist
+				bestIdx = i
+			}
 		}
 	}
 	return uint64(bestIdx)
 }
 
-func writePatternStream(buf *bytes.Buffer, tokens []patternToken, patternCount int) {
-	indexW := newBitWriter(buf)
-	bitCount := patternIndexBitsForCount(patternCount)
-	for _, tok := range tokens {
-		idx := tok.idx
-		if !tok.has {
-			idx = nearestPatternIndex(tok.bits, tok.bw, tok.bh, patternCount)
-		}
-		indexW.writeBits(idx, bitCount)
-	}
-	indexW.flush()
-}
-
-func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh int) (uint8, uint8, patternMask, bool, error) {
+func encodeBlockPlaneReuse(plane []uint8, stride, height, x0, y0, bw, bh int, scratch *encoderChannelScratch) (uint8, uint8, patternMask, bool, error) {
 	total := bw * bh
 	if total <= 0 {
 		return 0, 0, nil, false, fmt.Errorf("invalid block size")
@@ -1473,12 +1678,14 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh int) (uint8,
 		bg := uint8(bgSum / uint64(bgCnt))
 		if fg < bg {
 			fg, bg = bg, fg
-			bits = invertPatternBits(patternMaskFromUint64(bits, total), bw, bh)[0]
+			bits ^= (uint64(1) << total) - 1
 		}
 		if fg == bg {
 			return fg, bg, nil, false, nil
 		}
-		return fg, bg, patternMaskFromUint64(bits, total), true, nil
+		mask := patternMaskFromUint64Into(scratch.maskBuf, bits, total)
+		scratch.maskBuf = mask
+		return fg, bg, mask, true, nil
 	}
 
 	// Read the block once into a small buffer.
@@ -1488,7 +1695,11 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh int) (uint8,
 		vals = valsBuf[:total]
 		_ = valsBuf
 	} else {
-		vals = make([]uint8, total)
+		if cap(scratch.valsBuf) < total {
+			scratch.valsBuf = make([]uint8, total)
+		}
+		scratch.valsBuf = scratch.valsBuf[:total]
+		vals = scratch.valsBuf
 	}
 
 	var sum uint64
@@ -1507,7 +1718,14 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh int) (uint8,
 	var fgSum, bgSum uint64
 	var fgCnt, bgCnt uint32
 
-	mask := newPatternMask(total)
+	words := (total + 63) / 64
+	if cap(scratch.maskBuf) < words {
+		scratch.maskBuf = make(patternMask, words)
+	}
+	mask := scratch.maskBuf[:words]
+	for i := range mask {
+		mask[i] = 0
+	}
 	for i, v := range vals {
 		isFg := v >= thr
 		if isFg {
@@ -1528,7 +1746,7 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh int) (uint8,
 	bg := uint8(bgSum / uint64(bgCnt))
 	if fg < bg {
 		fg, bg = bg, fg
-		mask = invertPatternBits(mask, bw, bh)
+		invertPatternBitsInPlace(mask, bw, bh)
 	}
 	if fg == bg {
 		return fg, bg, nil, false, nil
@@ -1537,10 +1755,16 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh int) (uint8,
 }
 
 type encoderChannelScratch struct {
-	sizeBuf    bytes.Buffer
-	patternBuf bytes.Buffer
-	fgVals     []uint8
-	bgVals     []uint8
+	sizeBits      []byte
+	patternBits   []byte
+	fgVals        []uint8
+	bgVals        []uint8
+	valsBuf       []uint8
+	maskBuf       patternMask
+	deltaBuf      []byte
+	levelSpreads  []int32
+	stripeScratch []encoderChannelScratch
+	stripeResults []stripeResult
 }
 
 type encodeChannelSpec struct {
@@ -1555,6 +1779,15 @@ type encodeChannelResult struct {
 	fgVals       []uint8
 	bgVals       []uint8
 	err          error
+}
+
+type stripeResult struct {
+	sizeBits    []byte
+	patternBits []byte
+	fgVals      []uint8
+	bgVals      []uint8
+	blockCount  uint32
+	err         error
 }
 
 // no pattern logging
@@ -1676,9 +1909,6 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 		worstBlockCount = 0
 	}
 
-	scratch.sizeBuf.Reset()
-	scratch.patternBuf.Reset()
-
 	if topLevelCount > 0 {
 		// In the worst case every non-leaf smallest block ancestor emits one split bit.
 		worstDecisionBits := 0
@@ -1688,7 +1918,12 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 		if worstDecisionBits < topLevelCount {
 			worstDecisionBits = topLevelCount
 		}
-		scratch.sizeBuf.Grow((worstDecisionBits + 7) / 8)
+		sizeBytes := (worstDecisionBits + 7) / 8
+		if cap(scratch.sizeBits) < sizeBytes {
+			scratch.sizeBits = make([]byte, 0, sizeBytes)
+		} else {
+			scratch.sizeBits = scratch.sizeBits[:0]
+		}
 	}
 	// At most one pattern bit per pixel in the encoded area.
 	// For smallBlock==1, patterns are only emitted for macro-blocks, so fullW*fullH is a safe bound.
@@ -1697,11 +1932,18 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 		patternBits = fullW * fullH
 	}
 	if patternBits > 0 {
-		scratch.patternBuf.Grow((patternBits + 7) / 8)
+		patternBytes := (patternBits + 7) / 8
+		if cap(scratch.patternBits) < patternBytes {
+			scratch.patternBits = make([]byte, 0, patternBytes)
+		} else {
+			scratch.patternBits = scratch.patternBits[:0]
+		}
 	}
 
-	sizeW := newBitWriter(&scratch.sizeBuf)
-	patternTokens := make([]patternToken, 0, worstBlockCount)
+	patternBitCount := patternIndexBitsForCount(e.patternCount)
+
+	sizeStream := newBitStream(scratch.sizeBits)
+	patternStream := newBitStream(scratch.patternBits)
 
 	if worstBlockCount > 0 {
 		if cap(scratch.fgVals) < worstBlockCount {
@@ -1721,13 +1963,17 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 	if stride > 0 {
 		height = len(plane) / stride
 	}
-	levelSpreads := make([]int32, len(levels))
-	for i := range levels {
-		levelSpreads[i] = spreadForBlockSize(e.quality)
+	if cap(scratch.levelSpreads) < len(levels) {
+		scratch.levelSpreads = make([]int32, len(levels))
+	} else {
+		scratch.levelSpreads = scratch.levelSpreads[:len(levels)]
 	}
-	recordPatternToken := func(x, y int, bits patternMask, bw, bh int) {
-		tok := patternToken{bits: clonePatternMask(bits), bw: bw, bh: bh, x: x, y: y}
-		patternTokens = append(patternTokens, tok)
+	for i := range levels {
+		scratch.levelSpreads[i] = spreadForBlockSize(e.quality)
+	}
+	writePatternIndex := func(bits patternMask, bw, bh int) {
+		idx := nearestPatternIndex(bits, bw, bh, e.patternCount)
+		patternStream.writeBits(idx, patternBitCount)
 	}
 	quantize := func(fg, bg uint8) (uint8, uint8) {
 		if channelID == chY {
@@ -1772,8 +2018,8 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 					maxV = v3
 				}
 
-				useBig := int32(maxV)-int32(minV) < levelSpreads[len(levelSpreads)-1]
-				sizeW.writeBit(useBig)
+				useBig := int32(maxV)-int32(minV) < scratch.levelSpreads[len(scratch.levelSpreads)-1]
+				sizeStream.writeBit(useBig)
 
 				if useBig {
 					sum := uint64(v0) + uint64(v1) + uint64(v2) + uint64(v3)
@@ -1840,7 +2086,7 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 					fg = encodeBlockFlagIntoFG(fg, isPattern, bg)
 					scratch.fgVals = append(scratch.fgVals, fg)
 					if isPattern {
-						recordPatternToken(mx, my, patternMaskFromUint64(bits, 4), 2, 2)
+						writePatternIndex(patternMaskFromUint64(bits, 4), 2, 2)
 						scratch.bgVals = append(scratch.bgVals, bg)
 					}
 					blockCount++
@@ -1876,16 +2122,174 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 			}
 		}
 
-		sizeW.flush()
-		writePatternStream(&scratch.patternBuf, patternTokens, e.patternCount)
-		return blockCount, scratch.sizeBuf.Bytes(), scratch.patternBuf.Bytes(), scratch.fgVals, scratch.bgVals, nil
+		scratch.sizeBits = sizeStream.bytesPadded()
+		scratch.patternBits = patternStream.bytesPadded()
+		return blockCount, scratch.sizeBits, scratch.patternBits, scratch.fgVals, scratch.bgVals, nil
+	}
+
+	parallelMain := false
+	if e.Parallel && useMacro && fullW > 0 && fullH > 0 {
+		rows := fullH / topBlock
+		if rows >= 2 {
+			workers := min(runtime.NumCPU(), rows)
+			rowsPer := (rows + workers - 1) / workers
+
+			if len(scratch.stripeScratch) < workers {
+				scratch.stripeScratch = make([]encoderChannelScratch, workers)
+				scratch.stripeResults = make([]stripeResult, workers)
+			}
+			results := scratch.stripeResults[:workers]
+			scratches := scratch.stripeScratch[:workers]
+
+			var wg sync.WaitGroup
+			for i := 0; i < workers; i++ {
+				y0 := i * rowsPer
+				y1 := min(y0+rowsPer, rows)
+				if y0 >= y1 {
+					continue
+				}
+				wg.Add(1)
+				go func(i, y0, y1 int) {
+					defer wg.Done()
+					stripeHeight := (y1 - y0) * topBlock
+					worstStripeBlocks := countSmallBlocks(fullW, stripeHeight, smallBlock)
+					if worstStripeBlocks < 0 {
+						worstStripeBlocks = 0
+					}
+					scratchLocal := &scratches[i]
+					worstStripeDecisionBits := worstStripeBlocks
+					sizeBytes := (worstStripeDecisionBits + 7) / 8
+					if cap(scratchLocal.sizeBits) < sizeBytes {
+						scratchLocal.sizeBits = make([]byte, 0, sizeBytes)
+					} else {
+						scratchLocal.sizeBits = scratchLocal.sizeBits[:0]
+					}
+					stripePatternBits := fullW * stripeHeight
+					if smallBlock == 1 {
+						stripePatternBits = fullW * stripeHeight
+					}
+					patternBytes := (stripePatternBits + 7) / 8
+					if cap(scratchLocal.patternBits) < patternBytes {
+						scratchLocal.patternBits = make([]byte, 0, patternBytes)
+					} else {
+						scratchLocal.patternBits = scratchLocal.patternBits[:0]
+					}
+					sizeS := newBitStream(scratchLocal.sizeBits)
+					patternS := newBitStream(scratchLocal.patternBits)
+					if cap(scratchLocal.fgVals) < worstStripeBlocks {
+						scratchLocal.fgVals = make([]uint8, 0, worstStripeBlocks)
+						scratchLocal.bgVals = make([]uint8, 0, worstStripeBlocks)
+					} else {
+						scratchLocal.fgVals = scratchLocal.fgVals[:0]
+						scratchLocal.bgVals = scratchLocal.bgVals[:0]
+					}
+
+					writePatternIndexLocal := func(bits patternMask, bw, bh int) {
+						idx := nearestPatternIndex(bits, bw, bh, e.patternCount)
+						patternS.writeBits(idx, patternBitCount)
+					}
+
+					var blockCountLocal uint32
+					var encodeNodeLocal func(x, y, levelIdx int) error
+					encodeNodeLocal = func(x, y, levelIdx int) error {
+						size := levels[levelIdx]
+						if levelIdx == 0 {
+							fg, bg, bits, isPattern, err := encodeBlockPlaneReuse(plane, stride, height, x, y, size, size, scratchLocal)
+							if err != nil {
+								return err
+							}
+							fg, bg = quantize(fg, bg)
+							fg = encodeBlockFlagIntoFG(fg, isPattern, bg)
+							scratchLocal.fgVals = append(scratchLocal.fgVals, fg)
+							if isPattern {
+								writePatternIndexLocal(bits, size, size)
+								scratchLocal.bgVals = append(scratchLocal.bgVals, bg)
+							}
+							blockCountLocal++
+							return nil
+						}
+
+						useHere := canUseBlockSizeChannel(plane, stride, height, x, y, size, scratch.levelSpreads[levelIdx])
+						sizeS.writeBit(useHere)
+						if useHere {
+							fg, bg, bits, isPattern, err := encodeBlockPlaneReuse(plane, stride, height, x, y, size, size, scratchLocal)
+							if err != nil {
+								return err
+							}
+							fg, bg = quantize(fg, bg)
+							fg = encodeBlockFlagIntoFG(fg, isPattern, bg)
+							scratchLocal.fgVals = append(scratchLocal.fgVals, fg)
+							if isPattern {
+								writePatternIndexLocal(bits, size, size)
+								scratchLocal.bgVals = append(scratchLocal.bgVals, bg)
+							}
+							blockCountLocal++
+							return nil
+						}
+
+						childSize := levels[levelIdx-1]
+						ratio := size / childSize
+						for by := 0; by < ratio; by++ {
+							for bx := 0; bx < ratio; bx++ {
+								cx := x + bx*childSize
+								cy := y + by*childSize
+								if vw, vh := visibleBlockDims(stride, height, cx, cy, childSize, childSize); vw <= 0 || vh <= 0 {
+									continue
+								}
+								if err := encodeNodeLocal(cx, cy, levelIdx-1); err != nil {
+									return err
+								}
+							}
+						}
+						return nil
+					}
+
+					for my := y0 * topBlock; my < y1*topBlock; my += topBlock {
+						for mx := 0; mx < fullW; mx += topBlock {
+							if err := encodeNodeLocal(mx, my, len(levels)-1); err != nil {
+								results[i] = stripeResult{err: err}
+								return
+							}
+						}
+					}
+
+					scratchLocal.sizeBits = sizeS.bytesPadded()
+					scratchLocal.patternBits = patternS.bytesPadded()
+					results[i] = stripeResult{
+						sizeBits:    scratchLocal.sizeBits,
+						patternBits: scratchLocal.patternBits,
+						fgVals:      scratchLocal.fgVals,
+						bgVals:      scratchLocal.bgVals,
+						blockCount:  blockCountLocal,
+					}
+				}(i, y0, y1)
+			}
+			wg.Wait()
+
+			sizeStream.buf = sizeStream.buf[:0]
+			patternStream.buf = patternStream.buf[:0]
+			sizeStream.byte, sizeStream.n = 0, 0
+			patternStream.byte, patternStream.n = 0, 0
+
+			for i := 0; i < workers; i++ {
+				if results[i].err != nil {
+					return 0, nil, nil, nil, nil, results[i].err
+				}
+				sizeStream.appendBytesPadded(results[i].sizeBits)
+				patternStream.appendBytesPadded(results[i].patternBits)
+				scratch.fgVals = append(scratch.fgVals, results[i].fgVals...)
+				scratch.bgVals = append(scratch.bgVals, results[i].bgVals...)
+				blockCount += results[i].blockCount
+			}
+			parallelMain = true
+		}
 	}
 
 	var encodeNode func(x, y, levelIdx int) error
 	encodeNode = func(x, y, levelIdx int) error {
 		size := levels[levelIdx]
 		if levelIdx == 0 {
-			fg, bg, bits, isPattern, err := encodeBlockPlane(plane, stride, height, x, y, size, size)
+			fg, bg, bits, isPattern, err := encodeBlockPlaneReuse(plane, stride, height, x, y, size, size, scratch)
 			if err != nil {
 				return err
 			}
@@ -1893,17 +2297,17 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 			fg = encodeBlockFlagIntoFG(fg, isPattern, bg)
 			scratch.fgVals = append(scratch.fgVals, fg)
 			if isPattern {
-				recordPatternToken(x, y, bits, size, size)
+				writePatternIndex(bits, size, size)
 				scratch.bgVals = append(scratch.bgVals, bg)
 			}
 			blockCount++
 			return nil
 		}
 
-		useHere := canUseBlockSizeChannel(plane, stride, height, x, y, size, levelSpreads[levelIdx])
-		sizeW.writeBit(useHere)
+		useHere := canUseBlockSizeChannel(plane, stride, height, x, y, size, scratch.levelSpreads[levelIdx])
+		sizeStream.writeBit(useHere)
 		if useHere {
-			fg, bg, bits, isPattern, err := encodeBlockPlane(plane, stride, height, x, y, size, size)
+			fg, bg, bits, isPattern, err := encodeBlockPlaneReuse(plane, stride, height, x, y, size, size, scratch)
 			if err != nil {
 				return err
 			}
@@ -1911,7 +2315,7 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 			fg = encodeBlockFlagIntoFG(fg, isPattern, bg)
 			scratch.fgVals = append(scratch.fgVals, fg)
 			if isPattern {
-				recordPatternToken(x, y, bits, size, size)
+				writePatternIndex(bits, size, size)
 				scratch.bgVals = append(scratch.bgVals, bg)
 			}
 			blockCount++
@@ -1936,10 +2340,12 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 	}
 
 	// main topBlock x topBlock area
-	for my := 0; my < fullH; my += topBlock {
-		for mx := 0; mx < fullW; mx += topBlock {
-			if err := encodeNode(mx, my, len(levels)-1); err != nil {
-				return 0, nil, nil, nil, nil, err
+	if !parallelMain {
+		for my := 0; my < fullH; my += topBlock {
+			for mx := 0; mx < fullW; mx += topBlock {
+				if err := encodeNode(mx, my, len(levels)-1); err != nil {
+					return 0, nil, nil, nil, nil, err
+				}
 			}
 		}
 	}
@@ -1947,7 +2353,7 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 	// right stripe: small blocks only
 	for my := 0; my < fullH; my += smallBlock {
 		for mx := fullW; mx < w4; mx += smallBlock {
-			fg, bg, bits, isPattern, err := encodeBlockPlane(plane, stride, height, mx, my, smallBlock, smallBlock)
+			fg, bg, bits, isPattern, err := encodeBlockPlaneReuse(plane, stride, height, mx, my, smallBlock, smallBlock, scratch)
 			if err != nil {
 				return 0, nil, nil, nil, nil, err
 			}
@@ -1955,7 +2361,7 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 			fg = encodeBlockFlagIntoFG(fg, isPattern, bg)
 			scratch.fgVals = append(scratch.fgVals, fg)
 			if isPattern {
-				recordPatternToken(mx, my, bits, smallBlock, smallBlock)
+				writePatternIndex(bits, smallBlock, smallBlock)
 				scratch.bgVals = append(scratch.bgVals, bg)
 			}
 			blockCount++
@@ -1964,7 +2370,7 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 	// bottom stripe: small blocks only (including bottom-right corner)
 	for my := fullH; my < h4; my += smallBlock {
 		for mx := 0; mx < w4; mx += smallBlock {
-			fg, bg, bits, isPattern, err := encodeBlockPlane(plane, stride, height, mx, my, smallBlock, smallBlock)
+			fg, bg, bits, isPattern, err := encodeBlockPlaneReuse(plane, stride, height, mx, my, smallBlock, smallBlock, scratch)
 			if err != nil {
 				return 0, nil, nil, nil, nil, err
 			}
@@ -1972,16 +2378,16 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 			fg = encodeBlockFlagIntoFG(fg, isPattern, bg)
 			scratch.fgVals = append(scratch.fgVals, fg)
 			if isPattern {
-				recordPatternToken(mx, my, bits, smallBlock, smallBlock)
+				writePatternIndex(bits, smallBlock, smallBlock)
 				scratch.bgVals = append(scratch.bgVals, bg)
 			}
 			blockCount++
 		}
 	}
 
-	sizeW.flush()
-	writePatternStream(&scratch.patternBuf, patternTokens, e.patternCount)
-	return blockCount, scratch.sizeBuf.Bytes(), scratch.patternBuf.Bytes(), scratch.fgVals, scratch.bgVals, nil
+	scratch.sizeBits = sizeStream.bytesPadded()
+	scratch.patternBits = patternStream.bytesPadded()
+	return blockCount, scratch.sizeBits, scratch.patternBits, scratch.fgVals, scratch.bgVals, nil
 }
 
 func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, error) {
@@ -2099,6 +2505,8 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 			}
 			_ = res
 
+			scratch := &e.ch[channels[i].id]
+
 			// number of blocks for this channel
 			if err := writeU32BE(e.bw, res.blockCount); err != nil {
 				return nil, err
@@ -2121,14 +2529,17 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 			if err := writeU32BE(e.bw, uint32(len(res.fgVals))); err != nil {
 				return nil, err
 			}
-			if err := writeDeltaPackedBytes(e.bw, res.fgVals); err != nil {
+			var err error
+			scratch.deltaBuf, err = writeDeltaPackedBytes(e.bw, res.fgVals, scratch.deltaBuf)
+			if err != nil {
 				return nil, err
 			}
 
 			if err := writeU32BE(e.bw, uint32(len(res.bgVals))); err != nil {
 				return nil, err
 			}
-			if err := writeDeltaPackedBytes(e.bw, res.bgVals); err != nil {
+			scratch.deltaBuf, err = writeDeltaPackedBytes(e.bw, res.bgVals, scratch.deltaBuf)
+			if err != nil {
 				return nil, err
 			}
 
@@ -2163,14 +2574,16 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 			if err := writeU32BE(e.bw, uint32(len(fgVals))); err != nil {
 				return nil, err
 			}
-			if err := writeDeltaPackedBytes(e.bw, fgVals); err != nil {
+			scratch.deltaBuf, err = writeDeltaPackedBytes(e.bw, fgVals, scratch.deltaBuf)
+			if err != nil {
 				return nil, err
 			}
 
 			if err := writeU32BE(e.bw, uint32(len(bgVals))); err != nil {
 				return nil, err
 			}
-			if err := writeDeltaPackedBytes(e.bw, bgVals); err != nil {
+			scratch.deltaBuf, err = writeDeltaPackedBytes(e.bw, bgVals, scratch.deltaBuf)
+			if err != nil {
 				return nil, err
 			}
 
@@ -2281,6 +2694,25 @@ func drawBlockIntoPix(pix []byte, strideBytes, imgW, imgH int, x0, y0, bw, bh in
 	return nil
 }
 
+// drawBlockIntoPixFull assumes the block is fully inside the image.
+func drawBlockIntoPixFull(pix []byte, strideBytes, imgW int, x0, y0, bw, bh int, br *bitReader, fg, bg uint8, patternCount int, channelOffset int) error {
+	pattern, err := readPatternComposite(br, bw, bh, patternCount)
+	if err != nil {
+		return err
+	}
+	for yy := 0; yy < bh; yy++ {
+		row := (y0+yy)*strideBytes + x0*4 + channelOffset
+		for xx := 0; xx < bw; xx++ {
+			val := bg
+			if testPatternBit(pattern, bw, bh, xx, yy) {
+				val = fg
+			}
+			pix[row+xx*4] = val
+		}
+	}
+	return nil
+}
+
 // fillBlockPlane fills a block with a single value (no pattern bits).
 func fillBlockPlane(plane []uint8, stride int, x0, y0, bw, bh int, val uint8) error {
 	height := 0
@@ -2314,6 +2746,16 @@ func fillBlockIntoPix(pix []byte, strideBytes, imgW, imgH int, x0, y0, bw, bh in
 		}
 	}
 	return nil
+}
+
+// fillBlockIntoPixFull assumes the block is fully inside the image.
+func fillBlockIntoPixFull(pix []byte, strideBytes int, x0, y0, bw, bh int, val uint8, channelOffset int) {
+	for yy := 0; yy < bh; yy++ {
+		row := (y0+yy)*strideBytes + x0*4 + channelOffset
+		for xx := 0; xx < bw; xx++ {
+			pix[row+xx*4] = val
+		}
+	}
 }
 
 // readChannelSegment returns a zero-copy slice of the next channel stream
@@ -2743,6 +3185,7 @@ func decodeChannelToPix(data []byte, imgW, imgH int, levels []int, patternCount 
 		if err != nil {
 			return err
 		}
+		full := x+size <= imgW && y+size <= imgH
 		if encodedBlockIsPattern(fg) {
 			var bg uint8
 			if bgPerPattern {
@@ -2751,12 +3194,22 @@ func decodeChannelToPix(data []byte, imgW, imgH int, levels []int, patternCount 
 					return err
 				}
 			}
-			if err := drawBlockIntoPix(pix, strideBytes, imgW, imgH, x, y, size, size, &patternBR, fg, bg, patternCount, channelOffset); err != nil {
-				return err
+			if full {
+				if err := drawBlockIntoPixFull(pix, strideBytes, imgW, x, y, size, size, &patternBR, fg, bg, patternCount, channelOffset); err != nil {
+					return err
+				}
+			} else {
+				if err := drawBlockIntoPix(pix, strideBytes, imgW, imgH, x, y, size, size, &patternBR, fg, bg, patternCount, channelOffset); err != nil {
+					return err
+				}
 			}
 		} else {
-			if err := fillBlockIntoPix(pix, strideBytes, imgW, imgH, x, y, size, size, fg, channelOffset); err != nil {
-				return err
+			if full {
+				fillBlockIntoPixFull(pix, strideBytes, x, y, size, size, fg, channelOffset)
+			} else {
+				if err := fillBlockIntoPix(pix, strideBytes, imgW, imgH, x, y, size, size, fg, channelOffset); err != nil {
+					return err
+				}
 			}
 		}
 		blockIndex++
@@ -2779,17 +3232,28 @@ func decodeChannelToPix(data []byte, imgW, imgH int, levels []int, patternCount 
 			if err != nil {
 				return err
 			}
+			full := mx+smallBlock <= imgW && my+smallBlock <= imgH
 			if encodedBlockIsPattern(fg) {
 				bg, err := bgStream.next()
 				if err != nil {
 					return err
 				}
-				if err := drawBlockIntoPix(pix, strideBytes, imgW, imgH, mx, my, smallBlock, smallBlock, &patternBR, fg, bg, patternCount, channelOffset); err != nil {
-					return err
+				if full {
+					if err := drawBlockIntoPixFull(pix, strideBytes, imgW, mx, my, smallBlock, smallBlock, &patternBR, fg, bg, patternCount, channelOffset); err != nil {
+						return err
+					}
+				} else {
+					if err := drawBlockIntoPix(pix, strideBytes, imgW, imgH, mx, my, smallBlock, smallBlock, &patternBR, fg, bg, patternCount, channelOffset); err != nil {
+						return err
+					}
 				}
 			} else {
-				if err := fillBlockIntoPix(pix, strideBytes, imgW, imgH, mx, my, smallBlock, smallBlock, fg, channelOffset); err != nil {
-					return err
+				if full {
+					fillBlockIntoPixFull(pix, strideBytes, mx, my, smallBlock, smallBlock, fg, channelOffset)
+				} else {
+					if err := fillBlockIntoPix(pix, strideBytes, imgW, imgH, mx, my, smallBlock, smallBlock, fg, channelOffset); err != nil {
+						return err
+					}
 				}
 			}
 			blockIndex++
@@ -2804,17 +3268,28 @@ func decodeChannelToPix(data []byte, imgW, imgH int, levels []int, patternCount 
 			if err != nil {
 				return err
 			}
+			full := mx+smallBlock <= imgW && my+smallBlock <= imgH
 			if encodedBlockIsPattern(fg) {
 				bg, err := bgStream.next()
 				if err != nil {
 					return err
 				}
-				if err := drawBlockIntoPix(pix, strideBytes, imgW, imgH, mx, my, smallBlock, smallBlock, &patternBR, fg, bg, patternCount, channelOffset); err != nil {
-					return err
+				if full {
+					if err := drawBlockIntoPixFull(pix, strideBytes, imgW, mx, my, smallBlock, smallBlock, &patternBR, fg, bg, patternCount, channelOffset); err != nil {
+						return err
+					}
+				} else {
+					if err := drawBlockIntoPix(pix, strideBytes, imgW, imgH, mx, my, smallBlock, smallBlock, &patternBR, fg, bg, patternCount, channelOffset); err != nil {
+						return err
+					}
 				}
 			} else {
-				if err := fillBlockIntoPix(pix, strideBytes, imgW, imgH, mx, my, smallBlock, smallBlock, fg, channelOffset); err != nil {
-					return err
+				if full {
+					fillBlockIntoPixFull(pix, strideBytes, mx, my, smallBlock, smallBlock, fg, channelOffset)
+				} else {
+					if err := fillBlockIntoPix(pix, strideBytes, imgW, imgH, mx, my, smallBlock, smallBlock, fg, channelOffset); err != nil {
+						return err
+					}
 				}
 			}
 			blockIndex++
@@ -2982,14 +3457,12 @@ func (d *Decoder) Decode(compData []byte) (*image.RGBA, error) {
 		if errY != nil {
 			return nil, errY
 		}
-		cbPlane, crPlane, nextPos, err := d.decodeChromaGridOverlay(payload, pos, imgW, imgH)
+		nextPos, err := d.decodeChromaGridOverlayIntoPix(payload, pos, imgW, imgH, pix, stride)
 		if err != nil {
 			return nil, err
 		}
 		pos = nextPos
-		blitPlaneToPix(cbPlane, pix, stride, imgW, imgH, 1)
-		blitPlaneToPix(crPlane, pix, stride, imgW, imgH, 2)
-	} else if d.Parallel {
+	} else if d.Parallel && imgW*imgH >= 256*256 {
 		var wg sync.WaitGroup
 		wg.Add(1)
 		go decodeChannelToPixWorker(ySeg, imgW, imgH, levels, d.patternCount, pix, stride, 0, &errY, &wg)
@@ -3361,33 +3834,35 @@ func bitsNeeded(v int) int {
 
 // writeDeltaPackedBytes encodes src using the same layout as deltaPackBytes,
 // but streams directly into w to avoid allocating an intermediate slice.
-func writeDeltaPackedBytes(w *bufio.Writer, src []uint8) error {
+func writeDeltaPackedBytes(w *bufio.Writer, src []uint8, scratch []byte) ([]byte, error) {
 	n := len(src)
 	if n == 0 {
-		return nil
+		return scratch, nil
 	}
 	if err := w.WriteByte(src[0]); err != nil {
-		return err
+		return scratch, err
 	}
 
 	prev := src[0]
 	i := 1
 
-	var buf [4096]byte
 	for i < n {
+		if len(scratch) == 0 {
+			scratch = make([]byte, 4096)
+		}
 		j := 0
-		for j < len(buf) && i < n {
+		for j < len(scratch) && i < n {
 			d := encodeDelta8(prev, src[i])
-			buf[j] = byte(d)
+			scratch[j] = byte(d)
 			prev = src[i]
 			i++
 			j++
 		}
-		if _, err := w.Write(buf[:j]); err != nil {
-			return err
+		if _, err := w.Write(scratch[:j]); err != nil {
+			return scratch, err
 		}
 	}
-	return nil
+	return scratch, nil
 }
 
 func writeU16BE(w *bufio.Writer, v uint16) error {
