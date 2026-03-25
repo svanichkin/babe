@@ -187,6 +187,7 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount
 
 	start := time.Now()
 	enc := NewEncoder()
+	defer enc.Close()
 	enc.patternCount = patternCount
 	enc.yQuantShift = yQuantShift
 	enc.backgroundTile = tile
@@ -245,7 +246,9 @@ func decodeBabe(inPath, outPath string, splitChannels bool) error {
 	compSize := len(compData)
 
 	start := time.Now()
-	dec, err := NewDecoder().Decode(compData)
+	decoder := NewDecoder()
+	defer decoder.Close()
+	dec, err := decoder.Decode(compData)
 	if err != nil {
 		return err
 	}

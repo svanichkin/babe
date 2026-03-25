@@ -26,6 +26,11 @@ const (
 	codec = "BABE-L\n"
 )
 
+const (
+	parallelExtractMinPixels = 512 * 512
+	parallelEncodeMinPixels  = 512 * 512
+)
+
 // current encode quality in [0..100]; used to drive macro/small decisions.
 
 // channel presence flags for the header; at least Y must be set.
@@ -447,19 +452,19 @@ func extractYCbCrFromRGBA(src *image.RGBA, yPlane, cbPlane, crPlane []uint8, w, 
 
 func extractYCbCrFromRGBAStripe(pix []byte, stride, w int, yPlane, cbPlane, crPlane []uint8, yStart, yEnd int, wg *sync.WaitGroup) {
 	defer wg.Done()
+	initYCbCrTables()
 	for y := yStart; y < yEnd; y++ {
-		baseIdx := y * w
+		idx := y * w
 		pixRow := y * stride
-		for x := 0; x < w; x++ {
-			p := pixRow + x*4
+		rowEnd := pixRow + w*4
+		for p := pixRow; p < rowEnd; p += 4 {
 			r8 := pix[p+0]
 			g8 := pix[p+1]
 			b8 := pix[p+2]
-			idx := baseIdx + x
-			rr, gg, bb := int32(r8), int32(g8), int32(b8)
-			yPlane[idx] = uint8((77*rr + 150*gg + 29*bb) >> 8)
-			cbPlane[idx] = uint8(((-43*rr - 85*gg + 128*bb) >> 8) + 128)
-			crPlane[idx] = uint8(((128*rr - 107*gg - 21*bb) >> 8) + 128)
+			yPlane[idx] = uint8((yFromR[r8] + yFromG[g8] + yFromB[b8]) >> 8)
+			cbPlane[idx] = uint8(((cbFromR[r8] + cbFromG[g8] + cbFromB[b8]) >> 8) + 128)
+			crPlane[idx] = uint8(((crFromR[r8] + crFromG[g8] + crFromB[b8]) >> 8) + 128)
+			idx++
 		}
 	}
 }
@@ -467,20 +472,20 @@ func extractYCbCrFromRGBAStripe(pix []byte, stride, w int, yPlane, cbPlane, crPl
 func extractYCbCrFromRGBASequential(src *image.RGBA, yPlane, cbPlane, crPlane []uint8, w, h int) {
 	stride := src.Stride
 	pix := src.Pix
+	initYCbCrTables()
 
 	for y := 0; y < h; y++ {
-		baseIdx := y * w
+		idx := y * w
 		pixRow := y * stride
-		for x := 0; x < w; x++ {
-			p := pixRow + x*4
+		rowEnd := pixRow + w*4
+		for p := pixRow; p < rowEnd; p += 4 {
 			r8 := pix[p+0]
 			g8 := pix[p+1]
 			b8 := pix[p+2]
-			idx := baseIdx + x
-			rr, gg, bb := int32(r8), int32(g8), int32(b8)
-			yPlane[idx] = uint8((77*rr + 150*gg + 29*bb) >> 8)
-			cbPlane[idx] = uint8(((-43*rr - 85*gg + 128*bb) >> 8) + 128)
-			crPlane[idx] = uint8(((128*rr - 107*gg - 21*bb) >> 8) + 128)
+			yPlane[idx] = uint8((yFromR[r8] + yFromG[g8] + yFromB[b8]) >> 8)
+			cbPlane[idx] = uint8(((cbFromR[r8] + cbFromG[g8] + cbFromB[b8]) >> 8) + 128)
+			crPlane[idx] = uint8(((crFromR[r8] + crFromG[g8] + crFromB[b8]) >> 8) + 128)
+			idx++
 		}
 	}
 }
@@ -520,19 +525,19 @@ func extractYCbCrFromNRGBA(src *image.NRGBA, yPlane, cbPlane, crPlane []uint8, w
 
 func extractYCbCrFromNRGBAStripe(pix []byte, stride, w int, yPlane, cbPlane, crPlane []uint8, yStart, yEnd int, wg *sync.WaitGroup) {
 	defer wg.Done()
+	initYCbCrTables()
 	for y := yStart; y < yEnd; y++ {
-		baseIdx := y * w
+		idx := y * w
 		pixRow := y * stride
-		for x := 0; x < w; x++ {
-			p := pixRow + x*4
+		rowEnd := pixRow + w*4
+		for p := pixRow; p < rowEnd; p += 4 {
 			r8 := pix[p+0]
 			g8 := pix[p+1]
 			b8 := pix[p+2]
-			idx := baseIdx + x
-			rr, gg, bb := int32(r8), int32(g8), int32(b8)
-			yPlane[idx] = uint8((77*rr + 150*gg + 29*bb) >> 8)
-			cbPlane[idx] = uint8(((-43*rr - 85*gg + 128*bb) >> 8) + 128)
-			crPlane[idx] = uint8(((128*rr - 107*gg - 21*bb) >> 8) + 128)
+			yPlane[idx] = uint8((yFromR[r8] + yFromG[g8] + yFromB[b8]) >> 8)
+			cbPlane[idx] = uint8(((cbFromR[r8] + cbFromG[g8] + cbFromB[b8]) >> 8) + 128)
+			crPlane[idx] = uint8(((crFromR[r8] + crFromG[g8] + crFromB[b8]) >> 8) + 128)
+			idx++
 		}
 	}
 }
@@ -540,25 +545,29 @@ func extractYCbCrFromNRGBAStripe(pix []byte, stride, w int, yPlane, cbPlane, crP
 func extractYCbCrFromNRGBASequential(src *image.NRGBA, yPlane, cbPlane, crPlane []uint8, w, h int) {
 	stride := src.Stride
 	pix := src.Pix
+	initYCbCrTables()
 
 	for y := 0; y < h; y++ {
-		baseIdx := y * w
+		idx := y * w
 		pixRow := y * stride
-		for x := 0; x < w; x++ {
-			p := pixRow + x*4
+		rowEnd := pixRow + w*4
+		for p := pixRow; p < rowEnd; p += 4 {
 			r8 := pix[p+0]
 			g8 := pix[p+1]
 			b8 := pix[p+2]
-			idx := baseIdx + x
-			rr, gg, bb := int32(r8), int32(g8), int32(b8)
-			yPlane[idx] = uint8((77*rr + 150*gg + 29*bb) >> 8)
-			cbPlane[idx] = uint8(((-43*rr - 85*gg + 128*bb) >> 8) + 128)
-			crPlane[idx] = uint8(((128*rr - 107*gg - 21*bb) >> 8) + 128)
+			yPlane[idx] = uint8((yFromR[r8] + yFromG[g8] + yFromB[b8]) >> 8)
+			cbPlane[idx] = uint8(((cbFromR[r8] + cbFromG[g8] + cbFromB[b8]) >> 8) + 128)
+			crPlane[idx] = uint8(((crFromR[r8] + crFromG[g8] + crFromB[b8]) >> 8) + 128)
+			idx++
 		}
 	}
 }
 
 func extractYCbCrFromYCbCr(src *image.YCbCr, yPlane, cbPlane, crPlane []uint8, w, h int) {
+	if extractYCbCrFromYCbCrFastRows(src, yPlane, cbPlane, crPlane, w, 0, h) {
+		return
+	}
+
 	b := src.Bounds()
 	minX, minY := b.Min.X, b.Min.Y
 
@@ -588,8 +597,150 @@ func extractYCbCrFromYCbCr(src *image.YCbCr, yPlane, cbPlane, crPlane []uint8, w
 	wg.Wait()
 }
 
+func extractYCbCrFromYCbCrFastRows(src *image.YCbCr, yPlane, cbPlane, crPlane []uint8, w, yStart, yEnd int) bool {
+	yStride := src.YStride
+	cStride := src.CStride
+	yPix := src.Y
+	cbPix := src.Cb
+	crPix := src.Cr
+
+	switch src.SubsampleRatio {
+	case image.YCbCrSubsampleRatio444:
+		for y := yStart; y < yEnd; y++ {
+			base := y * w
+			copy(yPlane[base:base+w], yPix[y*yStride:y*yStride+w])
+			cRow := y * cStride
+			copy(cbPlane[base:base+w], cbPix[cRow:cRow+w])
+			copy(crPlane[base:base+w], crPix[cRow:cRow+w])
+		}
+		return true
+	case image.YCbCrSubsampleRatio422:
+		for y := yStart; y < yEnd; y++ {
+			base := y * w
+			copy(yPlane[base:base+w], yPix[y*yStride:y*yStride+w])
+			dstCb := cbPlane[base : base+w]
+			dstCr := crPlane[base : base+w]
+			si := y * cStride
+			for di := 0; di < w; {
+				cbv := cbPix[si]
+				crv := crPix[si]
+				si++
+				dstCb[di] = cbv
+				dstCr[di] = crv
+				di++
+				if di < w {
+					dstCb[di] = cbv
+					dstCr[di] = crv
+					di++
+				}
+			}
+		}
+		return true
+	case image.YCbCrSubsampleRatio420:
+		for y := yStart; y < yEnd; y++ {
+			base := y * w
+			copy(yPlane[base:base+w], yPix[y*yStride:y*yStride+w])
+			dstCb := cbPlane[base : base+w]
+			dstCr := crPlane[base : base+w]
+			si := (y >> 1) * cStride
+			for di := 0; di < w; {
+				cbv := cbPix[si]
+				crv := crPix[si]
+				si++
+				dstCb[di] = cbv
+				dstCr[di] = crv
+				di++
+				if di < w {
+					dstCb[di] = cbv
+					dstCr[di] = crv
+					di++
+				}
+			}
+		}
+		return true
+	case image.YCbCrSubsampleRatio440:
+		for y := yStart; y < yEnd; y++ {
+			base := y * w
+			copy(yPlane[base:base+w], yPix[y*yStride:y*yStride+w])
+			cRow := (y >> 1) * cStride
+			copy(cbPlane[base:base+w], cbPix[cRow:cRow+w])
+			copy(crPlane[base:base+w], crPix[cRow:cRow+w])
+		}
+		return true
+	case image.YCbCrSubsampleRatio411:
+		for y := yStart; y < yEnd; y++ {
+			base := y * w
+			copy(yPlane[base:base+w], yPix[y*yStride:y*yStride+w])
+			dstCb := cbPlane[base : base+w]
+			dstCr := crPlane[base : base+w]
+			si := y * cStride
+			for di := 0; di < w; {
+				cbv := cbPix[si]
+				crv := crPix[si]
+				si++
+				dstCb[di] = cbv
+				dstCr[di] = crv
+				di++
+				if di < w {
+					dstCb[di] = cbv
+					dstCr[di] = crv
+					di++
+				}
+				if di < w {
+					dstCb[di] = cbv
+					dstCr[di] = crv
+					di++
+				}
+				if di < w {
+					dstCb[di] = cbv
+					dstCr[di] = crv
+					di++
+				}
+			}
+		}
+		return true
+	case image.YCbCrSubsampleRatio410:
+		for y := yStart; y < yEnd; y++ {
+			base := y * w
+			copy(yPlane[base:base+w], yPix[y*yStride:y*yStride+w])
+			dstCb := cbPlane[base : base+w]
+			dstCr := crPlane[base : base+w]
+			si := (y >> 1) * cStride
+			for di := 0; di < w; {
+				cbv := cbPix[si]
+				crv := crPix[si]
+				si++
+				dstCb[di] = cbv
+				dstCr[di] = crv
+				di++
+				if di < w {
+					dstCb[di] = cbv
+					dstCr[di] = crv
+					di++
+				}
+				if di < w {
+					dstCb[di] = cbv
+					dstCr[di] = crv
+					di++
+				}
+				if di < w {
+					dstCb[di] = cbv
+					dstCr[di] = crv
+					di++
+				}
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
 func extractYCbCrFromYCbCrStripe(src *image.YCbCr, minX, minY, w int, yPlane, cbPlane, crPlane []uint8, yStart, yEnd int, wg *sync.WaitGroup) {
 	defer wg.Done()
+	if extractYCbCrFromYCbCrFastRows(src, yPlane, cbPlane, crPlane, w, yStart, yEnd) {
+		return
+	}
 	rectMinX, rectMinY := src.Rect.Min.X, src.Rect.Min.Y
 	yStride := src.YStride
 	yPix := src.Y
@@ -611,6 +762,10 @@ func extractYCbCrFromYCbCrStripe(src *image.YCbCr, minX, minY, w int, yPlane, cb
 }
 
 func extractYCbCrFromYCbCrSequential(src *image.YCbCr, yPlane, cbPlane, crPlane []uint8, w, h int) {
+	if extractYCbCrFromYCbCrFastRows(src, yPlane, cbPlane, crPlane, w, 0, h) {
+		return
+	}
+
 	b := src.Bounds()
 	minX, minY := b.Min.X, b.Min.Y
 	rectMinX, rectMinY := src.Rect.Min.X, src.Rect.Min.Y
@@ -983,56 +1138,6 @@ func (d *Decoder) ensureChromaBandScratch(workers, w int) []decoderChromaBandScr
 	return bands
 }
 
-func (d *Decoder) decodeChromaGridPlaneValuesIntoRGBA(grid []byte, step, gridW, gridH, w, h int, pix []byte, strideBytes int, channelOffset int) {
-	if w == 0 || h == 0 || step <= 0 {
-		return
-	}
-	d.ensureChromaX(w)
-	d.fillChromaX(step, gridW, w)
-
-	for y := 0; y < h; y++ {
-		cellY := y / step
-		if cellY >= gridH-1 {
-			cellY = gridH - 2
-		}
-		y0 := cellY * step
-		fy := ((y - y0) << 8) / step
-		if fy < 0 {
-			fy = 0
-		} else if fy > 255 {
-			fy = 255
-		}
-		fyInv := 256 - fy
-		rowBase := cellY * gridW
-		row := y*strideBytes + channelOffset
-		for x := 0; x < w; x++ {
-			cellX := d.chromaXCell[x]
-			fx := int(d.chromaXFX[x])
-			fxInv := int(d.chromaXFXInv[x])
-
-			i00 := rowBase + cellX
-			i10 := i00 + 1
-			i01 := i00 + gridW
-			i11 := i01 + 1
-
-			v00 := int(grid[i00])
-			v10 := int(grid[i10])
-			v01 := int(grid[i01])
-			v11 := int(grid[i11])
-
-			top := (v00*fxInv + v10*fx)
-			bot := (v01*fxInv + v11*fx)
-			v := (top*fyInv + bot*fy + 32768) >> 16
-			if v < 0 {
-				v = 0
-			} else if v > 255 {
-				v = 255
-			}
-			pix[row+x*4] = uint8(v)
-		}
-	}
-}
-
 func (d *Decoder) decodeChromaGridIntoRGB(cbGrid, crGrid []byte, step, gridW, gridH, w, h int, pix []byte, strideBytes int) {
 	if w == 0 || h == 0 || step <= 0 {
 		return
@@ -1310,7 +1415,19 @@ var (
 
 	hilbertCacheMu sync.RWMutex
 	hilbertCache   = map[[2]int][]int{}
+
+	zstdEncoderPool sync.Pool
+	zstdDecoderPool sync.Pool
 )
+
+func init() {
+	zstdEncoderPool.New = func() any { return mustNewZstdEncoder() }
+	zstdDecoderPool.New = func() any { return mustNewZstdDecoder() }
+
+	// Prewarm one codec instance so one-shot CLI runs don't pay cold init inside measured work.
+	zstdEncoderPool.Put(mustNewZstdEncoder())
+	zstdDecoderPool.Put(mustNewZstdDecoder())
+}
 
 type patternMask []uint64
 
@@ -1344,11 +1461,14 @@ func patternMaskKey(mask patternMask) string {
 		return ""
 	}
 	var b strings.Builder
+	b.Grow(len(mask) * 8)
+	var buf [8]byte
 	for i, word := range mask {
 		if i > 0 {
 			b.WriteByte(':')
 		}
-		fmt.Fprintf(&b, "%016x", word)
+		binary.LittleEndian.PutUint64(buf[:], word)
+		b.Write(buf[:])
 	}
 	return b.String()
 }
@@ -1955,8 +2075,16 @@ func NewEncoder() *Encoder {
 	e.Parallel = true
 	e.patternCount = defaultPatternCount
 	e.bw = bufio.NewWriter(&e.raw)
-	e.zenc = mustNewZstdEncoder()
+	e.zenc = zstdEncoderPool.Get().(*zstd.Encoder)
 	return e
+}
+
+func (e *Encoder) Close() {
+	if e == nil || e.zenc == nil {
+		return
+	}
+	zstdEncoderPool.Put(e.zenc)
+	e.zenc = nil
 }
 
 func (e *Encoder) ensurePlanes(w, h int) {
@@ -2201,7 +2329,7 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 	}
 
 	parallelMain := false
-	if e.Parallel && useMacro && fullW > 0 && fullH > 0 {
+	if e.Parallel && useMacro && fullW > 0 && fullH > 0 && fullW*fullH >= parallelEncodeMinPixels {
 		rows := fullH / topBlock
 		if rows >= 2 {
 			workers := min(runtime.NumCPU(), rows)
@@ -2479,9 +2607,10 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 	b := img.Bounds()
 	w := b.Dx()
 	h := b.Dy()
+	parallelPixels := w * h
 
 	e.ensurePlanes(w, h)
-	if e.Parallel {
+	if e.Parallel && parallelPixels >= parallelExtractMinPixels {
 		extractYCbCrPlanesInto(img, e.yPlane, e.cbPlane, e.crPlane)
 	} else {
 		extractYCbCrPlanesIntoSerial(img, e.yPlane, e.cbPlane, e.crPlane)
@@ -2557,7 +2686,7 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 
 	// no logging
 
-	if e.Parallel {
+	if e.Parallel && chCount > 1 && parallelPixels >= parallelEncodeMinPixels {
 		// Encode channels in parallel; scratch is per-channel so it's safe to reuse.
 		var results [3]encodeChannelResult
 		var wg sync.WaitGroup
@@ -2694,6 +2823,7 @@ func (e *Encoder) EncodeTo(w io.Writer, img image.Image, quality int, bwmode boo
 // Each channel has its own block list, size stream, pattern stream, and FG/BG levels.
 func Encode(img image.Image, quality int, bwmode bool) ([]byte, error) {
 	e := NewEncoder()
+	defer e.Close()
 	return e.Encode(img, quality, bwmode)
 }
 
@@ -3117,7 +3247,15 @@ type decoderChromaBandScratch struct {
 }
 
 func NewDecoder() *Decoder {
-	return &Decoder{Parallel: true, zdec: mustNewZstdDecoder()}
+	return &Decoder{Parallel: true, zdec: zstdDecoderPool.Get().(*zstd.Decoder)}
+}
+
+func (d *Decoder) Close() {
+	if d == nil || d.zdec == nil {
+		return
+	}
+	zstdDecoderPool.Put(d.zdec)
+	d.zdec = nil
 }
 
 type blockDesc struct {
@@ -4179,26 +4317,45 @@ var (
 	cbToB     [256]int16
 	crToR     [256]int16
 	crToG     [256]int16
+	yFromR    [256]int32
+	yFromG    [256]int32
+	yFromB    [256]int32
+	cbFromR   [256]int32
+	cbFromG   [256]int32
+	cbFromB   [256]int32
+	crFromR   [256]int32
+	crFromG   [256]int32
+	crFromB   [256]int32
 )
 
 func initYCbCrTables() {
 	ycbcrOnce.Do(func() {
 		for i := 0; i < 256; i++ {
+			v := int32(i)
 			cb := int32(i) - 128
 			cr := int32(i) - 128
 			cbToG[i] = int16((22554 * cb) >> 16)
 			cbToB[i] = int16((116130 * cb) >> 16)
 			crToR[i] = int16((91881 * cr) >> 16)
 			crToG[i] = int16((46802 * cr) >> 16)
+			yFromR[i] = 77 * v
+			yFromG[i] = 150 * v
+			yFromB[i] = 29 * v
+			cbFromR[i] = -43 * v
+			cbFromG[i] = -85 * v
+			cbFromB[i] = 128 * v
+			crFromR[i] = 128 * v
+			crFromG[i] = -107 * v
+			crFromB[i] = -21 * v
 		}
 	})
 }
 
 func rgbToYCbCr(r, g, b uint8) yuv {
-	rr, gg, bb := int32(r), int32(g), int32(b)
-	Y := (77*rr + 150*gg + 29*bb) >> 8 // ≈ 0.299 0.587 0.114
-	Cb := ((-43*rr - 85*gg + 128*bb) >> 8) + 128
-	Cr := ((128*rr - 107*gg - 21*bb) >> 8) + 128
+	initYCbCrTables()
+	Y := (yFromR[r] + yFromG[g] + yFromB[b]) >> 8
+	Cb := ((cbFromR[r] + cbFromG[g] + cbFromB[b]) >> 8) + 128
+	Cr := ((crFromR[r] + crFromG[g] + crFromB[b]) >> 8) + 128
 	return yuv{int16(Y), int16(Cb), int16(Cr)}
 }
 

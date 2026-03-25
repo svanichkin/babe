@@ -578,6 +578,30 @@ func BenchmarkBABEEncodeQ0Patterns64Blocks16_128Tile32Q4Benchmark(b *testing.B) 
 	}
 }
 
+func BenchmarkBABEEncodeQ0Patterns64Blocks16_128Tile32Q4Small(b *testing.B) {
+	img := loadTestImagePrefer(b, "4.jpg")
+	levels, err := blocksFromSpec("16-128")
+	if err != nil {
+		b.Fatalf("blocksFromSpec: %v", err)
+	}
+	enc := NewEncoder()
+	enc.patternCount = 64
+	enc.backgroundTile = 32
+	enc.yQuantShift = 4
+	enc.levels = levels
+
+	if _, err := enc.Encode(img, 0, false); err != nil {
+		b.Fatalf("warmup Encode: %v", err)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := enc.Encode(img, 0, false); err != nil {
+			b.Fatalf("Encode: %v", err)
+		}
+	}
+}
+
 // -----------------------------
 // Summary table (single output)
 // -----------------------------
