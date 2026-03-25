@@ -161,6 +161,8 @@ babe input.babe -layers
   explicit block hierarchy
 - `-blocks=A-B`
   power-of-two hierarchy from `A` to `B`
+- `-q N`
+  Y quantization shift, `0..7`
 - `-tile N`
   or `-tile=N`
   chroma grid tile size, `2..255`

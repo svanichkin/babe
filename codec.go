@@ -57,6 +57,7 @@ const (
 )
 
 var activePatternCount = defaultPatternCount
+var activeYQuantShift int
 var forcedBlockSizes []int
 var activeBackgroundTile int
 
@@ -219,8 +220,20 @@ func invertPatternBits(bits patternMask, bw, bh int) patternMask {
 	return out
 }
 
-func quantizeColor(v uint8) uint8 {
-	return v
+func quantizeY(v uint8) uint8 {
+	if activeYQuantShift <= 0 {
+		return v
+	}
+	if activeYQuantShift >= 8 {
+		return 128
+	}
+	step := 1 << activeYQuantShift
+	base := int(v>>activeYQuantShift) << activeYQuantShift
+	center := base + step/2
+	if center > 255 {
+		center = 255
+	}
+	return uint8(center)
 }
 
 // bitWriter writes bits to a bytes.Buffer (msb-first in each byte).
@@ -1480,8 +1493,6 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh int) (uint8,
 			fg, bg = bg, fg
 			bits = invertPatternBits(patternMaskFromUint64(bits, total), bw, bh)[0]
 		}
-		fg = quantizeColor(fg)
-		bg = quantizeColor(bg)
 		if fg == bg {
 			return fg, bg, nil, false, nil
 		}
@@ -1537,8 +1548,6 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh int) (uint8,
 		fg, bg = bg, fg
 		mask = invertPatternBits(mask, bw, bh)
 	}
-	fg = quantizeColor(fg)
-	bg = quantizeColor(bg)
 	if fg == bg {
 		return fg, bg, nil, false, nil
 	}
@@ -1730,6 +1739,12 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 		tok := patternToken{bits: clonePatternMask(bits), bw: bw, bh: bh, x: x, y: y}
 		patternTokens = append(patternTokens, tok)
 	}
+	quantize := func(fg, bg uint8) (uint8, uint8) {
+		if channelID == chY {
+			return quantizeY(fg), quantizeY(bg)
+		}
+		return fg, bg
+	}
 
 	if len(levels) == 2 && useMacro && smallBlock == 1 && topBlock == 2 && fullW == w4 && fullH == h4 {
 		// Specialized hot path for the most common setting (quality >= 80):
@@ -1831,6 +1846,7 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 						isPattern = fg != bg
 					}
 
+					fg, bg = quantize(fg, bg)
 					fg = encodeBlockFlagIntoFG(fg, isPattern, bg)
 					scratch.fgVals = append(scratch.fgVals, fg)
 					if isPattern {
@@ -1883,6 +1899,7 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 			if err != nil {
 				return err
 			}
+			fg, bg = quantize(fg, bg)
 			fg = encodeBlockFlagIntoFG(fg, isPattern, bg)
 			scratch.fgVals = append(scratch.fgVals, fg)
 			if isPattern {
@@ -1900,6 +1917,7 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 			if err != nil {
 				return err
 			}
+			fg, bg = quantize(fg, bg)
 			fg = encodeBlockFlagIntoFG(fg, isPattern, bg)
 			scratch.fgVals = append(scratch.fgVals, fg)
 			if isPattern {
@@ -1943,6 +1961,7 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 			if err != nil {
 				return 0, nil, nil, nil, nil, err
 			}
+			fg, bg = quantize(fg, bg)
 			fg = encodeBlockFlagIntoFG(fg, isPattern, bg)
 			scratch.fgVals = append(scratch.fgVals, fg)
 			if isPattern {
@@ -1959,6 +1978,7 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 			if err != nil {
 				return 0, nil, nil, nil, nil, err
 			}
+			fg, bg = quantize(fg, bg)
 			fg = encodeBlockFlagIntoFG(fg, isPattern, bg)
 			scratch.fgVals = append(scratch.fgVals, fg)
 			if isPattern {

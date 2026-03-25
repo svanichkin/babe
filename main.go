@@ -18,7 +18,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 || len(os.Args) > 16 {
-		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png] [-patterns=N] [-blocks=A,B|A-B] [-tile N]\n  babe <input.babe> [-layers]\n  (bw flag, decoded.png, -patterns=N, -blocks=A,B|A-B, -tile N can appear anywhere after quality)\n")
+		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png] [-patterns=N] [-blocks=A,B|A-B] [-q N] [-tile N]\n  babe <input.babe> [-layers]\n  (bw flag, decoded.png, -patterns=N, -blocks=A,B|A-B, -q N, -tile N can appear anywhere after quality)\n")
 		os.Exit(1)
 	}
 
@@ -64,6 +64,7 @@ func main() {
 	patternCount := defaultPatternCount
 	blockSpec := ""
 	tile := 0
+	yQuantShift := 0
 	for i := 0; i < len(encodeArgs); i++ {
 		a := encodeArgs[i]
 		if a == "bw" {
@@ -85,6 +86,29 @@ func main() {
 		}
 		if strings.HasPrefix(a, "-blocks=") {
 			blockSpec = strings.TrimPrefix(a, "-blocks=")
+			continue
+		}
+		if a == "-q" {
+			if i+1 >= len(encodeArgs) {
+				fmt.Fprintln(os.Stderr, "q requires a value between 0 and 7")
+				os.Exit(1)
+			}
+			v, err := strconv.Atoi(encodeArgs[i+1])
+			if err != nil || v < 0 || v > 7 {
+				fmt.Fprintln(os.Stderr, "q must be an integer between 0 and 7")
+				os.Exit(1)
+			}
+			yQuantShift = v
+			i++
+			continue
+		}
+		if strings.HasPrefix(a, "-q=") {
+			v, err := strconv.Atoi(strings.TrimPrefix(a, "-q="))
+			if err != nil || v < 0 || v > 7 {
+				fmt.Fprintln(os.Stderr, "q must be an integer between 0 and 7")
+				os.Exit(1)
+			}
+			yQuantShift = v
 			continue
 		}
 		if a == "-tile" {
@@ -125,7 +149,7 @@ func main() {
 	defer func() {
 		forcedBlockSizes = nil
 	}()
-	if err := encodeToBabe(inputPath, outPath, quality, bwmode, patternCount, tile); err != nil {
+	if err := encodeToBabe(inputPath, outPath, quality, bwmode, patternCount, yQuantShift, tile); err != nil {
 		fmt.Fprintln(os.Stderr, "encode error:", err)
 		os.Exit(1)
 	}
@@ -143,7 +167,7 @@ func main() {
 	}
 }
 
-func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount int, tile int) error {
+func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount int, yQuantShift int, tile int) error {
 	info, err := os.Stat(inPath)
 	if err != nil {
 		return err
@@ -163,9 +187,11 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount
 
 	start := time.Now()
 	activePatternCount = patternCount
+	activeYQuantShift = yQuantShift
 	activeBackgroundTile = tile
 	defer func() {
 		activePatternCount = defaultPatternCount
+		activeYQuantShift = 0
 		activeBackgroundTile = 0
 	}()
 	enc, err := Encode(img, quality, bwmode)
