@@ -18,7 +18,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 || len(os.Args) > 16 {
-		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png] [-patterns=N] [-blocks=A,B|A-B] [-q N] [-tile N]\n  babe <input.babe> [-layers]\n  (bw flag, decoded.png, -patterns=N, -blocks=A,B|A-B, -q N, -tile N can appear anywhere after quality)\n")
+		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png] [-patterns=N] [-blocks=A,B|A-B] [-q N] [-tile N] [-filmgrain F]\n  babe <input.babe> [-layers] [-filmgrain F]\n  (bw flag, decoded.png, -patterns=N, -blocks=A,B|A-B, -q N, -tile N, -filmgrain F can appear anywhere after quality)\n")
 		os.Exit(1)
 	}
 
@@ -29,12 +29,28 @@ func main() {
 	// If input is .babe → decode to PNG
 	if ext == ".babe" {
 		splitChannels := false
-		for _, a := range os.Args[2:] {
+		filmGrain := 0.0
+		for i := 2; i < len(os.Args); i++ {
+			a := os.Args[i]
 			if a == "-layers" {
 				splitChannels = true
+				continue
+			}
+			if a == "-filmgrain" {
+				if i+1 >= len(os.Args) {
+					fmt.Fprintln(os.Stderr, "filmgrain requires a non-negative value")
+					os.Exit(1)
+				}
+				v, err := strconv.ParseFloat(os.Args[i+1], 64)
+				if err != nil || v < 0 {
+					fmt.Fprintln(os.Stderr, "filmgrain must be a non-negative number")
+					os.Exit(1)
+				}
+				filmGrain = v
+				i++
 			}
 		}
-		if err := decodeBabe(inputPath, base+".png", splitChannels); err != nil {
+		if err := decodeBabe(inputPath, base+".png", splitChannels, filmGrain); err != nil {
 			fmt.Fprintln(os.Stderr, "decode error:", err)
 			os.Exit(1)
 		}
@@ -66,6 +82,7 @@ func main() {
 	var levels []int
 	tile := 0
 	yQuantShift := 0
+	filmGrain := 0.0
 	for i := 0; i < len(encodeArgs); i++ {
 		a := encodeArgs[i]
 		if a == "bw" {
@@ -135,6 +152,20 @@ func main() {
 			tile = v
 			continue
 		}
+		if a == "-filmgrain" {
+			if i+1 >= len(encodeArgs) {
+				fmt.Fprintln(os.Stderr, "filmgrain requires a non-negative value")
+				os.Exit(1)
+			}
+			v, err := strconv.ParseFloat(encodeArgs[i+1], 64)
+			if err != nil || v < 0 {
+				fmt.Fprintln(os.Stderr, "filmgrain must be a non-negative number")
+				os.Exit(1)
+			}
+			filmGrain = v
+			i++
+			continue
+		}
 		if strings.EqualFold(filepath.Ext(a), ".png") {
 			decodeOutPath = a
 		}
@@ -154,13 +185,13 @@ func main() {
 		os.Exit(1)
 	}
 	if decodeOutPath != "" {
-		if err := decodeBabe(outPath, decodeOutPath, false); err != nil {
+		if err := decodeBabe(outPath, decodeOutPath, false, filmGrain); err != nil {
 			fmt.Fprintln(os.Stderr, "decode error:", err)
 			os.Exit(1)
 		}
 	}
 	if layersOut {
-		if err := decodeBabe(outPath, base+".png", true); err != nil {
+		if err := decodeBabe(outPath, base+".png", true, filmGrain); err != nil {
 			fmt.Fprintln(os.Stderr, "decode error:", err)
 			os.Exit(1)
 		}
@@ -230,7 +261,7 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount
 	return nil
 }
 
-func decodeBabe(inPath, outPath string, splitChannels bool) error {
+func decodeBabe(inPath, outPath string, splitChannels bool, filmGrain float64) error {
 
 	in, err := os.Open(inPath)
 	if err != nil {
@@ -246,6 +277,10 @@ func decodeBabe(inPath, outPath string, splitChannels bool) error {
 	compSize := len(compData)
 
 	start := time.Now()
+	activeFilmGrain = filmGrain
+	defer func() {
+		activeFilmGrain = 0.0
+	}()
 	decoder := NewDecoder()
 	defer decoder.Close()
 	dec, err := decoder.Decode(compData)

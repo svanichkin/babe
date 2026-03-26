@@ -47,6 +47,18 @@ const (
 	defaultPatternCount = 64
 )
 
+var activeFilmGrain = 0.0
+
+func filmGrainNoiseByte(x, y int) byte {
+	v := uint32((x & 63) | ((y & 63) << 6))
+	v ^= v >> 16
+	v *= 0x7feb352d
+	v ^= v >> 15
+	v *= 0x846ca68b
+	v ^= v >> 16
+	return byte(v)
+}
+
 // Quality mapping:
 // - quality is in [0..100]
 // - block sizes stay fixed unless they are explicitly overridden.
@@ -198,6 +210,59 @@ func quantizeY(v uint8, shift int) uint8 {
 		center = 255
 	}
 	return uint8(center)
+}
+
+func applyFilmGrainY(pix []byte, stride, w, h, smallBlock int, amount float64) {
+	if amount <= 0 {
+		return
+	}
+	smallSize := smallBlock / 4
+	if smallSize < 1 {
+		smallSize = 1
+	}
+	largeSize := smallSize * 2
+	baseAmp := amount * 6.0
+	for by := 0; by < h; by += smallSize {
+		y1 := min(by+smallSize, h)
+		for bx := 0; bx < w; bx += smallSize {
+			x1 := min(bx+smallSize, w)
+			cx := bx + (x1-bx)/2
+			cy := by + (y1-by)/2
+			o := cy*stride + cx*4
+			luma := float64(pix[o+0]) / 255.0
+			shadowWeight := 1.0 - luma
+			shadowWeight *= shadowWeight
+			if shadowWeight <= 0 {
+				continue
+			}
+			sx := (bx / smallSize) & 63
+			sy := (by / smallSize) & 63
+			lx := (bx / largeSize) & 63
+			ly := (by / largeSize) & 63
+			selector := filmGrainNoiseByte((lx*11)+23, (ly*7)+19)
+			n := float64(filmGrainNoiseByte(lx, ly))/255.0 - 0.5
+			if selector < 128 {
+				n = float64(filmGrainNoiseByte(sx, sy))/255.0 - 0.5
+			}
+			delta := int(n * 2.0 * baseAmp * shadowWeight)
+			if delta == 0 {
+				continue
+			}
+			for y := by; y < y1; y++ {
+				row := y * stride
+				for x := bx; x < x1; x++ {
+					p := row + x*4
+					v := int(pix[p+0]) + delta
+					if v < 0 {
+						v = 0
+					} else if v > 255 {
+						v = 255
+					}
+					pix[p+0] = uint8(v)
+				}
+			}
+		}
+	}
 }
 
 type bitStream struct {
@@ -4047,12 +4112,13 @@ func (d *Decoder) Decode(compData []byte) (*image.RGBA, error) {
 		if errY != nil {
 			return nil, errY
 		}
-		nextPos, err := d.decodeChromaGridOverlayIntoPix(payload, pos, imgW, imgH, pix, stride)
+		cbPlane, crPlane, nextPos, err := d.decodeChromaGridOverlay(payload, pos, imgW, imgH)
 		if err != nil {
 			return nil, err
 		}
 		pos = nextPos
-		rgbReady = true
+		blitPlaneToPix(cbPlane, pix, stride, imgW, imgH, 1)
+		blitPlaneToPix(crPlane, pix, stride, imgW, imgH, 2)
 	} else if d.Parallel && imgW*imgH >= 256*256 {
 		var wg sync.WaitGroup
 		wg.Add(1)
@@ -4084,6 +4150,10 @@ func (d *Decoder) Decode(compData []byte) (*image.RGBA, error) {
 	}
 	if errCr != nil {
 		return nil, errCr
+	}
+
+	if activeFilmGrain > 0 {
+		applyFilmGrainY(pix, stride, imgW, imgH, smallBlock, activeFilmGrain)
 	}
 
 	if !rgbReady {
@@ -4210,6 +4280,16 @@ func DecodeLayers(compData []byte) (int, int, []uint8, []image.Rectangle, []uint
 func decodeChannelToPixWorker(data []byte, imgW, imgH int, levels []int, patternCount int, pix []byte, strideBytes int, channelOffset int, parallel bool, dstErr *error, wg *sync.WaitGroup) {
 	defer wg.Done()
 	*dstErr = decodeChannelToPix(data, imgW, imgH, levels, patternCount, pix, strideBytes, channelOffset, parallel)
+}
+
+func blitPlaneToPix(plane, pix []byte, strideBytes, imgW, imgH, channelOffset int) {
+	for y := 0; y < imgH; y++ {
+		rowOff := y * strideBytes
+		planeOff := y * imgW
+		for x := 0; x < imgW; x++ {
+			pix[rowOff+x*4+channelOffset] = plane[planeOff+x]
+		}
+	}
 }
 
 func ycbcrToRGB(pix []byte, stride, imgW int, yStart, yEnd int, hasCb, hasCr bool) {
