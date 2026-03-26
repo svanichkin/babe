@@ -1718,7 +1718,7 @@ func patternDistance(a, b patternMask) int {
 	return dist
 }
 
-func nearestPatternIndex(patternBits patternMask, bw, bh, patternCount int) uint64 {
+func nearestPatternIndex(patternBits patternMask, bw, bh, patternCount int) (uint64, bool) {
 	limit := patternCount
 	if limit < 1 {
 		limit = 1
@@ -1726,6 +1726,9 @@ func nearestPatternIndex(patternBits patternMask, bw, bh, patternCount int) uint
 	book := fixedPatternCodebook(bw, bh, limit)
 	bestIdx := 0
 	bestDist := bw*bh + 1
+	worstIdx := 0
+	worstDist := -1
+	total := bw * bh
 	if len(patternBits) == 1 {
 		p := patternBits[0]
 		key := patternCacheKey{bw: bw, bh: bh, count: limit}
@@ -1733,7 +1736,7 @@ func nearestPatternIndex(patternBits patternMask, bw, bh, patternCount int) uint
 		if m, ok := patternIndexCache[key]; ok {
 			if idx, ok := m[p]; ok {
 				patternIndexCacheMu.RUnlock()
-				return uint64(idx)
+				return uint64(idx), false
 			}
 		}
 		patternIndexCacheMu.RUnlock()
@@ -1743,6 +1746,10 @@ func nearestPatternIndex(patternBits patternMask, bw, bh, patternCount int) uint
 			if dist < bestDist {
 				bestDist = dist
 				bestIdx = i
+			}
+			if dist > worstDist {
+				worstDist = dist
+				worstIdx = i
 			}
 		}
 		patternIndexCacheMu.Lock()
@@ -1761,9 +1768,17 @@ func nearestPatternIndex(patternBits patternMask, bw, bh, patternCount int) uint
 				bestDist = dist
 				bestIdx = i
 			}
+			if dist > worstDist {
+				worstDist = dist
+				worstIdx = i
+			}
 		}
 	}
-	return uint64(bestIdx)
+	invert := total-worstDist < bestDist
+	if invert {
+		return uint64(worstIdx), true
+	}
+	return uint64(bestIdx), false
 }
 
 func encodeBlockPlaneReuse(plane []uint8, stride, height, x0, y0, bw, bh int, scratch *encoderChannelScratch) (uint8, uint8, patternMask, bool, error) {
@@ -1858,10 +1873,6 @@ func encodeBlockPlaneReuse(plane []uint8, stride, height, x0, y0, bw, bh int, sc
 		}
 		fg := uint8(fgSum / uint64(fgCnt))
 		bg := uint8(bgSum / uint64(bgCnt))
-		if fg < bg {
-			fg, bg = bg, fg
-			bits ^= (uint64(1) << total) - 1
-		}
 		if fg == bg {
 			return fg, bg, nil, false, nil
 		}
@@ -1935,10 +1946,6 @@ func encodeBlockPlaneReuse(plane []uint8, stride, height, x0, y0, bw, bh int, sc
 	}
 	fg := uint8(fgSum / uint64(fgCnt))
 	bg := uint8(bgSum / uint64(bgCnt))
-	if fg < bg {
-		fg, bg = bg, fg
-		invertPatternBitsInPlace(mask, bw, bh)
-	}
 	if fg == bg {
 		return fg, bg, nil, false, nil
 	}
@@ -2172,10 +2179,6 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 	for i := range levels {
 		scratch.levelSpreads[i] = spreadForBlockSize(e.quality)
 	}
-	writePatternIndex := func(bits patternMask, bw, bh int) {
-		idx := nearestPatternIndex(bits, bw, bh, e.patternCount)
-		patternStream.writeBits(idx, patternBitCount)
-	}
 	quantize := func(fg, bg uint8) (uint8, uint8) {
 		if channelID == chY {
 			return quantizeY(fg, e.yQuantShift), quantizeY(bg, e.yQuantShift)
@@ -2284,11 +2287,19 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 					}
 
 					fg, bg = quantize(fg, bg)
-					fg = encodeBlockFlagIntoFG(fg, isPattern, bg)
-					scratch.fgVals = append(scratch.fgVals, fg)
 					if isPattern {
-						writePatternIndex(patternMaskFromUint64(bits, 4), 2, 2)
+						mask := patternMaskFromUint64(bits, 4)
+						idx, invert := nearestPatternIndex(mask, 2, 2, e.patternCount)
+						if invert {
+							fg, bg = bg, fg
+						}
+						fg = encodeBlockFlagIntoFG(fg, true, bg)
+						scratch.fgVals = append(scratch.fgVals, fg)
+						patternStream.writeBits(idx, patternBitCount)
 						scratch.bgVals = append(scratch.bgVals, bg)
+					} else {
+						fg = encodeBlockFlagIntoFG(fg, false, bg)
+						scratch.fgVals = append(scratch.fgVals, fg)
 					}
 					blockCount++
 				} else {
@@ -2380,11 +2391,6 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 						scratchLocal.bgVals = scratchLocal.bgVals[:0]
 					}
 
-					writePatternIndexLocal := func(bits patternMask, bw, bh int) {
-						idx := nearestPatternIndex(bits, bw, bh, e.patternCount)
-						patternS.writeBits(idx, patternBitCount)
-					}
-
 					var blockCountLocal uint32
 					var encodeNodeLocal func(x, y, levelIdx int) error
 					encodeNodeLocal = func(x, y, levelIdx int) error {
@@ -2395,10 +2401,17 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 								return err
 							}
 							fg, bg = quantize(fg, bg)
+							if isPattern {
+								idx, invert := nearestPatternIndex(bits, size, size, e.patternCount)
+								if invert {
+									invertPatternBitsInPlace(bits, size, size)
+									fg, bg = bg, fg
+								}
+								patternS.writeBits(idx, patternBitCount)
+							}
 							fg = encodeBlockFlagIntoFG(fg, isPattern, bg)
 							scratchLocal.fgVals = append(scratchLocal.fgVals, fg)
 							if isPattern {
-								writePatternIndexLocal(bits, size, size)
 								scratchLocal.bgVals = append(scratchLocal.bgVals, bg)
 							}
 							blockCountLocal++
@@ -2413,10 +2426,17 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 								return err
 							}
 							fg, bg = quantize(fg, bg)
+							if isPattern {
+								idx, invert := nearestPatternIndex(bits, size, size, e.patternCount)
+								if invert {
+									invertPatternBitsInPlace(bits, size, size)
+									fg, bg = bg, fg
+								}
+								patternS.writeBits(idx, patternBitCount)
+							}
 							fg = encodeBlockFlagIntoFG(fg, isPattern, bg)
 							scratchLocal.fgVals = append(scratchLocal.fgVals, fg)
 							if isPattern {
-								writePatternIndexLocal(bits, size, size)
 								scratchLocal.bgVals = append(scratchLocal.bgVals, bg)
 							}
 							blockCountLocal++
@@ -2492,10 +2512,17 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 				return err
 			}
 			fg, bg = quantize(fg, bg)
+			if isPattern {
+				idx, invert := nearestPatternIndex(bits, size, size, e.patternCount)
+				if invert {
+					invertPatternBitsInPlace(bits, size, size)
+					fg, bg = bg, fg
+				}
+				patternStream.writeBits(idx, patternBitCount)
+			}
 			fg = encodeBlockFlagIntoFG(fg, isPattern, bg)
 			scratch.fgVals = append(scratch.fgVals, fg)
 			if isPattern {
-				writePatternIndex(bits, size, size)
 				scratch.bgVals = append(scratch.bgVals, bg)
 			}
 			blockCount++
@@ -2510,10 +2537,17 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 				return err
 			}
 			fg, bg = quantize(fg, bg)
+			if isPattern {
+				idx, invert := nearestPatternIndex(bits, size, size, e.patternCount)
+				if invert {
+					invertPatternBitsInPlace(bits, size, size)
+					fg, bg = bg, fg
+				}
+				patternStream.writeBits(idx, patternBitCount)
+			}
 			fg = encodeBlockFlagIntoFG(fg, isPattern, bg)
 			scratch.fgVals = append(scratch.fgVals, fg)
 			if isPattern {
-				writePatternIndex(bits, size, size)
 				scratch.bgVals = append(scratch.bgVals, bg)
 			}
 			blockCount++
@@ -2559,7 +2593,13 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 			fg = encodeBlockFlagIntoFG(fg, isPattern, bg)
 			scratch.fgVals = append(scratch.fgVals, fg)
 			if isPattern {
-				writePatternIndex(bits, smallBlock, smallBlock)
+				idx, invert := nearestPatternIndex(bits, smallBlock, smallBlock, e.patternCount)
+				if invert {
+					fg, bg = bg, fg
+					fg = encodeBlockFlagIntoFG(fg, true, bg)
+					scratch.fgVals[len(scratch.fgVals)-1] = fg
+				}
+				patternStream.writeBits(idx, patternBitCount)
 				scratch.bgVals = append(scratch.bgVals, bg)
 			}
 			blockCount++
@@ -2576,7 +2616,13 @@ func (e *Encoder) encodeChannelReuse(channelID int, plane []uint8, stride, w4, h
 			fg = encodeBlockFlagIntoFG(fg, isPattern, bg)
 			scratch.fgVals = append(scratch.fgVals, fg)
 			if isPattern {
-				writePatternIndex(bits, smallBlock, smallBlock)
+				idx, invert := nearestPatternIndex(bits, smallBlock, smallBlock, e.patternCount)
+				if invert {
+					fg, bg = bg, fg
+					fg = encodeBlockFlagIntoFG(fg, true, bg)
+					scratch.fgVals[len(scratch.fgVals)-1] = fg
+				}
+				patternStream.writeBits(idx, patternBitCount)
 				scratch.bgVals = append(scratch.bgVals, bg)
 			}
 			blockCount++
