@@ -21,7 +21,9 @@ func main() {
 	fs := flag.NewFlagSet("babe", flag.ContinueOnError)
 	fs.SetOutput(io.Discard) // we print our own usage/errors
 	var paletteFlag string
+	var scaleFlag int
 	fs.StringVar(&paletteFlag, "palette", "", "palette mode: bright|luma|bw|auto|gray|zx|<name>|<palette-spec> (compatible with legacy syntax)")
+	fs.IntVar(&scaleFlag, "scale", 1, "pre-encode downscale factor (1..64); decoder upscales back via nearest")
 
 	usage := func() {
 		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [decoded.png]\n  babe <input-image> [quality] [-palette bright] [decoded.png]\n  babe <input-image> [quality] [-palette luma [y cb cr|y:cb:cr]] [decoded.png]\n  babe <input-image> [quality] [-palette bw [bits]] [decoded.png]\n  babe <input-image> [quality] [-palette N] [decoded.png]\n  babe <input-image> [quality] [-palette auto [P]] [decoded.png]\n  babe <input-image> [quality] [-palette gray N] [decoded.png]\n  babe <input-image> [quality] [-palette zx|cga|ega|vga|c64|gameboy|pico8|db16|nes|sunset|pastel|ocean|forest|<palette-spec>] [decoded.png]\n  babe <input.babe>\n")
@@ -69,6 +71,19 @@ func main() {
 					}
 				}
 				out.flags = append(out.flags, "-palette", val)
+				continue
+			}
+			if strings.EqualFold(a, "-scale") || strings.EqualFold(a, "--scale") {
+				if i+1 >= len(argv) {
+					out.flags = append(out.flags, "-scale", "1")
+					continue
+				}
+				out.flags = append(out.flags, "-scale", argv[i+1])
+				i++
+				continue
+			}
+			if strings.HasPrefix(strings.ToLower(a), "-scale=") || strings.HasPrefix(strings.ToLower(a), "--scale=") {
+				out.flags = append(out.flags, a)
 				continue
 			}
 			if isFlagLike(a) {
@@ -244,7 +259,7 @@ func main() {
 	bwBits := yBits
 
 	outPath := base + ".babe"
-	if err := encodeToBabe(inputPath, outPath, quality, bwmode, bwBits, yBits, cbBits, crBits, useZstd, false, zxMode, paletteName, paletteMode); err != nil {
+	if err := encodeToBabe(inputPath, outPath, quality, bwmode, bwBits, yBits, cbBits, crBits, useZstd, false, zxMode, paletteName, paletteMode, scaleFlag); err != nil {
 		fmt.Fprintln(os.Stderr, "encode error:", err)
 		os.Exit(1)
 	}
@@ -293,7 +308,7 @@ func parseBitDepth(s, label string) (int, error) {
 	return v, nil
 }
 
-func encodeToBabe(inPath, outPath string, quality int, bwmode bool, bwBits, yBits, cbBits, crBits int, useZstd bool, rgbMode, zxMode bool, paletteName, paletteMode string) error {
+func encodeToBabe(inPath, outPath string, quality int, bwmode bool, bwBits, yBits, cbBits, crBits int, useZstd bool, rgbMode, zxMode bool, paletteName, paletteMode string, scale int) error {
 	info, err := os.Stat(inPath)
 	if err != nil {
 		return err
@@ -334,6 +349,7 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, bwBits, yBit
 			BW:      true,
 			YBits:   bwBits,
 			UseZstd: useZstd,
+			Scale:   scale,
 		})
 	} else {
 		enc, err = NewEncoder().EncodeWithOptions(img, quality, EncodeOptions{
@@ -345,6 +361,7 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, bwBits, yBit
 			RGBMode: false,
 			ZXMode:  zxMode,
 			Palette: paletteName,
+			Scale:   scale,
 		})
 	}
 	if err != nil {
@@ -454,6 +471,8 @@ func inspectBWPatternPalette(comp []byte) (int, int, int, error) {
 	pos++
 	patternH := int(payload[pos])
 	pos++
+	// New header field (codec.go): scale byte after patternH.
+	pos++ // scale
 	channelsMask := payload[pos]
 	pos++
 	if yBits != 1 || (yStorageMode != yStoragePatternGrid && yStorageMode != yStoragePatternGridDirect) || channelsMask != channelFlagY {

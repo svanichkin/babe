@@ -234,7 +234,9 @@ func TestPaletteMode_UsesIndexStreamPayload(t *testing.T) {
 		t.Fatalf("EncodeWithOptions: %v", err)
 	}
 
-	pos := len(codec) + 9
+	// Header fields after codec:
+	// quality,colorMode,yBits,cbBits,crBits,yStorageMode,patternW,patternH,scale,channelsMask
+	pos := len(codec) + 10
 	if _, err := readU32BE(comp, &pos, "image width"); err != nil {
 		t.Fatalf("read width: %v", err)
 	}

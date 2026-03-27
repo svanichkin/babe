@@ -78,8 +78,6 @@ const (
 )
 
 var (
-	blueNoiseTileOnce sync.Once
-	blueNoiseTile     []uint16
 	hilbertOrderCache sync.Map
 )
 
@@ -313,9 +311,14 @@ var ymcRGBPalette = [][3]uint8{
 }
 
 type bitWriter struct {
-	buf  *bytes.Buffer
-	byte byte
-	n    uint8
+	buf *bytes.Buffer
+
+	// Bits are appended MSB-first into acc. When nbits>=8 we emit the top byte.
+	acc   uint64
+	nbits uint8
+
+	out  [256]byte
+	outN int
 }
 
 func newBitWriter(buf *bytes.Buffer) bitWriter {
@@ -323,32 +326,57 @@ func newBitWriter(buf *bytes.Buffer) bitWriter {
 }
 
 func (bw *bitWriter) writeBit(bit bool) {
-	bw.byte <<= 1
+	var v uint64
 	if bit {
-		bw.byte |= 1
+		v = 1
 	}
-	bw.n++
-	if bw.n == 8 {
-		_ = bw.buf.WriteByte(bw.byte)
-		bw.byte = 0
-		bw.n = 0
-	}
+	bw.writeBits(v, 1)
 }
 
 func (bw *bitWriter) writeBits(bits uint64, n uint8) {
-	for i := int(n) - 1; i >= 0; i-- {
-		bw.writeBit(((bits >> i) & 1) != 0)
+	if n == 0 {
+		return
+	}
+	if n >= 64 {
+		// Not expected in this codebase; keep safe behavior.
+		for i := int(n) - 1; i >= 0; i-- {
+			bw.writeBits((bits>>i)&1, 1)
+		}
+		return
+	}
+	if n < 64 {
+		bits &= (uint64(1) << n) - 1
+	}
+	bw.acc = (bw.acc << n) | bits
+	bw.nbits += n
+	for bw.nbits >= 8 {
+		shift := bw.nbits - 8
+		b := byte((bw.acc >> shift) & 0xff)
+		bw.nbits -= 8
+		bw.acc &= (uint64(1) << bw.nbits) - 1
+		bw.out[bw.outN] = b
+		bw.outN++
+		if bw.outN == len(bw.out) {
+			_, _ = bw.buf.Write(bw.out[:bw.outN])
+			bw.outN = 0
+		}
 	}
 }
 
 func (bw *bitWriter) flush() {
-	if bw.n == 0 {
-		return
+	if bw.nbits != 0 {
+		// Pad remaining bits with zeros on the right.
+		pad := 8 - bw.nbits
+		bw.acc <<= pad
+		bw.out[bw.outN] = byte(bw.acc & 0xff)
+		bw.outN++
+		bw.acc = 0
+		bw.nbits = 0
 	}
-	bw.byte <<= 8 - bw.n
-	_ = bw.buf.WriteByte(bw.byte)
-	bw.byte = 0
-	bw.n = 0
+	if bw.outN != 0 {
+		_, _ = bw.buf.Write(bw.out[:bw.outN])
+		bw.outN = 0
+	}
 }
 
 type bitReader struct {
@@ -412,6 +440,11 @@ type Encoder struct {
 	cbPlane []uint8
 	crPlane []uint8
 
+	// Scratch for optional pre-encode downscale.
+	yTmp  []uint8
+	cbTmp []uint8
+	crTmp []uint8
+
 	raw  bytes.Buffer
 	bw   *bufio.Writer
 	comp []byte
@@ -440,6 +473,9 @@ type EncodeOptions struct {
 	Palette     string
 	BlockSubset bool
 
+	// Scale down input before encoding (1 = no scale). Decoder upscales back via nearest.
+	Scale int
+
 	PatternW int
 	PatternH int
 }
@@ -464,7 +500,48 @@ func (e *Encoder) ensurePlanes(w, h int) {
 	e.crPlane = e.crPlane[:n]
 }
 
+func ensurePlane(dst *[]uint8, n int) []uint8 {
+	if cap(*dst) < n {
+		*dst = make([]uint8, n)
+	} else {
+		*dst = (*dst)[:n]
+	}
+	return *dst
+}
+
+func downscalePlaneBoxInto(dst []uint8, dstW, dstH int, src []uint8, srcW, srcH int, scale int) {
+	if scale <= 1 || dstW == srcW && dstH == srcH {
+		copy(dst, src[:dstW*dstH])
+		return
+	}
+	area := scale * scale
+	for y := 0; y < dstH; y++ {
+		y0 := y * scale
+		y1 := min(srcH, y0+scale)
+		rowOff := y * dstW
+		for x := 0; x < dstW; x++ {
+			x0 := x * scale
+			x1 := min(srcW, x0+scale)
+			sum := 0
+			for yy := y0; yy < y1; yy++ {
+				srcRow := yy * srcW
+				for xx := x0; xx < x1; xx++ {
+					sum += int(src[srcRow+xx])
+				}
+			}
+			// Normalize by full area to keep brightness stable near edges (missing pixels treated as 0).
+			dst[rowOff+x] = uint8((sum + area/2) / area)
+		}
+	}
+}
+
 func normalizeEncodeOptions(opts EncodeOptions) (EncodeOptions, error) {
+	if opts.Scale <= 0 {
+		opts.Scale = 1
+	}
+	if opts.Scale > 64 {
+		return opts, fmt.Errorf("scale must be in [1..64], got %d", opts.Scale)
+	}
 	if opts.BW {
 		if opts.YBits < 1 || opts.YBits > 4 {
 			return opts, fmt.Errorf("bw bit depth must be in [1..4], got %d", opts.YBits)
@@ -549,6 +626,12 @@ func (e *Encoder) EncodeWithOptions(img image.Image, quality int, opts EncodeOpt
 	if err != nil {
 		return nil, err
 	}
+	origW, origH := w, h
+	workW, workH := w, h
+	if opts.Scale > 1 {
+		workW = ceilDiv(w, opts.Scale)
+		workH = ceilDiv(h, opts.Scale)
+	}
 
 	e.ensurePlanes(w, h)
 	paletteMode := (opts.ZXMode || opts.Palette != "") && !opts.BW
@@ -556,6 +639,19 @@ func (e *Encoder) EncodeWithOptions(img image.Image, quality int, opts EncodeOpt
 		extractRGBPlanes(img, e.yPlane, e.cbPlane, e.crPlane, e.Parallel)
 	} else {
 		extractYCbCrPlanes(img, e.yPlane, e.cbPlane, e.crPlane, e.Parallel)
+	}
+
+	ySrc, cbSrc, crSrc := e.yPlane, e.cbPlane, e.crPlane
+	if opts.Scale > 1 {
+		n := workW * workH
+		yDst := ensurePlane(&e.yTmp, n)
+		cbDst := ensurePlane(&e.cbTmp, n)
+		crDst := ensurePlane(&e.crTmp, n)
+		downscalePlaneBoxInto(yDst, workW, workH, ySrc, w, h, opts.Scale)
+		downscalePlaneBoxInto(cbDst, workW, workH, cbSrc, w, h, opts.Scale)
+		downscalePlaneBoxInto(crDst, workW, workH, crSrc, w, h, opts.Scale)
+		ySrc, cbSrc, crSrc = yDst, cbDst, crDst
+		w, h = workW, workH
 	}
 
 	e.yBits.Reset()
@@ -566,21 +662,21 @@ func (e *Encoder) EncodeWithOptions(img image.Image, quality int, opts EncodeOpt
 	yBits := opts.YBits
 	cbBits := opts.CbBits
 	crBits := opts.CrBits
-	yPhaseX, yPhaseY := planeBlueNoisePhase(e.yPlane, w, h, 0x59)
-	cbPhaseX, cbPhaseY := planeBlueNoisePhase(e.cbPlane, w, h, 0x83)
-	crPhaseX, crPhaseY := planeBlueNoisePhase(e.crPlane, w, h, 0xC7)
+	yPhaseX, yPhaseY := planeBlueNoisePhase(ySrc, w, h, 0x59)
+	cbPhaseX, cbPhaseY := planeBlueNoisePhase(cbSrc, w, h, 0x83)
+	crPhaseX, crPhaseY := planeBlueNoisePhase(crSrc, w, h, 0xC7)
 	if opts.BW {
 		e.ensureErrorBuffers(w)
-		quantizePhotoLumaToBits(e.yPlane, w, h, quality, yBits, yPhaseX, yPhaseY, &e.yBits, e.errCurr, e.errNext)
+		quantizePhotoLumaToBits(ySrc, w, h, quality, yBits, yPhaseX, yPhaseY, &e.yBits, e.errCurr, e.errNext)
 	} else {
 		if paletteMode {
 			e.cbBits.Reset()
 			e.crBits.Reset()
-			chosenPalette := paletteFromMode(opts.ZXMode, opts.Palette, e.yPlane, e.cbPlane, e.crPlane, w, h)
+			chosenPalette := paletteFromMode(opts.ZXMode, opts.Palette, ySrc, cbSrc, crSrc, w, h)
 			yBits = max(1, bitsNeeded(len(chosenPalette)-1))
 			cbBits = 0
 			crBits = 0
-			quantizePaletteIndices(e.yPlane, e.cbPlane, e.crPlane, w, h, quality, chosenPalette, yPhaseX, yPhaseY, cbPhaseX, cbPhaseY, crPhaseX, crPhaseY, strings.HasPrefix(opts.Palette, "adaptive:"), opts.TileSize, &e.yBits)
+			quantizePaletteIndices(ySrc, cbSrc, crSrc, w, h, quality, chosenPalette, yPhaseX, yPhaseY, cbPhaseX, cbPhaseY, crPhaseX, crPhaseY, strings.HasPrefix(opts.Palette, "adaptive:"), opts.TileSize, &e.yBits)
 		} else {
 			if cbBits > 0 {
 				channelsMask |= channelFlagCb
@@ -588,7 +684,7 @@ func (e *Encoder) EncodeWithOptions(img image.Image, quality int, opts EncodeOpt
 			if crBits > 0 {
 				channelsMask |= channelFlagCr
 			}
-			quantizeColorToPalette(e.yPlane, e.cbPlane, e.crPlane, w, h, quality, yBits, cbBits, crBits, yPhaseX, yPhaseY, cbPhaseX, cbPhaseY, crPhaseX, crPhaseY, opts.RGBMode, opts.ZXMode, opts.Palette, &e.yBits, &e.cbBits, &e.crBits)
+			quantizeColorToPalette(ySrc, cbSrc, crSrc, w, h, quality, yBits, cbBits, crBits, yPhaseX, yPhaseY, cbPhaseX, cbPhaseY, crPhaseX, crPhaseY, opts.RGBMode, opts.ZXMode, opts.Palette, &e.yBits, &e.cbBits, &e.crBits)
 		}
 	}
 
@@ -649,13 +745,16 @@ func (e *Encoder) EncodeWithOptions(img image.Image, quality int, opts EncodeOpt
 	if err := e.bw.WriteByte(byte(patternH)); err != nil {
 		return nil, err
 	}
+	if err := e.bw.WriteByte(byte(opts.Scale)); err != nil {
+		return nil, err
+	}
 	if err := e.bw.WriteByte(channelsMask); err != nil {
 		return nil, err
 	}
-	if err := writeU32BE(e.bw, uint32(w)); err != nil {
+	if err := writeU32BE(e.bw, uint32(origW)); err != nil {
 		return nil, err
 	}
-	if err := writeU32BE(e.bw, uint32(h)); err != nil {
+	if err := writeU32BE(e.bw, uint32(origH)); err != nil {
 		return nil, err
 	}
 	if err := writeBitPlane(e.bw, e.yBits.Bytes()); err != nil {
@@ -778,6 +877,11 @@ func (d *Decoder) Decode(compData []byte) (*image.RGBA, error) {
 	pos++
 	patternH := int(payload[pos])
 	pos++
+	scale := int(payload[pos])
+	pos++
+	if scale < 1 || scale > 64 {
+		return nil, fmt.Errorf("decode: invalid scale %d", scale)
+	}
 	if yBitDepth < 1 || yBitDepth > 8 {
 		return nil, fmt.Errorf("decode: invalid Y bit depth %d", yBitDepth)
 	}
@@ -839,7 +943,7 @@ func (d *Decoder) Decode(compData []byte) (*image.RGBA, error) {
 		d.dst = image.NewRGBA(image.Rect(0, 0, int(imgW), int(imgH)))
 	}
 
-	if err := decodeToRGBA(d.dst, d.yBits, d.cbBits, d.crBits, hasCb, hasCr, yBitDepth, cbBitDepth, crBitDepth, yStorageMode, patternW, patternH, colorMode, d.Parallel); err != nil {
+	if err := decodeToRGBA(d.dst, d.yBits, d.cbBits, d.crBits, hasCb, hasCr, yBitDepth, cbBitDepth, crBitDepth, yStorageMode, patternW, patternH, colorMode, scale, d.Parallel); err != nil {
 		return nil, err
 	}
 
@@ -862,6 +966,208 @@ func extractYCbCrPlanes(img image.Image, yPlane, cbPlane, crPlane []uint8, paral
 	b := img.Bounds()
 	w := b.Dx()
 	h := b.Dy()
+
+	// Fast paths to avoid img.At()/model conversions in hot loops.
+	switch m := img.(type) {
+	case *image.YCbCr:
+		rect := m.Rect
+		xOff := b.Min.X - rect.Min.X
+		yOff := b.Min.Y - rect.Min.Y
+		var xShift, yShift int
+		switch m.SubsampleRatio {
+		case image.YCbCrSubsampleRatio444:
+			xShift, yShift = 0, 0
+		case image.YCbCrSubsampleRatio422:
+			xShift, yShift = 1, 0
+		case image.YCbCrSubsampleRatio420:
+			xShift, yShift = 1, 1
+		case image.YCbCrSubsampleRatio440:
+			xShift, yShift = 0, 1
+		case image.YCbCrSubsampleRatio411:
+			xShift, yShift = 2, 0
+		case image.YCbCrSubsampleRatio410:
+			xShift, yShift = 2, 1
+		default:
+			// Unknown: fall back to generic path below.
+			break
+		}
+		if m.SubsampleRatio == image.YCbCrSubsampleRatio444 ||
+			m.SubsampleRatio == image.YCbCrSubsampleRatio422 ||
+			m.SubsampleRatio == image.YCbCrSubsampleRatio420 ||
+			m.SubsampleRatio == image.YCbCrSubsampleRatio440 ||
+			m.SubsampleRatio == image.YCbCrSubsampleRatio411 ||
+			m.SubsampleRatio == image.YCbCrSubsampleRatio410 {
+
+			if !parallel || h < 32 {
+				for y := 0; y < h; y++ {
+					ry := y + yOff
+					yRow := (ry)*m.YStride + xOff
+					cy := ry >> yShift
+					cRow := cy*m.CStride + (xOff >> xShift)
+					rowOff := y * w
+					for x := 0; x < w; x++ {
+						yPlane[rowOff+x] = m.Y[yRow+x]
+						cx := x >> xShift
+						cbPlane[rowOff+x] = m.Cb[cRow+cx]
+						crPlane[rowOff+x] = m.Cr[cRow+cx]
+					}
+				}
+				return
+			}
+
+			workers := min(runtime.NumCPU(), h)
+			rowsPerWorker := (h + workers - 1) / workers
+			var wg sync.WaitGroup
+			for i := 0; i < workers; i++ {
+				y0 := i * rowsPerWorker
+				if y0 >= h {
+					break
+				}
+				y1 := min(y0+rowsPerWorker, h)
+				wg.Add(1)
+				go func(y0, y1 int) {
+					defer wg.Done()
+					for y := y0; y < y1; y++ {
+						ry := y + yOff
+						yRow := (ry)*m.YStride + xOff
+						cy := ry >> yShift
+						cRow := cy*m.CStride + (xOff >> xShift)
+						rowOff := y * w
+						for x := 0; x < w; x++ {
+							yPlane[rowOff+x] = m.Y[yRow+x]
+							cx := x >> xShift
+							cbPlane[rowOff+x] = m.Cb[cRow+cx]
+							crPlane[rowOff+x] = m.Cr[cRow+cx]
+						}
+					}
+				}(y0, y1)
+			}
+			wg.Wait()
+			return
+		}
+
+	case *image.RGBA:
+		// RGBA is premultiplied; handle alpha to match At() semantics.
+		rect := m.Rect
+		xOff := b.Min.X - rect.Min.X
+		yOff := b.Min.Y - rect.Min.Y
+		if !parallel || h < 32 {
+			for y := 0; y < h; y++ {
+				ry := y + yOff
+				srcRow := ry*m.Stride + xOff*4
+				rowOff := y * w
+				for x := 0; x < w; x++ {
+					i := srcRow + x*4
+					r := int(m.Pix[i+0])
+					g := int(m.Pix[i+1])
+					bl := int(m.Pix[i+2])
+					a := int(m.Pix[i+3])
+					if a != 0 && a != 255 {
+						r = (r*255 + a/2) / a
+						g = (g*255 + a/2) / a
+						bl = (bl*255 + a/2) / a
+					} else if a == 0 {
+						r, g, bl = 0, 0, 0
+					}
+					yy, cb, cr := rgbToYCbCrFast(uint8(r), uint8(g), uint8(bl))
+					yPlane[rowOff+x] = yy
+					cbPlane[rowOff+x] = cb
+					crPlane[rowOff+x] = cr
+				}
+			}
+			return
+		}
+
+		workers := min(runtime.NumCPU(), h)
+		rowsPerWorker := (h + workers - 1) / workers
+		var wg sync.WaitGroup
+		for i := 0; i < workers; i++ {
+			y0 := i * rowsPerWorker
+			if y0 >= h {
+				break
+			}
+			y1 := min(y0+rowsPerWorker, h)
+			wg.Add(1)
+			go func(y0, y1 int) {
+				defer wg.Done()
+				for y := y0; y < y1; y++ {
+					ry := y + yOff
+					srcRow := ry*m.Stride + xOff*4
+					rowOff := y * w
+					for x := 0; x < w; x++ {
+						i := srcRow + x*4
+						r := int(m.Pix[i+0])
+						g := int(m.Pix[i+1])
+						bl := int(m.Pix[i+2])
+						a := int(m.Pix[i+3])
+						if a != 0 && a != 255 {
+							r = (r*255 + a/2) / a
+							g = (g*255 + a/2) / a
+							bl = (bl*255 + a/2) / a
+						} else if a == 0 {
+							r, g, bl = 0, 0, 0
+						}
+						yy, cb, cr := rgbToYCbCrFast(uint8(r), uint8(g), uint8(bl))
+						yPlane[rowOff+x] = yy
+						cbPlane[rowOff+x] = cb
+						crPlane[rowOff+x] = cr
+					}
+				}
+			}(y0, y1)
+		}
+		wg.Wait()
+		return
+
+	case *image.NRGBA:
+		// NRGBA is non-premultiplied; ignore alpha for color conversion.
+		rect := m.Rect
+		xOff := b.Min.X - rect.Min.X
+		yOff := b.Min.Y - rect.Min.Y
+		if !parallel || h < 32 {
+			for y := 0; y < h; y++ {
+				ry := y + yOff
+				srcRow := ry*m.Stride + xOff*4
+				rowOff := y * w
+				for x := 0; x < w; x++ {
+					i := srcRow + x*4
+					yy, cb, cr := rgbToYCbCrFast(m.Pix[i+0], m.Pix[i+1], m.Pix[i+2])
+					yPlane[rowOff+x] = yy
+					cbPlane[rowOff+x] = cb
+					crPlane[rowOff+x] = cr
+				}
+			}
+			return
+		}
+
+		workers := min(runtime.NumCPU(), h)
+		rowsPerWorker := (h + workers - 1) / workers
+		var wg sync.WaitGroup
+		for i := 0; i < workers; i++ {
+			y0 := i * rowsPerWorker
+			if y0 >= h {
+				break
+			}
+			y1 := min(y0+rowsPerWorker, h)
+			wg.Add(1)
+			go func(y0, y1 int) {
+				defer wg.Done()
+				for y := y0; y < y1; y++ {
+					ry := y + yOff
+					srcRow := ry*m.Stride + xOff*4
+					rowOff := y * w
+					for x := 0; x < w; x++ {
+						i := srcRow + x*4
+						yy, cb, cr := rgbToYCbCrFast(m.Pix[i+0], m.Pix[i+1], m.Pix[i+2])
+						yPlane[rowOff+x] = yy
+						cbPlane[rowOff+x] = cb
+						crPlane[rowOff+x] = cr
+					}
+				}
+			}(y0, y1)
+		}
+		wg.Wait()
+		return
+	}
 
 	if !parallel || h < 32 {
 		for y := 0; y < h; y++ {
@@ -900,6 +1206,32 @@ func extractYCbCrPlanes(img image.Image, yPlane, cbPlane, crPlane []uint8, paral
 		}(y0, y1)
 	}
 	wg.Wait()
+}
+
+func rgbToYCbCrFast(r, g, b uint8) (uint8, uint8, uint8) {
+	// BT.601 full-range conversion, matching image/color.RGBToYCbCr.
+	ri := int(r)
+	gi := int(g)
+	bi := int(b)
+	y := (19595*ri + 38470*gi + 7471*bi + (1 << 15)) >> 16
+	cb := ((-11056*ri - 21712*gi + 32768*bi + (1 << 15)) >> 16) + 128
+	cr := ((32768*ri - 27440*gi - 5328*bi + (1 << 15)) >> 16) + 128
+	if y < 0 {
+		y = 0
+	} else if y > 255 {
+		y = 255
+	}
+	if cb < 0 {
+		cb = 0
+	} else if cb > 255 {
+		cb = 255
+	}
+	if cr < 0 {
+		cr = 0
+	} else if cr > 255 {
+		cr = 255
+	}
+	return uint8(y), uint8(cb), uint8(cr)
 }
 
 func extractRGBPlanes(img image.Image, rPlane, gPlane, bPlane []uint8, parallel bool) {
@@ -964,12 +1296,13 @@ func quantizeColorToPalette(yPlane, cbPlane, crPlane []uint8, w, h, quality, yBi
 	rowY := make([]int, w)
 	rowCb := make([]int, w)
 	rowCr := make([]int, w)
-	prevOutY := make([]float64, w)
-	prevOutCb := make([]float64, w)
-	prevOutCr := make([]float64, w)
-	currOutY := make([]float64, w)
-	currOutCb := make([]float64, w)
-	currOutCr := make([]float64, w)
+	// Sentinel neighbors: index pixels as x+1, so x-1 maps to x and x+1 maps to x+2.
+	prevOutY := make([]float64, w+2)
+	prevOutCb := make([]float64, w+2)
+	prevOutCr := make([]float64, w+2)
+	currOutY := make([]float64, w+2)
+	currOutCb := make([]float64, w+2)
+	currOutCr := make([]float64, w+2)
 	for i := range prevOutY {
 		prevOutY[i], prevOutCb[i], prevOutCr[i] = math.NaN(), math.NaN(), math.NaN()
 		currOutY[i], currOutCb[i], currOutCr[i] = math.NaN(), math.NaN(), math.NaN()
@@ -1010,6 +1343,12 @@ func quantizeColorToPalette(yPlane, cbPlane, crPlane []uint8, w, h, quality, yBi
 	crAmp := ditherAmplitude(28, quality)
 	fsStrength := fsDiffusionStrength(quality)
 
+	tile := getBlueNoiseTile()
+	tileMask := blueNoiseTileSize - 1
+	maxRank := float64(len(tile) - 1)
+	invMaxRank := 1.0 / maxRank
+	halfRank := maxRank * 0.5
+
 	errYCurr := make([]float64, w+2)
 	errYCurrNext := make([]float64, w+2)
 	errCbCurr := make([]float64, w+2)
@@ -1022,7 +1361,10 @@ func quantizeColorToPalette(yPlane, cbPlane, crPlane []uint8, w, h, quality, yBi
 		if y&1 == 0 {
 			for x := 0; x < w; x++ {
 				i := row + x
-				targetY := clamp255(applyQualityExposure(float64(yPlane[i]), quality) + errYCurr[x+1] + noiseBias(x, y, yPhaseX, yPhaseY, yAmp))
+				yXi := (x + yPhaseX) & tileMask
+				yYi := (y + yPhaseY) & tileMask
+				yBias := (float64(tile[(yYi*blueNoiseTileSize)+yXi]) - halfRank) * invMaxRank * yAmp
+				targetY := clamp255(applyQualityExposure(float64(yPlane[i]), quality) + errYCurr[x+1] + yBias)
 				targetCb := 128.0
 				targetCr := 128.0
 				if rgbMode {
@@ -1030,13 +1372,19 @@ func quantizeColorToPalette(yPlane, cbPlane, crPlane []uint8, w, h, quality, yBi
 					targetCr = 0
 				}
 				if cbBits > 0 {
-					targetCb = clamp255(applyQualityExposure(float64(cbPlane[i]), quality) + errCbCurr[x+1] + noiseBias(x, y, cbPhaseX, cbPhaseY, cbAmp))
+					cbXi := (x + cbPhaseX) & tileMask
+					cbYi := (y + cbPhaseY) & tileMask
+					cbBias := (float64(tile[(cbYi*blueNoiseTileSize)+cbXi]) - halfRank) * invMaxRank * cbAmp
+					targetCb = clamp255(applyQualityExposure(float64(cbPlane[i]), quality) + errCbCurr[x+1] + cbBias)
 				}
 				if crBits > 0 {
-					targetCr = clamp255(applyQualityExposure(float64(crPlane[i]), quality) + errCrCurr[x+1] + noiseBias(x, y, crPhaseX, crPhaseY, crAmp))
+					crXi := (x + crPhaseX) & tileMask
+					crYi := (y + crPhaseY) & tileMask
+					crBias := (float64(tile[(crYi*blueNoiseTileSize)+crXi]) - halfRank) * invMaxRank * crAmp
+					targetCr = clamp255(applyQualityExposure(float64(crPlane[i]), quality) + errCrCurr[x+1] + crBias)
 				}
-				upLeftY, upLeftCb, upLeftCr := sampleNeighbor(prevOutY, prevOutCb, prevOutCr, x-1)
-				upRightY, upRightCb, upRightCr := sampleNeighbor(prevOutY, prevOutCb, prevOutCr, x+1)
+				upLeftY, upLeftCb, upLeftCr := prevOutY[x], prevOutCb[x], prevOutCr[x]
+				upRightY, upRightCb, upRightCr := prevOutY[x+2], prevOutCb[x+2], prevOutCr[x+2]
 				bestY, bestCb, bestCr, outY, outCb, outCr := nearestColorMode(targetY, targetCb, targetCr, yLevels, cbLevels, crLevels, palette, cbBits > 0, crBits > 0, rgbMode || zxMode || paletteName != "", upLeftY, upLeftCb, upLeftCr, upRightY, upRightCb, upRightCr)
 				if crBits > 0 {
 					rowCr[x] = bestCr
@@ -1045,13 +1393,23 @@ func quantizeColorToPalette(yPlane, cbPlane, crPlane []uint8, w, h, quality, yBi
 				if cbBits > 0 {
 					rowCb[x] = bestCb
 				}
-				currOutY[x], currOutCb[x], currOutCr[x] = outY, outCb, outCr
-				diffuseColorError(targetY-outY, targetCb-outCb, targetCr-outCr, x, errYCurr, errYCurrNext, errCbCurr, errCbNext, errCrCurr, errCrNext, cbBits > 0, crBits > 0, true, fsStrength)
+				currOutY[x+1], currOutCb[x+1], currOutCr[x+1] = outY, outCb, outCr
+				dy := (targetY - outY) * fsStrength
+				dcb := (targetCb - outCb) * fsStrength
+				dcr := (targetCr - outCr) * fsStrength
+				if cbBits > 0 || crBits > 0 {
+					diffuseYCbCrLTR(dy, dcb, dcr, x, errYCurr, errYCurrNext, errCbCurr, errCbNext, errCrCurr, errCrNext)
+				} else {
+					diffuseYOnlyLTR(dy, x, errYCurr, errYCurrNext)
+				}
 			}
 		} else {
 			for x := w - 1; x >= 0; x-- {
 				i := row + x
-				targetY := clamp255(applyQualityExposure(float64(yPlane[i]), quality) + errYCurr[x+1] + noiseBias(x, y, yPhaseX, yPhaseY, yAmp))
+				yXi := (x + yPhaseX) & tileMask
+				yYi := (y + yPhaseY) & tileMask
+				yBias := (float64(tile[(yYi*blueNoiseTileSize)+yXi]) - halfRank) * invMaxRank * yAmp
+				targetY := clamp255(applyQualityExposure(float64(yPlane[i]), quality) + errYCurr[x+1] + yBias)
 				targetCb := 128.0
 				targetCr := 128.0
 				if rgbMode {
@@ -1059,13 +1417,19 @@ func quantizeColorToPalette(yPlane, cbPlane, crPlane []uint8, w, h, quality, yBi
 					targetCr = 0
 				}
 				if cbBits > 0 {
-					targetCb = clamp255(applyQualityExposure(float64(cbPlane[i]), quality) + errCbCurr[x+1] + noiseBias(x, y, cbPhaseX, cbPhaseY, cbAmp))
+					cbXi := (x + cbPhaseX) & tileMask
+					cbYi := (y + cbPhaseY) & tileMask
+					cbBias := (float64(tile[(cbYi*blueNoiseTileSize)+cbXi]) - halfRank) * invMaxRank * cbAmp
+					targetCb = clamp255(applyQualityExposure(float64(cbPlane[i]), quality) + errCbCurr[x+1] + cbBias)
 				}
 				if crBits > 0 {
-					targetCr = clamp255(applyQualityExposure(float64(crPlane[i]), quality) + errCrCurr[x+1] + noiseBias(x, y, crPhaseX, crPhaseY, crAmp))
+					crXi := (x + crPhaseX) & tileMask
+					crYi := (y + crPhaseY) & tileMask
+					crBias := (float64(tile[(crYi*blueNoiseTileSize)+crXi]) - halfRank) * invMaxRank * crAmp
+					targetCr = clamp255(applyQualityExposure(float64(crPlane[i]), quality) + errCrCurr[x+1] + crBias)
 				}
-				upLeftY, upLeftCb, upLeftCr := sampleNeighbor(prevOutY, prevOutCb, prevOutCr, x-1)
-				upRightY, upRightCb, upRightCr := sampleNeighbor(prevOutY, prevOutCb, prevOutCr, x+1)
+				upLeftY, upLeftCb, upLeftCr := prevOutY[x], prevOutCb[x], prevOutCr[x]
+				upRightY, upRightCb, upRightCr := prevOutY[x+2], prevOutCb[x+2], prevOutCr[x+2]
 				bestY, bestCb, bestCr, outY, outCb, outCr := nearestColorMode(targetY, targetCb, targetCr, yLevels, cbLevels, crLevels, palette, cbBits > 0, crBits > 0, rgbMode || zxMode || paletteName != "", upLeftY, upLeftCb, upLeftCr, upRightY, upRightCb, upRightCr)
 				rowY[x] = bestY
 				if cbBits > 0 {
@@ -1074,8 +1438,15 @@ func quantizeColorToPalette(yPlane, cbPlane, crPlane []uint8, w, h, quality, yBi
 				if crBits > 0 {
 					rowCr[x] = bestCr
 				}
-				currOutY[x], currOutCb[x], currOutCr[x] = outY, outCb, outCr
-				diffuseColorError(targetY-outY, targetCb-outCb, targetCr-outCr, x, errYCurr, errYCurrNext, errCbCurr, errCbNext, errCrCurr, errCrNext, cbBits > 0, crBits > 0, false, fsStrength)
+				currOutY[x+1], currOutCb[x+1], currOutCr[x+1] = outY, outCb, outCr
+				dy := (targetY - outY) * fsStrength
+				dcb := (targetCb - outCb) * fsStrength
+				dcr := (targetCr - outCr) * fsStrength
+				if cbBits > 0 || crBits > 0 {
+					diffuseYCbCrRTL(dy, dcb, dcr, x, errYCurr, errYCurrNext, errCbCurr, errCbNext, errCrCurr, errCrNext)
+				} else {
+					diffuseYOnlyRTL(dy, x, errYCurr, errYCurrNext)
+				}
 			}
 		}
 		for x := 0; x < w; x++ {
@@ -1196,7 +1567,10 @@ func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, p
 				out := palette[idx]
 				pixelIdx[i] = idx
 				freq[idx]++
-				diffuseColorError(targetR-float64(out[0]), targetG-float64(out[1]), targetB-float64(out[2]), x, errRRow, errRNextRow, errGRow, errGNextRow, errBRow, errBNextRow, true, true, true, fsStrength)
+				dr := (targetR - float64(out[0])) * fsStrength
+				dg := (targetG - float64(out[1])) * fsStrength
+				db := (targetB - float64(out[2])) * fsStrength
+				diffuseYCbCrLTR(dr, dg, db, x, errRRow, errRNextRow, errGRow, errGNextRow, errBRow, errBNextRow)
 			}
 		} else {
 			for x := w - 1; x >= 0; x-- {
@@ -1220,7 +1594,10 @@ func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, p
 				out := palette[idx]
 				pixelIdx[i] = idx
 				freq[idx]++
-				diffuseColorError(targetR-float64(out[0]), targetG-float64(out[1]), targetB-float64(out[2]), x, errRRow, errRNextRow, errGRow, errGNextRow, errBRow, errBNextRow, true, true, false, fsStrength)
+				dr := (targetR - float64(out[0])) * fsStrength
+				dg := (targetG - float64(out[1])) * fsStrength
+				db := (targetB - float64(out[2])) * fsStrength
+				diffuseYCbCrRTL(dr, dg, db, x, errRRow, errRNextRow, errGRow, errGNextRow, errBRow, errBNextRow)
 			}
 		}
 		for i := range errRCurr {
@@ -1356,30 +1733,44 @@ func nearestPaletteEntry(targetR, targetG, targetB float64, palette [][3]uint8) 
 }
 
 func nearestPaletteColor(targetY, targetCb, targetCr float64, yLevels, cbLevels, crLevels []uint8, hasCb, hasCr bool) (int, int, int, float64, float64, float64) {
-	bestY, bestCb, bestCr := 0, 0, 0
-	bestDist := math.MaxFloat64
-	bestOutY := float64(yLevels[0])
-	bestOutCb := 128.0
-	bestOutCr := 128.0
-	for yi, yv := range yLevels {
-		for cbi, cbv := range cbLevels {
-			for cri, crv := range crLevels {
-				dist := paletteDistance(targetY, targetCb, targetCr, float64(yv), float64(cbv), float64(crv), hasCb, hasCr)
-				if dist < bestDist {
-					bestDist = dist
-					bestY, bestCb, bestCr = yi, cbi, cri
-					bestOutY = float64(yv)
-					if hasCb {
-						bestOutCb = float64(cbv)
-					}
-					if hasCr {
-						bestOutCr = float64(crv)
-					}
-				}
-			}
+	// Levels come from quantLevels(low, high, bits): they're monotonic and near-uniform.
+	// For squared error distance, the best index is simply the nearest level in each dimension.
+	pick := func(target float64, levels []uint8) (int, float64) {
+		if len(levels) <= 1 {
+			return 0, float64(levels[0])
 		}
+		lo := int(levels[0])
+		hi := int(levels[len(levels)-1])
+		if hi == lo {
+			return 0, float64(levels[0])
+		}
+		t := int(target + 0.5)
+		if t < lo {
+			t = lo
+		} else if t > hi {
+			t = hi
+		}
+		levelCount := len(levels) - 1
+		span := hi - lo
+		idx := ((t-lo)*levelCount + span/2) / span
+		if idx < 0 {
+			idx = 0
+		} else if idx > levelCount {
+			idx = levelCount
+		}
+		return idx, float64(levels[idx])
 	}
-	return bestY, bestCb, bestCr, bestOutY, bestOutCb, bestOutCr
+
+	yi, outY := pick(targetY, yLevels)
+	cbi, outCb := 0, 128.0
+	cri, outCr := 0, 128.0
+	if hasCb {
+		cbi, outCb = pick(targetCb, cbLevels)
+	}
+	if hasCr {
+		cri, outCr = pick(targetCr, crLevels)
+	}
+	return yi, cbi, cri, outY, outCb, outCr
 }
 
 func nearestColorMode(targetY, targetCb, targetCr float64, yLevels, cbLevels, crLevels []uint8, palette [][3]uint8, hasCb, hasCr, rgbMode bool, upLeftY, upLeftCb, upLeftCr, upRightY, upRightCb, upRightCr float64) (int, int, int, float64, float64, float64) {
@@ -1903,45 +2294,49 @@ func rgbToYCbCrFloats(r, g, b uint8) (float64, float64, float64) {
 	return float64(yc.Y), float64(yc.Cb), float64(yc.Cr)
 }
 
-func diffuseColorError(dy, dcb, dcr float64, x int, yCurr, yNext, cbCurr, cbNext, crCurr, crNext []float64, hasCb, hasCr, leftToRight bool, strength float64) {
-	dy *= strength
-	dcb *= strength
-	dcr *= strength
-	if leftToRight {
-		yCurr[x+2] += dy * (7.0 / 16.0)
-		yNext[x+0] += dy * (3.0 / 16.0)
-		yNext[x+1] += dy * (5.0 / 16.0)
-		yNext[x+2] += dy * (1.0 / 16.0)
-		if hasCb {
-			cbCurr[x+2] += dcb * (7.0 / 16.0)
-			cbNext[x+0] += dcb * (3.0 / 16.0)
-			cbNext[x+1] += dcb * (5.0 / 16.0)
-			cbNext[x+2] += dcb * (1.0 / 16.0)
-		}
-		if hasCr {
-			crCurr[x+2] += dcr * (7.0 / 16.0)
-			crNext[x+0] += dcr * (3.0 / 16.0)
-			crNext[x+1] += dcr * (5.0 / 16.0)
-			crNext[x+2] += dcr * (1.0 / 16.0)
-		}
-		return
-	}
-	yCurr[x+0] += dy * (7.0 / 16.0)
-	yNext[x+2] += dy * (3.0 / 16.0)
-	yNext[x+1] += dy * (5.0 / 16.0)
-	yNext[x+0] += dy * (1.0 / 16.0)
-	if hasCb {
-		cbCurr[x+0] += dcb * (7.0 / 16.0)
-		cbNext[x+2] += dcb * (3.0 / 16.0)
-		cbNext[x+1] += dcb * (5.0 / 16.0)
-		cbNext[x+0] += dcb * (1.0 / 16.0)
-	}
-	if hasCr {
-		crCurr[x+0] += dcr * (7.0 / 16.0)
-		crNext[x+2] += dcr * (3.0 / 16.0)
-		crNext[x+1] += dcr * (5.0 / 16.0)
-		crNext[x+0] += dcr * (1.0 / 16.0)
-	}
+const (
+	diffW7 = 7.0 / 16.0
+	diffW5 = 5.0 / 16.0
+	diffW3 = 3.0 / 16.0
+	diffW1 = 1.0 / 16.0
+)
+
+func diffuseYOnlyLTR(dy float64, x int, yCurr, yNext []float64) {
+	yCurr[x+2] += dy * diffW7
+	yNext[x+0] += dy * diffW3
+	yNext[x+1] += dy * diffW5
+	yNext[x+2] += dy * diffW1
+}
+
+func diffuseYOnlyRTL(dy float64, x int, yCurr, yNext []float64) {
+	yCurr[x+0] += dy * diffW7
+	yNext[x+2] += dy * diffW3
+	yNext[x+1] += dy * diffW5
+	yNext[x+0] += dy * diffW1
+}
+
+func diffuseYCbCrLTR(dy, dcb, dcr float64, x int, yCurr, yNext, cbCurr, cbNext, crCurr, crNext []float64) {
+	diffuseYOnlyLTR(dy, x, yCurr, yNext)
+	cbCurr[x+2] += dcb * diffW7
+	cbNext[x+0] += dcb * diffW3
+	cbNext[x+1] += dcb * diffW5
+	cbNext[x+2] += dcb * diffW1
+	crCurr[x+2] += dcr * diffW7
+	crNext[x+0] += dcr * diffW3
+	crNext[x+1] += dcr * diffW5
+	crNext[x+2] += dcr * diffW1
+}
+
+func diffuseYCbCrRTL(dy, dcb, dcr float64, x int, yCurr, yNext, cbCurr, cbNext, crCurr, crNext []float64) {
+	diffuseYOnlyRTL(dy, x, yCurr, yNext)
+	cbCurr[x+0] += dcb * diffW7
+	cbNext[x+2] += dcb * diffW3
+	cbNext[x+1] += dcb * diffW5
+	cbNext[x+0] += dcb * diffW1
+	crCurr[x+0] += dcr * diffW7
+	crNext[x+2] += dcr * diffW3
+	crNext[x+1] += dcr * diffW5
+	crNext[x+0] += dcr * diffW1
 }
 
 func quantLevels(low, high uint8, bits int) []uint8 {
@@ -2239,10 +2634,7 @@ func planeBlueNoisePhase(plane []uint8, w, h int, salt uint64) (int, int) {
 }
 
 func getBlueNoiseTile() []uint16 {
-	blueNoiseTileOnce.Do(func() {
-		blueNoiseTile = generateBlueNoiseTileVoidAndCluster(blueNoiseTileSize)
-	})
-	return blueNoiseTile
+	return embeddedBlueNoiseTile
 }
 
 func generateBlueNoiseTileVoidAndCluster(size int) []uint16 {
@@ -2401,20 +2793,59 @@ func readBitPlane(payload []byte, pos *int, label string) ([]byte, error) {
 	return payload[start:*pos], nil
 }
 
-func decodeToRGBA(dst *image.RGBA, yBits, cbBits, crBits []byte, hasCb, hasCr bool, yBitDepth, cbBitDepth, crBitDepth int, yStorageMode byte, patternW, patternH int, colorMode byte, parallel bool) error {
+func decodeToRGBA(dst *image.RGBA, yBits, cbBits, crBits []byte, hasCb, hasCr bool, yBitDepth, cbBitDepth, crBitDepth int, yStorageMode byte, patternW, patternH int, colorMode byte, scale int, parallel bool) error {
 	b := dst.Bounds()
 	w := b.Dx()
 	h := b.Dy()
-	if colorMode == colorModePaletteRGB {
-		return decodePaletteToRGBA(dst, yBits, yBitDepth, yStorageMode, patternW, patternH)
+	if scale < 1 {
+		scale = 1
 	}
-	if yStorageMode == yStorageRaw && len(yBits) < packedPlaneLenBits(w, h, yBitDepth) {
+	baseW, baseH := w, h
+	if scale > 1 {
+		baseW = ceilDiv(w, scale)
+		baseH = ceilDiv(h, scale)
+	}
+	if colorMode == colorModePaletteRGB {
+		// Palette decoder is complex; reuse it on low-res and then nearest-upscale to full.
+		if scale <= 1 {
+			return decodePaletteToRGBA(dst, yBits, yBitDepth, yStorageMode, patternW, patternH)
+		}
+		baseW := ceilDiv(w, scale)
+		baseH := ceilDiv(h, scale)
+		tmp := image.NewRGBA(image.Rect(0, 0, baseW, baseH))
+		if err := decodePaletteToRGBA(tmp, yBits, yBitDepth, yStorageMode, patternW, patternH); err != nil {
+			return err
+		}
+		// Nearest-upscale tmp into dst.
+		for y := 0; y < h; y++ {
+			sy := y / scale
+			if sy >= baseH {
+				sy = baseH - 1
+			}
+			srcRow := sy * tmp.Stride
+			dstRow := y * dst.Stride
+			for x := 0; x < w; x++ {
+				sx := x / scale
+				if sx >= baseW {
+					sx = baseW - 1
+				}
+				so := srcRow + sx*4
+				do := dstRow + x*4
+				dst.Pix[do+0] = tmp.Pix[so+0]
+				dst.Pix[do+1] = tmp.Pix[so+1]
+				dst.Pix[do+2] = tmp.Pix[so+2]
+				dst.Pix[do+3] = 255
+			}
+		}
+		return nil
+	}
+	if yStorageMode == yStorageRaw && len(yBits) < packedPlaneLenBits(baseW, baseH, yBitDepth) {
 		return fmt.Errorf("decode: Y plane too short")
 	}
-	if hasCb && len(cbBits) < packedPlaneLenBits(w, h, cbBitDepth) {
+	if hasCb && len(cbBits) < packedPlaneLenBits(baseW, baseH, cbBitDepth) {
 		return fmt.Errorf("decode: Cb plane too short")
 	}
-	if hasCr && len(crBits) < packedPlaneLenBits(w, h, crBitDepth) {
+	if hasCr && len(crBits) < packedPlaneLenBits(baseW, baseH, crBitDepth) {
 		return fmt.Errorf("decode: Cr plane too short")
 	}
 
@@ -2438,22 +2869,22 @@ func decodeToRGBA(dst *image.RGBA, yBits, cbBits, crBits []byte, hasCb, hasCr bo
 	if !hasCb && !hasCr && yBitDepth == 1 {
 		switch yStorageMode {
 		case yStoragePatternGridDirect:
-			yPlane, err = unpackMonoPatternGridDirect(yBits, w, h, patternW, patternH, yLo, yHi)
+			yPlane, err = unpackMonoPatternGridDirect(yBits, baseW, baseH, patternW, patternH, yLo, yHi)
 		case yStoragePatternGrid:
-			yPlane, err = unpackMonoPatternGrid(yBits, w, h, patternW, patternH, yLo, yHi)
+			yPlane, err = unpackMonoPatternGrid(yBits, baseW, baseH, patternW, patternH, yLo, yHi)
 		default:
-			yPlane, err = unpackPlaneLevels(yBits, w, h, yBitDepth, c0Lo, c0Hi)
+			yPlane, err = unpackPlaneLevels(yBits, baseW, baseH, yBitDepth, c0Lo, c0Hi)
 		}
 		if err != nil {
 			return err
 		}
 	} else if !hasCb && !hasCr && yStorageMode == yStoragePatternLayers {
-		yPlane, err = unpackPatternLayers(yBits, w, h, yBitDepth, patternW, patternH, yLo, yHi)
+		yPlane, err = unpackPatternLayers(yBits, baseW, baseH, yBitDepth, patternW, patternH, yLo, yHi)
 		if err != nil {
 			return err
 		}
 	} else {
-		yPlane, err = unpackPlaneLevels(yBits, w, h, yBitDepth, c0Lo, c0Hi)
+		yPlane, err = unpackPlaneLevels(yBits, baseW, baseH, yBitDepth, c0Lo, c0Hi)
 		if err != nil {
 			return err
 		}
@@ -2461,7 +2892,7 @@ func decodeToRGBA(dst *image.RGBA, yBits, cbBits, crBits []byte, hasCb, hasCr bo
 
 	var cbPlane []uint8
 	if hasCb {
-		cbPlane, err = unpackPlaneLevels(cbBits, w, h, cbBitDepth, c1Lo, c1Hi)
+		cbPlane, err = unpackPlaneLevels(cbBits, baseW, baseH, cbBitDepth, c1Lo, c1Hi)
 		if err != nil {
 			return err
 		}
@@ -2469,14 +2900,14 @@ func decodeToRGBA(dst *image.RGBA, yBits, cbBits, crBits []byte, hasCb, hasCr bo
 
 	var crPlane []uint8
 	if hasCr {
-		crPlane, err = unpackPlaneLevels(crBits, w, h, crBitDepth, c2Lo, c2Hi)
+		crPlane, err = unpackPlaneLevels(crBits, baseW, baseH, crBitDepth, c2Lo, c2Hi)
 		if err != nil {
 			return err
 		}
 	}
 
 	if !parallel || h < 32 {
-		fillRGBAStripe(dst.Pix, dst.Stride, w, 0, h, yPlane, cbPlane, crPlane, hasCb, hasCr, colorMode)
+		fillRGBAStripeUpscale(dst.Pix, dst.Stride, w, 0, h, yPlane, cbPlane, crPlane, baseW, baseH, scale, hasCb, hasCr, colorMode)
 		return nil
 	}
 
@@ -2492,7 +2923,7 @@ func decodeToRGBA(dst *image.RGBA, yBits, cbBits, crBits []byte, hasCb, hasCr bo
 		wg.Add(1)
 		go func(y0, y1 int) {
 			defer wg.Done()
-			fillRGBAStripe(dst.Pix, dst.Stride, w, y0, y1, yPlane, cbPlane, crPlane, hasCb, hasCr, colorMode)
+			fillRGBAStripeUpscale(dst.Pix, dst.Stride, w, y0, y1, yPlane, cbPlane, crPlane, baseW, baseH, scale, hasCb, hasCr, colorMode)
 		}(y0, y1)
 	}
 	wg.Wait()
@@ -3258,6 +3689,54 @@ func fillRGBAStripe(pix []byte, stride, w, y0, y1 int, yPlane, cbPlane, crPlane 
 		rowOff := y * stride
 		for x := 0; x < w; x++ {
 			idx := y*w + x
+			var r, g, b uint8
+			if colorMode == colorModeRGB && (hasCb || hasCr) {
+				r = yPlane[idx]
+				if hasCb {
+					g = cbPlane[idx]
+				}
+				if hasCr {
+					b = crPlane[idx]
+				}
+			} else {
+				yy := yPlane[idx]
+				cb := uint8(128)
+				cr := uint8(128)
+				if hasCb {
+					cb = cbPlane[idx]
+				}
+				if hasCr {
+					cr = crPlane[idx]
+				}
+				r, g, b = color.YCbCrToRGB(yy, cb, cr)
+			}
+			o := rowOff + x*4
+			pix[o+0] = r
+			pix[o+1] = g
+			pix[o+2] = b
+			pix[o+3] = 255
+		}
+	}
+}
+
+func fillRGBAStripeUpscale(pix []byte, stride, w, y0, y1 int, yPlane, cbPlane, crPlane []byte, baseW, baseH, scale int, hasCb, hasCr bool, colorMode byte) {
+	if scale <= 1 {
+		fillRGBAStripe(pix, stride, w, y0, y1, yPlane, cbPlane, crPlane, hasCb, hasCr, colorMode)
+		return
+	}
+	for y := y0; y < y1; y++ {
+		rowOff := y * stride
+		by := y / scale
+		if by >= baseH {
+			by = baseH - 1
+		}
+		baseRow := by * baseW
+		for x := 0; x < w; x++ {
+			bx := x / scale
+			if bx >= baseW {
+				bx = baseW - 1
+			}
+			idx := baseRow + bx
 			var r, g, b uint8
 			if colorMode == colorModeRGB && (hasCb || hasCr) {
 				r = yPlane[idx]
