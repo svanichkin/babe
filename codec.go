@@ -212,55 +212,55 @@ func quantizeY(v uint8, shift int) uint8 {
 	return uint8(center)
 }
 
-func applyFilmGrainY(pix []byte, stride, w, h, smallBlock int, amount float64) {
+func applyFilmGrainBlockY(pix []byte, stride, w, h, x0, y0, blockSize int, amount float64) {
 	if amount <= 0 {
 		return
 	}
-	smallSize := smallBlock / 4
-	if smallSize < 1 {
-		smallSize = 1
+	if blockSize <= 0 {
+		return
 	}
-	largeSize := smallSize * 2
+	size := blockSize / 2
+	if size < 1 {
+		size = 1
+	}
 	baseAmp := amount * 6.0
-	for by := 0; by < h; by += smallSize {
-		y1 := min(by+smallSize, h)
-		for bx := 0; bx < w; bx += smallSize {
-			x1 := min(bx+smallSize, w)
-			cx := bx + (x1-bx)/2
-			cy := by + (y1-by)/2
-			o := cy*stride + cx*4
-			luma := float64(pix[o+0]) / 255.0
-			shadowWeight := 1.0 - luma
-			shadowWeight *= shadowWeight
-			if shadowWeight <= 0 {
-				continue
-			}
-			sx := (bx / smallSize) & 63
-			sy := (by / smallSize) & 63
-			lx := (bx / largeSize) & 63
-			ly := (by / largeSize) & 63
-			selector := filmGrainNoiseByte((lx*11)+23, (ly*7)+19)
-			n := float64(filmGrainNoiseByte(lx, ly))/255.0 - 0.5
-			if selector < 128 {
-				n = float64(filmGrainNoiseByte(sx, sy))/255.0 - 0.5
-			}
-			delta := int(n * 2.0 * baseAmp * shadowWeight)
-			if delta == 0 {
-				continue
-			}
-			for y := by; y < y1; y++ {
-				row := y * stride
-				for x := bx; x < x1; x++ {
-					p := row + x*4
-					v := int(pix[p+0]) + delta
-					if v < 0 {
-						v = 0
-					} else if v > 255 {
-						v = 255
-					}
-					pix[p+0] = uint8(v)
+	blockW := min(x0+blockSize, w)
+	blockH := min(y0+blockSize, h)
+	applyCell := func(bx, by int, n float64) {
+		x1 := min(bx+size, blockW)
+		y1 := min(by+size, blockH)
+		cx := bx + (x1-bx)/2
+		cy := by + (y1-by)/2
+		o := cy*stride + cx*4
+		luma := float64(pix[o+0]) / 255.0
+		shadowWeight := 1.0 - luma
+		shadowWeight *= shadowWeight
+		if shadowWeight <= 0 {
+			return
+		}
+		delta := int(n * 2.0 * baseAmp * shadowWeight)
+		if delta == 0 {
+			return
+		}
+		for y := by; y < y1; y++ {
+			row := y * stride
+			for x := bx; x < x1; x++ {
+				p := row + x*4
+				v := int(pix[p+0]) + delta
+				if v < 0 {
+					v = 0
+				} else if v > 255 {
+					v = 255
 				}
+				pix[p+0] = uint8(v)
 			}
+		}
+	}
+
+	for by := y0; by < blockH; by += size {
+		for bx := x0; bx < blockW; bx += size {
+			n := float64(filmGrainNoiseByte(bx/size, by/size))/255.0 - 0.5
+			applyCell(bx, by, n)
 		}
 	}
 }
@@ -3595,6 +3595,9 @@ func decodeChannelToPix(data []byte, imgW, imgH int, levels []int, patternCount 
 					}
 				}
 			}
+			if channelOffset == 0 && activeFilmGrain > 0 {
+				applyFilmGrainBlockY(pix, strideBytes, imgW, imgH, x, y, size, activeFilmGrain)
+			}
 			blockIndex++
 			return nil
 		}
@@ -3639,6 +3642,9 @@ func decodeChannelToPix(data []byte, imgW, imgH int, levels []int, patternCount 
 						}
 					}
 				}
+				if channelOffset == 0 && activeFilmGrain > 0 {
+					applyFilmGrainBlockY(pix, strideBytes, imgW, imgH, mx, my, smallBlock, activeFilmGrain)
+				}
 				blockIndex++
 			}
 		}
@@ -3674,6 +3680,9 @@ func decodeChannelToPix(data []byte, imgW, imgH int, levels []int, patternCount 
 							return err
 						}
 					}
+				}
+				if channelOffset == 0 && activeFilmGrain > 0 {
+					applyFilmGrainBlockY(pix, strideBytes, imgW, imgH, mx, my, smallBlock, activeFilmGrain)
 				}
 				blockIndex++
 			}
@@ -3853,6 +3862,9 @@ func decodeChannelToPix(data []byte, imgW, imgH int, levels []int, patternCount 
 					}
 				}
 			}
+			if channelOffset == 0 && activeFilmGrain > 0 {
+				applyFilmGrainBlockY(pix, strideBytes, imgW, imgH, b.x, b.y, b.size, activeFilmGrain)
+			}
 		}
 		return nil
 	}
@@ -3943,6 +3955,9 @@ func decodeChannelToPix(data []byte, imgW, imgH int, levels []int, patternCount 
 								return
 							}
 						}
+					}
+					if channelOffset == 0 && activeFilmGrain > 0 {
+						applyFilmGrainBlockY(pix, strideBytes, imgW, imgH, b.x, b.y, b.size, activeFilmGrain)
 					}
 				}
 			}
@@ -4150,10 +4165,6 @@ func (d *Decoder) Decode(compData []byte) (*image.RGBA, error) {
 	}
 	if errCr != nil {
 		return nil, errCr
-	}
-
-	if activeFilmGrain > 0 {
-		applyFilmGrainY(pix, stride, imgW, imgH, smallBlock, activeFilmGrain)
 	}
 
 	if !rgbReady {
