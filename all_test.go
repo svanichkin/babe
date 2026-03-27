@@ -481,6 +481,52 @@ func BenchmarkCodecs(b *testing.B) {
 	})
 }
 
+func BenchmarkBABEEncodeOnly(b *testing.B) {
+	img := loadTestImage(b)
+	enc := NewEncoder()
+	var buf bytes.Buffer
+
+	// Warm-up outside timed section.
+	buf.Reset()
+	if err := enc.EncodeTo(&buf, img, 80, false, 1); err != nil {
+		b.Fatalf("encode failed: %v", err)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		buf.Reset()
+		if err := enc.EncodeTo(&buf, img, 80, false, 1); err != nil {
+			b.Fatalf("encode failed: %v", err)
+		}
+	}
+}
+
+func BenchmarkBABEDecodeOnly(b *testing.B) {
+	img := loadTestImage(b)
+	enc := NewEncoder()
+	dec := NewDecoder()
+	var buf bytes.Buffer
+
+	// Pre-encode once; decode benchmark should measure only decode.
+	buf.Reset()
+	if err := enc.EncodeTo(&buf, img, 80, false, 1); err != nil {
+		b.Fatalf("encode failed: %v", err)
+	}
+	encBytes := append([]byte(nil), buf.Bytes()...)
+
+	// Warm-up outside timed section.
+	if _, err := dec.Decode(encBytes); err != nil {
+		b.Fatalf("decode failed: %v", err)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := dec.Decode(encBytes); err != nil {
+			b.Fatalf("decode failed: %v", err)
+		}
+	}
+}
+
 // -----------------------------
 // Summary table (single output)
 // -----------------------------

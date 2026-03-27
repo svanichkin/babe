@@ -490,13 +490,13 @@ func normalizeEncodeOptions(opts EncodeOptions) (EncodeOptions, error) {
 		opts.PatternH = h
 	}
 	if opts.YBits < 1 || opts.YBits > 4 {
-		return opts, fmt.Errorf("Y bit depth must be in [1..4], got %d", opts.YBits)
+		return opts, fmt.Errorf("y bit depth must be in [1..4], got %d", opts.YBits)
 	}
 	if opts.CbBits < 1 || opts.CbBits > 4 {
-		return opts, fmt.Errorf("Cb bit depth must be in [1..4], got %d", opts.CbBits)
+		return opts, fmt.Errorf("cb bit depth must be in [1..4], got %d", opts.CbBits)
 	}
 	if opts.CrBits < 1 || opts.CrBits > 4 {
-		return opts, fmt.Errorf("Cr bit depth must be in [1..4], got %d", opts.CrBits)
+		return opts, fmt.Errorf("cr bit depth must be in [1..4], got %d", opts.CrBits)
 	}
 	if opts.TileSize != 0 {
 		if opts.TileSize < 2 || opts.TileSize > 255 {
@@ -955,52 +955,6 @@ func (e *Encoder) ensureErrorBuffers(w int) {
 	}
 	e.errCurr = e.errCurr[:need]
 	e.errNext = e.errNext[:need]
-}
-
-func quantizePlaneToBits(plane []uint8, w, h, quality, baseAmplitude int, dst *bytes.Buffer) {
-	quantizePlaneToBitsN(plane, w, h, quality, baseAmplitude, 0, 255, 1, 0, 0, dst)
-}
-
-func quantizePlaneToBitsN(plane []uint8, w, h, quality, baseAmplitude int, low, high uint8, bits, phaseX, phaseY int, dst *bytes.Buffer) {
-	bw := newBitWriter(dst)
-	baseAmp := ditherAmplitude(baseAmplitude, quality)
-	if bits <= 1 {
-		center := float64(low+high) * 0.5
-		for y := 0; y < h; y++ {
-			row := y * w
-			for x := 0; x < w; x++ {
-				i := row + x
-				amp := adaptiveDitherAmplitude(plane, w, h, x, y, baseAmp)
-				threshold := center + blueNoiseBias(x, y, phaseX, phaseY, amp)
-				value := float64(plane[i])
-				bw.writeBit(value >= threshold)
-			}
-		}
-		bw.flush()
-		return
-	}
-	levelCount := (1 << bits) - 1
-	lo := float64(low)
-	hi := float64(high)
-	for y := 0; y < h; y++ {
-		row := y * w
-		for x := 0; x < w; x++ {
-			i := row + x
-			norm := clamp01((float64(plane[i]) - lo) / (hi - lo))
-			amp := adaptiveDitherAmplitude(plane, w, h, x, y, baseAmp)
-			jitter := blueNoiseBias(x, y, phaseX, phaseY, amp) / 255.0
-			scaled := clamp01(norm+jitter/float64(levelCount)) * float64(levelCount)
-			level := int(math.Round(scaled))
-			if level < 0 {
-				level = 0
-			}
-			if level > levelCount {
-				level = levelCount
-			}
-			bw.writeBits(uint64(level), uint8(bits))
-		}
-	}
-	bw.flush()
 }
 
 func quantizeColorToPalette(yPlane, cbPlane, crPlane []uint8, w, h, quality, yBits, cbBits, crBits, yPhaseX, yPhaseY, cbPhaseX, cbPhaseY, crPhaseX, crPhaseY int, rgbMode, zxMode bool, paletteName string, yDst, cbDst, crDst *bytes.Buffer) {
@@ -2228,15 +2182,6 @@ func neighborhoodRange(plane []uint8, w, h, x, y int) float64 {
 	return float64(hi - lo)
 }
 
-func adaptiveDitherAmplitude(plane []uint8, w, h, x, y int, base float64) float64 {
-	tone := float64(plane[y*w+x]) / 255.0
-	rangeNorm := neighborhoodRange(plane, w, h, x, y) / 255.0
-	midtone := 1.0 - math.Abs(tone-0.5)*2.0
-	texture := 0.55 + rangeNorm*0.75
-	toneWeight := 0.25 + midtone*0.75
-	return base * toneWeight * texture
-}
-
 func adaptivePhotoAmplitude(plane []uint8, w, h, x, y int, base float64) float64 {
 	tone := float64(plane[y*w+x]) / 255.0
 	rangeNorm := neighborhoodRange(plane, w, h, x, y) / 255.0
@@ -3385,15 +3330,6 @@ func decodeMorton2(code uint32) (int, int) {
 	return int(x), int(y)
 }
 
-func reconstructLevel(bits []byte, idx int, low, high uint8) uint8 {
-	byteIdx := idx >> 3
-	shift := 7 - uint(idx&7)
-	if ((bits[byteIdx] >> shift) & 1) != 0 {
-		return high
-	}
-	return low
-}
-
 func unpackPlaneLevels(data []byte, w, h, bits int, low, high uint8) ([]uint8, error) {
 	n := w * h
 	br := newBitReader(data)
@@ -3483,183 +3419,6 @@ func repackMonoBitsToPatternGrid(src []byte, w, h, patternW, patternH int, dst *
 	bw := newBitWriter(dst)
 	for _, block := range order {
 		bw.writeBits(uint64(indexOf[string(block)]), uint8(indexBits))
-	}
-	bw.flush()
-}
-
-func buildGlobalPatternPalette(planes [][]byte, w, h, patternW, patternH int) ([]byte, int, int, map[string]int) {
-	blocksX := ceilDiv(w, patternW)
-	blocksY := ceilDiv(h, patternH)
-	blockBits := patternW * patternH
-	blockBytes := (blockBits + 7) >> 3
-	type entry struct {
-		key   string
-		count int
-		data  []byte
-	}
-	freq := make(map[string]*entry)
-	for _, src := range planes {
-		for by := 0; by < blocksY; by++ {
-			y0 := by * patternH
-			for bx := 0; bx < blocksX; bx++ {
-				x0 := bx * patternW
-				block := make([]byte, blockBytes)
-				bitPos := 0
-				for dy := 0; dy < patternH; dy++ {
-					y := y0 + dy
-					for dx := 0; dx < patternW; dx++ {
-						x := x0 + dx
-						bit := x < w && y < h && monoBitAt(src, y*w+x)
-						if bit {
-							byteIdx := bitPos >> 3
-							shift := 7 - uint(bitPos&7)
-							block[byteIdx] |= 1 << shift
-						}
-						bitPos++
-					}
-				}
-				key := string(block)
-				if e := freq[key]; e != nil {
-					e.count++
-				} else {
-					freq[key] = &entry{key: key, count: 1, data: append([]byte(nil), block...)}
-				}
-			}
-		}
-	}
-	entries := make([]entry, 0, len(freq))
-	for _, e := range freq {
-		entries = append(entries, *e)
-	}
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].count != entries[j].count {
-			return entries[i].count > entries[j].count
-		}
-		return entries[i].key < entries[j].key
-	})
-	indexOf := make(map[string]int, len(entries))
-	paletteData := make([]byte, 0, len(entries)*blockBytes)
-	for i, e := range entries {
-		indexOf[e.key] = i
-		paletteData = append(paletteData, e.data...)
-	}
-	indexBits := bitsNeeded(len(entries) - 1)
-	if indexBits < 1 {
-		indexBits = 1
-	}
-	return paletteData, blockBytes, indexBits, indexOf
-}
-
-func pairPlaneStates(a, b []byte, pixelCount int) []uint8 {
-	out := make([]uint8, pixelCount)
-	for i := 0; i < pixelCount; i++ {
-		var v uint8
-		if monoBitAt(a, i) {
-			v |= 0x2
-		}
-		if monoBitAt(b, i) {
-			v |= 0x1
-		}
-		out[i] = v
-	}
-	return out
-}
-
-func repackStatePatternGrid(states []uint8, w, h, patternW, patternH, stateBits int, dst *bytes.Buffer) {
-	blocksX := ceilDiv(w, patternW)
-	blocksY := ceilDiv(h, patternH)
-	blockBits := patternW * patternH * stateBits
-	blockBytes := (blockBits + 7) >> 3
-	type entry struct {
-		key   string
-		count int
-		data  []byte
-	}
-	order := make([][]byte, 0, blocksX*blocksY)
-	freq := make(map[string]*entry)
-	for by := 0; by < blocksY; by++ {
-		y0 := by * patternH
-		for bx := 0; bx < blocksX; bx++ {
-			x0 := bx * patternW
-			block := make([]byte, blockBytes)
-			var tmp bytes.Buffer
-			bw := newBitWriter(&tmp)
-			for dy := 0; dy < patternH; dy++ {
-				y := y0 + dy
-				for dx := 0; dx < patternW; dx++ {
-					x := x0 + dx
-					v := uint8(0)
-					if x < w && y < h {
-						v = states[y*w+x]
-					}
-					bw.writeBits(uint64(v), uint8(stateBits))
-				}
-			}
-			bw.flush()
-			copy(block, tmp.Bytes())
-			order = append(order, block)
-			key := string(block)
-			if e := freq[key]; e != nil {
-				e.count++
-			} else {
-				freq[key] = &entry{key: key, count: 1, data: append([]byte(nil), block...)}
-			}
-		}
-	}
-	palette := make([]entry, 0, len(freq))
-	for _, e := range freq {
-		palette = append(palette, *e)
-	}
-	sort.Slice(palette, func(i, j int) bool {
-		if palette[i].count != palette[j].count {
-			return palette[i].count > palette[j].count
-		}
-		return palette[i].key < palette[j].key
-	})
-	indexOf := make(map[string]int, len(palette))
-	for i, e := range palette {
-		indexOf[e.key] = i
-	}
-	indexBits := bitsNeeded(len(palette) - 1)
-	if indexBits < 1 {
-		indexBits = 1
-	}
-	var hdr [10]byte
-	binary.BigEndian.PutUint32(hdr[0:4], uint32(len(palette)))
-	hdr[4] = byte(blockBytes)
-	hdr[5] = byte(indexBits)
-	binary.BigEndian.PutUint32(hdr[6:10], uint32(len(order)))
-	dst.Write(hdr[:])
-	for _, e := range palette {
-		dst.Write(e.data)
-	}
-	bw := newBitWriter(dst)
-	for _, block := range order {
-		bw.writeBits(uint64(indexOf[string(block)]), uint8(indexBits))
-	}
-	bw.flush()
-}
-
-func repackStatePatternGridDirect(states []uint8, w, h, patternW, patternH, stateBits int, dst *bytes.Buffer) {
-	bw := newBitWriter(dst)
-	blocksX := ceilDiv(w, patternW)
-	blocksY := ceilDiv(h, patternH)
-	for by := 0; by < blocksY; by++ {
-		y0 := by * patternH
-		for bx := 0; bx < blocksX; bx++ {
-			x0 := bx * patternW
-			for dy := 0; dy < patternH; dy++ {
-				y := y0 + dy
-				for dx := 0; dx < patternW; dx++ {
-					x := x0 + dx
-					v := uint8(0)
-					if x < w && y < h {
-						v = states[y*w+x]
-					}
-					bw.writeBits(uint64(v), uint8(stateBits))
-				}
-			}
-		}
 	}
 	bw.flush()
 }
@@ -3827,27 +3586,6 @@ func hilbertRotate(n, x, y, rx, ry int) (int, int) {
 		x, y = y, x
 	}
 	return x, y
-}
-
-func encodeRawIndexTree(values []int, lo, hi int, dst *bytes.Buffer) {
-	if len(values) == 0 || hi-lo <= 1 {
-		return
-	}
-	mid := lo + (hi-lo)/2
-	plane := make([]byte, (len(values)+7)>>3)
-	left := make([]int, 0, len(values))
-	right := make([]int, 0, len(values))
-	for i, v := range values {
-		if v >= mid {
-			monoBitSet(plane, i)
-			right = append(right, v)
-		} else {
-			left = append(left, v)
-		}
-	}
-	dst.Write(plane)
-	encodeRawIndexTree(left, lo, mid, dst)
-	encodeRawIndexTree(right, mid, hi, dst)
 }
 
 func decodeRawIndexTree(data []byte, pos *int, count, lo, hi int) ([]int, error) {
@@ -4066,131 +3804,6 @@ func unpackMonoPatternGrid(data []byte, w, h, patternW, patternH int, low, high 
 						out[row+x] = v
 					}
 					bitPos++
-				}
-			}
-		}
-	}
-	return out, nil
-}
-
-func unpackMonoPatternGridWithPalette(data []byte, w, h, patternW, patternH int, palette []byte, paletteSize, blockBytes, indexBits int, low, high uint8) ([]uint8, error) {
-	blocksX := ceilDiv(w, patternW)
-	blocksY := ceilDiv(h, patternH)
-	br := newBitReader(data)
-	out := make([]uint8, w*h)
-	for by := 0; by < blocksY; by++ {
-		y0 := by * patternH
-		for bx := 0; bx < blocksX; bx++ {
-			idx, err := br.readBitsInt(indexBits)
-			if err != nil {
-				return nil, fmt.Errorf("decode: truncated global pattern indices")
-			}
-			if idx < 0 || idx >= paletteSize {
-				return nil, fmt.Errorf("decode: global pattern index out of range")
-			}
-			block := palette[idx*blockBytes : (idx+1)*blockBytes]
-			x0 := bx * patternW
-			bitPos := 0
-			for dy := 0; dy < patternH; dy++ {
-				y := y0 + dy
-				row := 0
-				if y < h {
-					row = y * w
-				}
-				for dx := 0; dx < patternW; dx++ {
-					x := x0 + dx
-					byteIdx := bitPos >> 3
-					shift := 7 - uint(bitPos&7)
-					bit := ((block[byteIdx] >> shift) & 1) != 0
-					if x < w && y < h {
-						v := low
-						if bit {
-							v = high
-						}
-						out[row+x] = v
-					}
-					bitPos++
-				}
-			}
-		}
-	}
-	return out, nil
-}
-
-func unpackStatePatternGrid(data []byte, w, h, patternW, patternH, stateBits int) ([]uint8, error) {
-	if len(data) < 10 {
-		return nil, fmt.Errorf("decode: state pattern grid stream too short")
-	}
-	blocksX := ceilDiv(w, patternW)
-	blocksY := ceilDiv(h, patternH)
-	paletteSize := int(binary.BigEndian.Uint32(data[0:4]))
-	blockBytes := int(data[4])
-	indexBits := int(data[5])
-	blockCount := int(binary.BigEndian.Uint32(data[6:10]))
-	if paletteSize < 1 || blockBytes < 1 || indexBits < 1 {
-		return nil, fmt.Errorf("decode: invalid state pattern palette header")
-	}
-	paletteBytes := paletteSize * blockBytes
-	if len(data) < 10+paletteBytes {
-		return nil, fmt.Errorf("decode: truncated state pattern palette")
-	}
-	palette := data[10 : 10+paletteBytes]
-	br := newBitReader(data[10+paletteBytes:])
-	out := make([]uint8, w*h)
-	if blockCount != blocksX*blocksY {
-		return nil, fmt.Errorf("decode: unexpected state pattern block count")
-	}
-	for by := 0; by < blocksY; by++ {
-		y0 := by * patternH
-		for bx := 0; bx < blocksX; bx++ {
-			idx, err := br.readBitsInt(indexBits)
-			if err != nil {
-				return nil, fmt.Errorf("decode: truncated state pattern indices")
-			}
-			if idx < 0 || idx >= paletteSize {
-				return nil, fmt.Errorf("decode: state pattern index out of range")
-			}
-			block := palette[idx*blockBytes : (idx+1)*blockBytes]
-			x0 := bx * patternW
-			sr := newBitReader(block)
-			for dy := 0; dy < patternH; dy++ {
-				y := y0 + dy
-				for dx := 0; dx < patternW; dx++ {
-					v, err := sr.readBits(uint8(stateBits))
-					if err != nil {
-						return nil, fmt.Errorf("decode: truncated state pattern block")
-					}
-					x := x0 + dx
-					if x < w && y < h {
-						out[y*w+x] = v
-					}
-				}
-			}
-		}
-	}
-	return out, nil
-}
-
-func unpackStatePatternGridDirect(data []byte, w, h, patternW, patternH, stateBits int) ([]uint8, error) {
-	blocksX := ceilDiv(w, patternW)
-	blocksY := ceilDiv(h, patternH)
-	br := newBitReader(data)
-	out := make([]uint8, w*h)
-	for by := 0; by < blocksY; by++ {
-		y0 := by * patternH
-		for bx := 0; bx < blocksX; bx++ {
-			x0 := bx * patternW
-			for dy := 0; dy < patternH; dy++ {
-				y := y0 + dy
-				for dx := 0; dx < patternW; dx++ {
-					v, err := br.readBits(uint8(stateBits))
-					if err != nil {
-						return nil, fmt.Errorf("decode: truncated direct state pattern stream")
-					}
-					x := x0 + dx
-					if x < w && y < h {
-						out[y*w+x] = v
-					}
 				}
 			}
 		}

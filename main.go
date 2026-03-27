@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/binary"
+	"flag"
 	"fmt"
 	"image"
 	"image/color"
@@ -17,12 +18,85 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 || len(os.Args) > 16 {
+	fs := flag.NewFlagSet("babe", flag.ContinueOnError)
+	fs.SetOutput(io.Discard) // we print our own usage/errors
+	var paletteFlag string
+	fs.StringVar(&paletteFlag, "palette", "", "palette mode: bright|luma|bw|auto|gray|zx|<name>|<palette-spec> (compatible with legacy syntax)")
+
+	usage := func() {
 		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [decoded.png]\n  babe <input-image> [quality] [-palette bright] [decoded.png]\n  babe <input-image> [quality] [-palette luma [y cb cr|y:cb:cr]] [decoded.png]\n  babe <input-image> [quality] [-palette bw [bits]] [decoded.png]\n  babe <input-image> [quality] [-palette N] [decoded.png]\n  babe <input-image> [quality] [-palette auto [P]] [decoded.png]\n  babe <input-image> [quality] [-palette gray N] [decoded.png]\n  babe <input-image> [quality] [-palette zx|cga|ega|vga|c64|gameboy|pico8|db16|nes|sunset|pastel|ocean|forest|<palette-spec>] [decoded.png]\n  babe <input.babe>\n")
+	}
+
+	// Stdlib flag parsing stops at first non-flag. To keep the existing CLI (input/quality
+	// can appear before flags), we split argv into "flags" and "positionals" ourselves.
+	type parseRes struct {
+		flags       []string
+		positionals []string
+	}
+	splitArgs := func(argv []string) parseRes {
+		var out parseRes
+		isFlagLike := func(s string) bool { return strings.HasPrefix(s, "-") && len(s) > 1 }
+		for i := 0; i < len(argv); i++ {
+			a := argv[i]
+			if a == "--" {
+				out.positionals = append(out.positionals, argv[i+1:]...)
+				break
+			}
+			if strings.EqualFold(a, "-palette") || strings.EqualFold(a, "--palette") {
+				// Legacy: -palette <mode> [extra...]
+				if i+1 >= len(argv) {
+					out.flags = append(out.flags, "-palette", "")
+					continue
+				}
+				mode := strings.ToLower(argv[i+1])
+				i++
+				val := mode
+				// Consume extra token(s) for some modes and pack into one string.
+				if (mode == "auto" || mode == "gray" || mode == "bw") && i+1 < len(argv) && !isFlagLike(argv[i+1]) {
+					val = mode + ":" + argv[i+1]
+					i++
+				} else if mode == "luma" {
+					// luma supports either "y:cb:cr" or "y cb cr"
+					if i+1 < len(argv) && !isFlagLike(argv[i+1]) {
+						next := argv[i+1]
+						if strings.Contains(next, ":") {
+							val = mode + ":" + next
+							i++
+						} else if i+3 <= len(argv)-1 && !isFlagLike(argv[i+2]) && !isFlagLike(argv[i+3]) {
+							val = mode + ":" + argv[i+1] + ":" + argv[i+2] + ":" + argv[i+3]
+							i += 3
+						}
+					}
+				}
+				out.flags = append(out.flags, "-palette", val)
+				continue
+			}
+			if isFlagLike(a) {
+				out.flags = append(out.flags, a)
+				// Only flag we support here is -palette, so other flags are treated as positionals.
+				// This preserves current behavior (unknown flags were effectively ignored).
+				continue
+			}
+			out.positionals = append(out.positionals, a)
+		}
+		return out
+	}
+
+	parts := splitArgs(os.Args[1:])
+	if err := fs.Parse(parts.flags); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		usage()
+		os.Exit(1)
+	}
+	pos := append([]string{}, parts.positionals...)
+	// If any leftover args from fs.Parse (should be none) treat as positional.
+	pos = append(pos, fs.Args()...)
+	if len(pos) < 1 {
+		usage()
 		os.Exit(1)
 	}
 
-	inputPath := os.Args[1]
+	inputPath := pos[0]
 	ext := strings.ToLower(filepath.Ext(inputPath))
 	base := strings.TrimSuffix(inputPath, filepath.Ext(inputPath))
 
@@ -37,8 +111,8 @@ func main() {
 
 	// Otherwise: encode image → .babe with default or provided quality
 	quality := 70
-	if len(os.Args) >= 3 {
-		q, err := strconv.Atoi(os.Args[2])
+	if len(pos) >= 2 {
+		q, err := strconv.Atoi(pos[1])
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "quality must be an integer between 0 and 100")
 			os.Exit(1)
@@ -56,103 +130,81 @@ func main() {
 	paletteMode := ""
 	decodeOutPath := ""
 	yBits, cbBits, crBits := 1, 0, 0
-	if len(os.Args) >= 4 {
-		args := make([]string, 0, len(os.Args[3:]))
-		rawArgs := os.Args[3:]
-		for i := 0; i < len(rawArgs); i++ {
-			a := rawArgs[i]
+	if len(pos) >= 3 {
+		for _, a := range pos[2:] {
 			if strings.EqualFold(filepath.Ext(a), ".png") {
 				decodeOutPath = a
-				continue
+				break
 			}
-			if strings.EqualFold(a, "-palette") {
-				if i+1 >= len(rawArgs) {
-					fmt.Fprintln(os.Stderr, "palette mode requires a value, for example: -palette 16, -palette auto [0..100], -palette gray 16, -palette luma, or -palette zx")
-					os.Exit(1)
-				}
-				value := strings.ToLower(rawArgs[i+1])
-				if value == "bright" || value == "luma" || value == "bw" {
-					paletteMode = value
-					i++
-					continue
-				}
-				if value == "auto" {
-					paletteName = "adaptive:auto"
-					if i+2 < len(rawArgs) {
-						if pct, err := strconv.Atoi(rawArgs[i+2]); err == nil {
-							if pct < 0 || pct > 100 {
-								fmt.Fprintln(os.Stderr, "palette auto quality must be an integer between 0 and 100")
-								os.Exit(1)
-							}
-							paletteName = fmt.Sprintf("adaptive:auto:%d", pct)
-							i += 2
-							continue
-						}
-					}
-					i++
-					continue
-				}
-				if value == "gray" {
-					if i+2 >= len(rawArgs) {
-						fmt.Fprintln(os.Stderr, "gray palette size is required, for example: -palette gray 16")
-						os.Exit(1)
-					}
-					n, err := strconv.Atoi(rawArgs[i+2])
-					if err != nil || n < 1 || n > 256 {
-						fmt.Fprintln(os.Stderr, "gray palette size must be an integer between 1 and 256")
-						os.Exit(1)
-					}
-					paletteName = fmt.Sprintf("gray:%d", n)
-					i += 2
-					continue
-				}
-				if value == "zx" {
-					zxMode = true
-					i++
-					continue
-				}
-				switch value {
-				case "sunset", "pastel", "ocean", "forest", "cga", "ega", "vga", "c64", "gameboy", "pico8", "db16", "nes":
-					paletteName = value
-					i++
-					continue
-				}
-				if isPaletteSpec(value) {
-					paletteName = value
-					i++
-					continue
-				}
-				n, err := strconv.Atoi(rawArgs[i+1])
-				if err != nil || n < 2 || n > 256 {
-					fmt.Fprintln(os.Stderr, "palette value must be a size 2..256, 'auto', 'gray N', a named palette, or a palette spec")
-					os.Exit(1)
-				}
-				paletteName = fmt.Sprintf("adaptive:%d", n)
-				i++
-				continue
-			}
-			args = append(args, a)
 		}
-		if paletteMode == "bright" {
-			yBits, cbBits, crBits = 1, 1, 1
-		} else if paletteMode == "luma" {
-			if len(args) > 0 {
+	}
+	// Palette selection (legacy compatible). `paletteFlag` can be:
+	// - "bright" | "luma" | "bw" | "zx"
+	// - "auto[:P]" | "gray:N"
+	// - "<name>" | "<palette-spec>" | "N" (adaptive N)
+	// - "luma:y:cb:cr"
+	if paletteFlag != "" {
+		value := strings.ToLower(paletteFlag)
+		mode := value
+		arg := ""
+		if i := strings.IndexByte(value, ':'); i >= 0 {
+			mode = value[:i]
+			arg = value[i+1:]
+		}
+		if mode == "bright" || mode == "luma" || mode == "bw" {
+			paletteMode = mode
+		}
+		if mode == "auto" {
+			paletteName = "adaptive:auto"
+			if arg != "" {
+				pct, err := strconv.Atoi(arg)
+				if err != nil || pct < 0 || pct > 100 {
+					fmt.Fprintln(os.Stderr, "palette auto quality must be an integer between 0 and 100")
+					os.Exit(1)
+				}
+				paletteName = fmt.Sprintf("adaptive:auto:%d", pct)
+			}
+		} else if mode == "gray" {
+			n, err := strconv.Atoi(arg)
+			if err != nil || n < 1 || n > 256 {
+				fmt.Fprintln(os.Stderr, "gray palette size must be an integer between 1 and 256")
+				os.Exit(1)
+			}
+			paletteName = fmt.Sprintf("gray:%d", n)
+		} else if mode == "zx" {
+			zxMode = true
+		} else if mode == "luma" {
+			if arg != "" {
+				parts := strings.Split(arg, ":")
+				if len(parts) != 3 {
+					fmt.Fprintln(os.Stderr, "luma bit depth triplet must look like y:cb:cr, for example 4:4:4")
+					os.Exit(1)
+				}
 				var err error
-				yBits, cbBits, crBits, err = parseLumaBitDepthArgs(args)
+				yBits, err = parseBitDepth(parts[0], "y")
 				if err != nil {
 					fmt.Fprintln(os.Stderr, err)
 					os.Exit(1)
 				}
+				cbBits, err = parseBitDepth(parts[1], "cb")
+				if err != nil {
+					fmt.Fprintln(os.Stderr, err)
+					os.Exit(1)
+				}
+				crBits, err = parseBitDepth(parts[2], "cr")
+				if err != nil {
+					fmt.Fprintln(os.Stderr, err)
+					os.Exit(1)
+				}
+				paletteMode = "luma"
 			} else {
+				// Default legacy behavior.
 				yBits, cbBits, crBits = 1, 1, 1
+				paletteMode = "luma"
 			}
-		} else if paletteMode == "bw" {
-			if len(args) > 1 {
-				fmt.Fprintln(os.Stderr, "bw mode expects a single bit depth, for example: -palette bw 2")
-				os.Exit(1)
-			}
-			if len(args) == 1 {
-				bw, err := parseBitDepth(args[0], "bw")
+		} else if mode == "bw" {
+			if arg != "" {
+				bw, err := parseBitDepth(arg, "bw")
 				if err != nil {
 					fmt.Fprintln(os.Stderr, err)
 					os.Exit(1)
@@ -161,18 +213,32 @@ func main() {
 			} else {
 				yBits, cbBits, crBits = 1, 0, 0
 			}
-		} else if zxMode || paletteName != "" {
-			yBits, cbBits, crBits = 1, 1, 1
+			paletteMode = "bw"
 		} else {
-			if len(args) > 0 {
-				var err error
-				yBits, cbBits, crBits, err = parseBitDepthArgs(args)
-				if err != nil {
-					fmt.Fprintln(os.Stderr, err)
+			// Named palette/spec/adaptive N.
+			switch mode {
+			case "sunset", "pastel", "ocean", "forest", "cga", "ega", "vga", "c64", "gameboy", "pico8", "db16", "nes":
+				paletteName = mode
+			default:
+				if isPaletteSpec(mode) {
+					paletteName = mode
+				} else if n, err := strconv.Atoi(mode); err == nil {
+					if n < 2 || n > 256 {
+						fmt.Fprintln(os.Stderr, "palette value must be a size 2..256, 'auto', 'gray N', a named palette, or a palette spec")
+						os.Exit(1)
+					}
+					paletteName = fmt.Sprintf("adaptive:%d", n)
+				} else {
+					fmt.Fprintln(os.Stderr, "unknown palette:", paletteFlag)
 					os.Exit(1)
 				}
 			}
 		}
+	}
+	if paletteMode == "bright" {
+		yBits, cbBits, crBits = 1, 1, 1
+	} else if zxMode || paletteName != "" {
+		yBits, cbBits, crBits = 1, 1, 1
 	}
 	bwmode := cbBits == 0 && crBits == 0
 	bwBits := yBits
@@ -187,82 +253,6 @@ func main() {
 			fmt.Fprintln(os.Stderr, "decode error:", err)
 			os.Exit(1)
 		}
-	}
-}
-
-func parseBitDepthArgs(args []string) (int, int, int, error) {
-	switch len(args) {
-	case 1:
-		if strings.Contains(args[0], ":") {
-			parts := strings.Split(args[0], ":")
-			if len(parts) != 3 {
-				return 0, 0, 0, fmt.Errorf("bit depth triplet must look like y:cb:cr, for example 4:4:4")
-			}
-			y, err := parseBitDepth(parts[0], "y")
-			if err != nil {
-				return 0, 0, 0, err
-			}
-			cb, err := parseBitDepth(parts[1], "cb")
-			if err != nil {
-				return 0, 0, 0, err
-			}
-			cr, err := parseBitDepth(parts[2], "cr")
-			if err != nil {
-				return 0, 0, 0, err
-			}
-			return y, cb, cr, nil
-		}
-		bw, err := parseBitDepth(args[0], "bw")
-		if err != nil {
-			return 0, 0, 0, err
-		}
-		return bw, 0, 0, nil
-	case 3:
-		y, err := parseBitDepth(args[0], "y")
-		if err != nil {
-			return 0, 0, 0, err
-		}
-		cb, err := parseBitDepth(args[1], "cb")
-		if err != nil {
-			return 0, 0, 0, err
-		}
-		cr, err := parseBitDepth(args[2], "cr")
-		if err != nil {
-			return 0, 0, 0, err
-		}
-		return y, cb, cr, nil
-	default:
-		return 0, 0, 0, fmt.Errorf("expected either one bw bit depth or a color triplet")
-	}
-}
-
-func parseLumaBitDepthArgs(args []string) (int, int, int, error) {
-	switch len(args) {
-	case 1:
-		if !strings.Contains(args[0], ":") {
-			return 0, 0, 0, fmt.Errorf("luma bit depths must look like y:cb:cr or 'y cb cr', for example: -palette luma 4:2:2")
-		}
-		parts := strings.Split(args[0], ":")
-		if len(parts) != 3 {
-			return 0, 0, 0, fmt.Errorf("luma bit depths must look like y:cb:cr, for example: -palette luma 4:2:2")
-		}
-		y, err := parseBitDepth(parts[0], "y")
-		if err != nil {
-			return 0, 0, 0, err
-		}
-		cb, err := parseBitDepth(parts[1], "cb")
-		if err != nil {
-			return 0, 0, 0, err
-		}
-		cr, err := parseBitDepth(parts[2], "cr")
-		if err != nil {
-			return 0, 0, 0, err
-		}
-		return y, cb, cr, nil
-	case 3:
-		return parseBitDepthArgs(args)
-	default:
-		return 0, 0, 0, fmt.Errorf("luma mode expects either y:cb:cr or three values 'y cb cr'")
 	}
 }
 
@@ -490,10 +480,6 @@ func inspectBWPatternPalette(comp []byte) (int, int, int, error) {
 	}
 	paletteSize := int(binary.BigEndian.Uint32(yData[0:4]))
 	return patternW, patternH, paletteSize, nil
-}
-
-func inspectColorPatternPalette(comp []byte) (int, int, int, error) {
-	return 0, 0, 0, nil
 }
 
 func inspectImageColorCount(comp []byte) (int, error) {
