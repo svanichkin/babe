@@ -564,17 +564,51 @@ func extractYCbCrFromRGBA(src *image.RGBA, yPlane, cbPlane, crPlane []uint8, w, 
 func extractYCbCrFromRGBAStripe(pix []byte, stride, w int, yPlane, cbPlane, crPlane []uint8, yStart, yEnd int, wg *sync.WaitGroup) {
 	defer wg.Done()
 	initYCbCrTables()
+	yr := yFromR[:]
+	yg := yFromG[:]
+	yb := yFromB[:]
+	cbr := cbFromR[:]
+	cbg := cbFromG[:]
+	cbb := cbFromB[:]
+	crr := crFromR[:]
+	crg := crFromG[:]
+	crb := crFromB[:]
 	for y := yStart; y < yEnd; y++ {
 		idx := y * w
 		pixRow := y * stride
 		rowEnd := pixRow + w*4
-		for p := pixRow; p < rowEnd; p += 4 {
+		p := pixRow
+		for ; p+16 <= rowEnd; p += 16 {
+			r0, g0, b0 := pix[p+0], pix[p+1], pix[p+2]
+			r1, g1, b1 := pix[p+4], pix[p+5], pix[p+6]
+			r2, g2, b2 := pix[p+8], pix[p+9], pix[p+10]
+			r3, g3, b3 := pix[p+12], pix[p+13], pix[p+14]
+
+			yPlane[idx+0] = uint8((yr[r0] + yg[g0] + yb[b0]) >> 8)
+			cbPlane[idx+0] = uint8(((cbr[r0] + cbg[g0] + cbb[b0]) >> 8) + 128)
+			crPlane[idx+0] = uint8(((crr[r0] + crg[g0] + crb[b0]) >> 8) + 128)
+
+			yPlane[idx+1] = uint8((yr[r1] + yg[g1] + yb[b1]) >> 8)
+			cbPlane[idx+1] = uint8(((cbr[r1] + cbg[g1] + cbb[b1]) >> 8) + 128)
+			crPlane[idx+1] = uint8(((crr[r1] + crg[g1] + crb[b1]) >> 8) + 128)
+
+			yPlane[idx+2] = uint8((yr[r2] + yg[g2] + yb[b2]) >> 8)
+			cbPlane[idx+2] = uint8(((cbr[r2] + cbg[g2] + cbb[b2]) >> 8) + 128)
+			crPlane[idx+2] = uint8(((crr[r2] + crg[g2] + crb[b2]) >> 8) + 128)
+
+			yPlane[idx+3] = uint8((yr[r3] + yg[g3] + yb[b3]) >> 8)
+			cbPlane[idx+3] = uint8(((cbr[r3] + cbg[g3] + cbb[b3]) >> 8) + 128)
+			crPlane[idx+3] = uint8(((crr[r3] + crg[g3] + crb[b3]) >> 8) + 128)
+
+			idx += 4
+		}
+		for ; p < rowEnd; p += 4 {
 			r8 := pix[p+0]
 			g8 := pix[p+1]
 			b8 := pix[p+2]
-			yPlane[idx] = uint8((yFromR[r8] + yFromG[g8] + yFromB[b8]) >> 8)
-			cbPlane[idx] = uint8(((cbFromR[r8] + cbFromG[g8] + cbFromB[b8]) >> 8) + 128)
-			crPlane[idx] = uint8(((crFromR[r8] + crFromG[g8] + crFromB[b8]) >> 8) + 128)
+			yPlane[idx] = uint8((yr[r8] + yg[g8] + yb[b8]) >> 8)
+			cbPlane[idx] = uint8(((cbr[r8] + cbg[g8] + cbb[b8]) >> 8) + 128)
+			crPlane[idx] = uint8(((crr[r8] + crg[g8] + crb[b8]) >> 8) + 128)
 			idx++
 		}
 	}
@@ -584,18 +618,52 @@ func extractYCbCrFromRGBASequential(src *image.RGBA, yPlane, cbPlane, crPlane []
 	stride := src.Stride
 	pix := src.Pix
 	initYCbCrTables()
+	yr := yFromR[:]
+	yg := yFromG[:]
+	yb := yFromB[:]
+	cbr := cbFromR[:]
+	cbg := cbFromG[:]
+	cbb := cbFromB[:]
+	crr := crFromR[:]
+	crg := crFromG[:]
+	crb := crFromB[:]
 
 	for y := 0; y < h; y++ {
 		idx := y * w
 		pixRow := y * stride
 		rowEnd := pixRow + w*4
-		for p := pixRow; p < rowEnd; p += 4 {
+		p := pixRow
+		for ; p+16 <= rowEnd; p += 16 {
+			r0, g0, b0 := pix[p+0], pix[p+1], pix[p+2]
+			r1, g1, b1 := pix[p+4], pix[p+5], pix[p+6]
+			r2, g2, b2 := pix[p+8], pix[p+9], pix[p+10]
+			r3, g3, b3 := pix[p+12], pix[p+13], pix[p+14]
+
+			yPlane[idx+0] = uint8((yr[r0] + yg[g0] + yb[b0]) >> 8)
+			cbPlane[idx+0] = uint8(((cbr[r0] + cbg[g0] + cbb[b0]) >> 8) + 128)
+			crPlane[idx+0] = uint8(((crr[r0] + crg[g0] + crb[b0]) >> 8) + 128)
+
+			yPlane[idx+1] = uint8((yr[r1] + yg[g1] + yb[b1]) >> 8)
+			cbPlane[idx+1] = uint8(((cbr[r1] + cbg[g1] + cbb[b1]) >> 8) + 128)
+			crPlane[idx+1] = uint8(((crr[r1] + crg[g1] + crb[b1]) >> 8) + 128)
+
+			yPlane[idx+2] = uint8((yr[r2] + yg[g2] + yb[b2]) >> 8)
+			cbPlane[idx+2] = uint8(((cbr[r2] + cbg[g2] + cbb[b2]) >> 8) + 128)
+			crPlane[idx+2] = uint8(((crr[r2] + crg[g2] + crb[b2]) >> 8) + 128)
+
+			yPlane[idx+3] = uint8((yr[r3] + yg[g3] + yb[b3]) >> 8)
+			cbPlane[idx+3] = uint8(((cbr[r3] + cbg[g3] + cbb[b3]) >> 8) + 128)
+			crPlane[idx+3] = uint8(((crr[r3] + crg[g3] + crb[b3]) >> 8) + 128)
+
+			idx += 4
+		}
+		for ; p < rowEnd; p += 4 {
 			r8 := pix[p+0]
 			g8 := pix[p+1]
 			b8 := pix[p+2]
-			yPlane[idx] = uint8((yFromR[r8] + yFromG[g8] + yFromB[b8]) >> 8)
-			cbPlane[idx] = uint8(((cbFromR[r8] + cbFromG[g8] + cbFromB[b8]) >> 8) + 128)
-			crPlane[idx] = uint8(((crFromR[r8] + crFromG[g8] + crFromB[b8]) >> 8) + 128)
+			yPlane[idx] = uint8((yr[r8] + yg[g8] + yb[b8]) >> 8)
+			cbPlane[idx] = uint8(((cbr[r8] + cbg[g8] + cbb[b8]) >> 8) + 128)
+			crPlane[idx] = uint8(((crr[r8] + crg[g8] + crb[b8]) >> 8) + 128)
 			idx++
 		}
 	}
@@ -1763,6 +1831,42 @@ func patternIndexBitsForCount(count int) uint8 {
 	return bitsN
 }
 
+func estimateChannelBytes(w4, h4, fullW, fullH int, levels []int, patternCount int, includeSizeBits bool) int {
+	if len(levels) == 0 {
+		return 0
+	}
+	smallBlock := levels[0]
+	topBlock := levels[len(levels)-1]
+	worstBlockCount := countSmallBlocks(w4, h4, smallBlock)
+	if worstBlockCount < 0 {
+		worstBlockCount = 0
+	}
+
+	sizeBytes := 0
+	if includeSizeBits {
+		topLevelCount := countTopLevelBlocks(fullW, fullH, topBlock)
+		worstDecisionBits := worstBlockCount - topLevelCount
+		if worstDecisionBits < topLevelCount {
+			worstDecisionBits = topLevelCount
+		}
+		if worstDecisionBits > 0 {
+			sizeBytes = (worstDecisionBits + 7) / 8
+		}
+	}
+
+	patternBits := w4 * h4
+	if smallBlock == 1 {
+		patternBits = fullW * fullH
+	}
+	patternBytes := 0
+	if patternBits > 0 {
+		patternBytes = (patternBits * int(patternIndexBitsForCount(patternCount)) + 7) / 8
+	}
+
+	// 4 u32 lengths/counts + streams + fg/bg packed bytes worst-case.
+	return 16 + sizeBytes + patternBytes + worstBlockCount + worstBlockCount
+}
+
 func readPatternIndex(br *bitReader, bitCount uint8) (uint64, error) {
 	var out uint64
 	remaining := int(bitCount)
@@ -2805,6 +2909,20 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 			topBlock, smallBlock)
 	}
 	useMacro := topBlock > smallBlock
+
+	estimated := len(codec) + 2 + 2 + len(levels)*2 + 1 + 4 + 4
+	estimated += estimateChannelBytes(w4, h4, fullW, fullH, levels, e.patternCount, true)
+	if !e.bwmode && !useChromaGrid {
+		estimated += estimateChannelBytes(w4, h4, fullW, fullH, levels, e.patternCount, true) * 2
+	}
+	if useChromaGrid {
+		gridW := (w+e.backgroundTile-1)/e.backgroundTile + 1
+		gridH := (h+e.backgroundTile-1)/e.backgroundTile + 1
+		estimated += 5 + 2*gridW*gridH
+	}
+	if estimated > 0 {
+		e.raw.Grow(estimated)
+	}
 
 	// --- Write header ---
 	if _, err := e.bw.WriteString(codec); err != nil {

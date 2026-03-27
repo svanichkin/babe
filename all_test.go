@@ -458,6 +458,66 @@ func benchmarkBABEQuality(b *testing.B, quality int, bw bool) {
 	)
 }
 
+func BenchmarkBABEEncode4JPGTile32Scale4(b *testing.B) {
+	img := loadTestImagePrefer(b, "4.jpg", "benchmark.jpg")
+	enc := NewEncoder()
+	enc.patternCount = 64
+	levels, err := blocksFromSpec("8-128")
+	if err != nil {
+		b.Fatalf("blocksFromSpec: %v", err)
+	}
+	enc.levels = levels
+	enc.backgroundTile = 32
+	enc.yQuantShift = 4
+	var buf bytes.Buffer
+
+	buf.Reset()
+	if err := enc.EncodeTo(&buf, img, 0, false); err != nil {
+		b.Fatalf("encode failed: %v", err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		buf.Reset()
+		if err := enc.EncodeTo(&buf, img, 0, false); err != nil {
+			b.Fatalf("encode failed: %v", err)
+		}
+	}
+}
+
+func BenchmarkBABEDecode4JPGTile32Scale4(b *testing.B) {
+	img := loadTestImagePrefer(b, "4.jpg", "benchmark.jpg")
+	enc := NewEncoder()
+	enc.patternCount = 64
+	levels, err := blocksFromSpec("8-128")
+	if err != nil {
+		b.Fatalf("blocksFromSpec: %v", err)
+	}
+	enc.levels = levels
+	enc.backgroundTile = 32
+	enc.yQuantShift = 4
+	dec := NewDecoder()
+	var buf bytes.Buffer
+
+	if err := enc.EncodeTo(&buf, img, 0, false); err != nil {
+		b.Fatalf("encode failed: %v", err)
+	}
+	encBytes := append([]byte(nil), buf.Bytes()...)
+
+	if _, err := dec.Decode(encBytes); err != nil {
+		b.Fatalf("decode failed: %v", err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := dec.Decode(encBytes); err != nil {
+			b.Fatalf("decode failed: %v", err)
+		}
+	}
+}
+
 func BenchmarkBABEQualitySteps(b *testing.B) {
 	for _, quality := range []int{0, 20, 40, 60, 80} {
 		b.Run(fmt.Sprintf("Q%d", quality), func(b *testing.B) {
