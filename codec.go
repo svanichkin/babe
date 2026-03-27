@@ -325,14 +325,6 @@ func newBitWriter(buf *bytes.Buffer) bitWriter {
 	return bitWriter{buf: buf}
 }
 
-func (bw *bitWriter) writeBit(bit bool) {
-	var v uint64
-	if bit {
-		v = 1
-	}
-	bw.writeBits(v, 1)
-}
-
 func (bw *bitWriter) writeBits(bits uint64, n uint8) {
 	if n == 0 {
 		return
@@ -1659,24 +1651,6 @@ func quantizePaletteIndices(rPlane, gPlane, bPlane []uint8, w, h, quality int, p
 	dst.Write(stream.Bytes())
 }
 
-func adaptivePaletteTarget(rPlane, gPlane, bPlane []uint8, w, h, x, y int, targetR, targetG, targetB float64) (float64, float64, float64) {
-	localR, rangeR := neighborhoodMeanRange(rPlane, w, h, x, y)
-	localG, rangeG := neighborhoodMeanRange(gPlane, w, h, x, y)
-	localB, rangeB := neighborhoodMeanRange(bPlane, w, h, x, y)
-	rangeSum := rangeR + rangeG + rangeB
-	weight := 18 + (rangeSum * 28 / (3 * 255))
-	if weight < 18 {
-		weight = 18
-	}
-	if weight > 46 {
-		weight = 46
-	}
-	targetR = clamp255((targetR*float64(100-weight) + localR*float64(weight)) / 100.0)
-	targetG = clamp255((targetG*float64(100-weight) + localG*float64(weight)) / 100.0)
-	targetB = clamp255((targetB*float64(100-weight) + localB*float64(weight)) / 100.0)
-	return targetR, targetG, targetB
-}
-
 func adaptivePaletteTargetIntegral(rPlane, gPlane, bPlane []uint8, rIntegral, gIntegral, bIntegral []uint32, w, x0, x1, y0, y1, x, y int, targetR, targetG, targetB float64) (float64, float64, float64) {
 	localR := rectMeanIntegral(rIntegral, w, x0, x1, y0, y1)
 	localG := rectMeanIntegral(gIntegral, w, x0, x1, y0, y1)
@@ -1778,33 +1752,6 @@ func nearestColorMode(targetY, targetCb, targetCr float64, yLevels, cbLevels, cr
 		return nearestStylizedRGBColor(targetY, targetCb, targetCr, yLevels, cbLevels, crLevels, palette, hasCb, hasCr, upLeftY, upLeftCb, upLeftCr, upRightY, upRightCb, upRightCr)
 	}
 	return nearestPaletteColor(targetY, targetCb, targetCr, yLevels, cbLevels, crLevels, hasCb, hasCr)
-}
-
-func nearestStylizedColor(targetY, targetCb, targetCr float64, yLevels, cbLevels, crLevels []uint8, palette [][3]uint8, hasCb, hasCr bool) (int, int, int, float64, float64, float64) {
-	bestY, bestCb, bestCr := 0, 0, 0
-	bestOutY := float64(yLevels[0])
-	bestOutCb := 128.0
-	bestOutCr := 128.0
-	bestDist := math.MaxFloat64
-	for _, p := range palette {
-		py, pcb, pcr := rgbToYCbCrFloats(p[0], p[1], p[2])
-		yi, qy := nearestLevelIndex(py, yLevels)
-		cbi, qcb := 0, 128.0
-		cri, qcr := 0, 128.0
-		if hasCb {
-			cbi, qcb = nearestLevelIndex(pcb, cbLevels)
-		}
-		if hasCr {
-			cri, qcr = nearestLevelIndex(pcr, crLevels)
-		}
-		dist := paletteDistance(targetY, targetCb, targetCr, qy, qcb, qcr, hasCb, hasCr)
-		if dist < bestDist {
-			bestDist = dist
-			bestY, bestCb, bestCr = yi, cbi, cri
-			bestOutY, bestOutCb, bestOutCr = qy, qcb, qcr
-		}
-	}
-	return bestY, bestCb, bestCr, bestOutY, bestOutCb, bestOutCr
 }
 
 func nearestLevelIndex(target float64, levels []uint8) (int, float64) {
@@ -2266,13 +2213,6 @@ func paletteAdjacencyPenalty(r, g, b, upLeftR, upLeftG, upLeftB, upRightR, upRig
 	return penalty
 }
 
-func sampleNeighbor(y, cb, cr []float64, x int) (float64, float64, float64) {
-	if x < 0 || x >= len(y) {
-		return math.NaN(), math.NaN(), math.NaN()
-	}
-	return y[x], cb[x], cr[x]
-}
-
 func sameQuantizedColor(r0, g0, b0, r1, g1, b1 float64, hasG, hasB bool) bool {
 	if math.IsNaN(r1) {
 		return false
@@ -2287,11 +2227,6 @@ func sameQuantizedColor(r0, g0, b0, r1, g1, b1 float64, hasG, hasB bool) bool {
 		return false
 	}
 	return true
-}
-
-func rgbToYCbCrFloats(r, g, b uint8) (float64, float64, float64) {
-	yc := color.YCbCrModel.Convert(color.RGBA{R: r, G: g, B: b, A: 255}).(color.YCbCr)
-	return float64(yc.Y), float64(yc.Cb), float64(yc.Cr)
 }
 
 const (
@@ -2349,20 +2284,6 @@ func quantLevels(low, high uint8, bits int) []uint8 {
 		out[i] = low + uint8((int(high-low)*i+levelCount/2)/levelCount)
 	}
 	return out
-}
-
-func paletteDistance(ty, tcb, tcr, py, pcb, pcr float64, hasCb, hasCr bool) float64 {
-	dy := ty - py
-	dist := dy * dy * 2.4
-	if hasCb {
-		dcb := tcb - pcb
-		dist += dcb * dcb * 0.85
-	}
-	if hasCr {
-		dcr := tcr - pcr
-		dist += dcr * dcr * 0.85
-	}
-	return dist
 }
 
 func clamp255(v float64) float64 {
@@ -2489,31 +2410,6 @@ func neighborhoodMean(plane []uint8, w, h, x, y int) float64 {
 	return float64(sum) / float64(count)
 }
 
-func neighborhoodMeanRange(plane []uint8, w, h, x, y int) (float64, int) {
-	var sum int
-	var count int
-	lo := 255
-	hi := 0
-	for yy := max(0, y-neighborhoodBackSpan); yy <= min(h-1, y+neighborhoodForwardSpan); yy++ {
-		row := yy * w
-		for xx := max(0, x-neighborhoodBackSpan); xx <= min(w-1, x+neighborhoodForwardSpan); xx++ {
-			v := int(plane[row+xx])
-			sum += v
-			count++
-			if v < lo {
-				lo = v
-			}
-			if v > hi {
-				hi = v
-			}
-		}
-	}
-	if count == 0 {
-		return 0, 0
-	}
-	return float64(sum) / float64(count), hi - lo
-}
-
 func neighborhoodRangeBounds(plane []uint8, w, x0, x1, y0, y1 int) int {
 	lo := 255
 	hi := 0
@@ -2635,141 +2531,6 @@ func planeBlueNoisePhase(plane []uint8, w, h int, salt uint64) (int, int) {
 
 func getBlueNoiseTile() []uint16 {
 	return embeddedBlueNoiseTile
-}
-
-func generateBlueNoiseTileVoidAndCluster(size int) []uint16 {
-	n := size * size
-	kernel := buildBlueNoiseKernel(size, 1.9)
-	rng := newBlueNoiseRNG(0x9e3779b97f4a7c15)
-	on := make([]bool, n)
-	energy := make([]float64, n)
-
-	targetOnes := n / 2
-	for count := 0; count < targetOnes; {
-		idx := int(rng.next() % uint64(n))
-		if on[idx] {
-			continue
-		}
-		on[idx] = true
-		applyKernelDelta(energy, kernel, size, idx, 1)
-		count++
-	}
-
-	for iter := 0; iter < n*4; iter++ {
-		cluster := findTightestCluster(on, energy)
-		applyKernelDelta(energy, kernel, size, cluster, -1)
-		on[cluster] = false
-
-		void := findLargestVoid(on, energy)
-		if void == cluster {
-			on[cluster] = true
-			applyKernelDelta(energy, kernel, size, cluster, 1)
-			break
-		}
-		on[void] = true
-		applyKernelDelta(energy, kernel, size, void, 1)
-	}
-
-	ranks := make([]uint16, n)
-	workOn := append([]bool(nil), on...)
-	workEnergy := append([]float64(nil), energy...)
-	half := 0
-	for _, v := range workOn {
-		if v {
-			half++
-		}
-	}
-
-	for rank := half - 1; rank >= 0; rank-- {
-		cluster := findTightestCluster(workOn, workEnergy)
-		ranks[cluster] = uint16(rank)
-		workOn[cluster] = false
-		applyKernelDelta(workEnergy, kernel, size, cluster, -1)
-	}
-
-	workOn = append([]bool(nil), on...)
-	workEnergy = append([]float64(nil), energy...)
-	for rank := half; rank < n; rank++ {
-		void := findLargestVoid(workOn, workEnergy)
-		ranks[void] = uint16(rank)
-		workOn[void] = true
-		applyKernelDelta(workEnergy, kernel, size, void, 1)
-	}
-
-	return ranks
-}
-
-func buildBlueNoiseKernel(size int, sigma float64) []float64 {
-	kernel := make([]float64, size*size)
-	twoSigma2 := 2 * sigma * sigma
-	for y := 0; y < size; y++ {
-		dy := min(y, size-y)
-		for x := 0; x < size; x++ {
-			dx := min(x, size-x)
-			d2 := float64(dx*dx + dy*dy)
-			kernel[y*size+x] = math.Exp(-d2 / twoSigma2)
-		}
-	}
-	return kernel
-}
-
-func applyKernelDelta(energy, kernel []float64, size, idx, sign int) {
-	x0 := idx % size
-	y0 := idx / size
-	scale := float64(sign)
-	for y := 0; y < size; y++ {
-		yy := (y + y0) & (size - 1)
-		rowOff := yy * size
-		krow := y * size
-		for x := 0; x < size; x++ {
-			xx := (x + x0) & (size - 1)
-			energy[rowOff+xx] += kernel[krow+x] * scale
-		}
-	}
-}
-
-func findTightestCluster(on []bool, energy []float64) int {
-	bestIdx := -1
-	bestEnergy := -math.MaxFloat64
-	for i, active := range on {
-		if active && energy[i] > bestEnergy {
-			bestEnergy = energy[i]
-			bestIdx = i
-		}
-	}
-	return bestIdx
-}
-
-func findLargestVoid(on []bool, energy []float64) int {
-	bestIdx := -1
-	bestEnergy := math.MaxFloat64
-	for i, active := range on {
-		if !active && energy[i] < bestEnergy {
-			bestEnergy = energy[i]
-			bestIdx = i
-		}
-	}
-	return bestIdx
-}
-
-type blueNoiseRNG struct {
-	state uint64
-}
-
-func newBlueNoiseRNG(seed uint64) blueNoiseRNG {
-	if seed == 0 {
-		seed = 1
-	}
-	return blueNoiseRNG{state: seed}
-}
-
-func (r *blueNoiseRNG) next() uint64 {
-	x := r.state
-	x ^= x >> 12
-	x ^= x << 25
-	x ^= x >> 27
-	r.state = x
-	return x * 2685821657736338717
 }
 
 func writeBitPlane(w *bufio.Writer, bits []byte) error {
