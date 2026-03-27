@@ -18,7 +18,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 || len(os.Args) > 16 {
-		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png] [-patterns=N] [-blocks=A,B|A-B] [-q N] [-tile N] [-filmgrain F]\n  babe <input.babe> [-layers] [-filmgrain F]\n  (bw flag, decoded.png, -patterns=N, -blocks=A,B|A-B, -q N, -tile N, -filmgrain F can appear anywhere after quality)\n")
+		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png] [-patterns=N] [-blocks=A,B|A-B] [-q N] [-tile N] [-filmgrain F] [-blur N]\n  babe <input.babe> [-layers] [-filmgrain F] [-blur N]\n  (bw flag, decoded.png, -patterns=N, -blocks=A,B|A-B, -q N, -tile N, -filmgrain F, -blur N can appear anywhere after quality)\n")
 		os.Exit(1)
 	}
 
@@ -30,6 +30,7 @@ func main() {
 	if ext == ".babe" {
 		splitChannels := false
 		filmGrain := 0.0
+		blur := 0
 		for i := 2; i < len(os.Args); i++ {
 			a := os.Args[i]
 			if a == "-layers" {
@@ -48,9 +49,23 @@ func main() {
 				}
 				filmGrain = v
 				i++
+				continue
+			}
+			if a == "-blur" {
+				if i+1 >= len(os.Args) {
+					fmt.Fprintln(os.Stderr, "blur requires a non-negative integer")
+					os.Exit(1)
+				}
+				v, err := strconv.Atoi(os.Args[i+1])
+				if err != nil || v < 0 || v > 8 {
+					fmt.Fprintln(os.Stderr, "blur must be an integer between 0 and 8")
+					os.Exit(1)
+				}
+				blur = v
+				i++
 			}
 		}
-		if err := decodeBabe(inputPath, base+".png", splitChannels, filmGrain); err != nil {
+		if err := decodeBabe(inputPath, base+".png", splitChannels, filmGrain, blur); err != nil {
 			fmt.Fprintln(os.Stderr, "decode error:", err)
 			os.Exit(1)
 		}
@@ -83,6 +98,7 @@ func main() {
 	tile := 0
 	yQuantShift := 0
 	filmGrain := 0.0
+	blur := 0
 	for i := 0; i < len(encodeArgs); i++ {
 		a := encodeArgs[i]
 		if a == "bw" {
@@ -166,6 +182,20 @@ func main() {
 			i++
 			continue
 		}
+		if a == "-blur" {
+			if i+1 >= len(encodeArgs) {
+				fmt.Fprintln(os.Stderr, "blur requires a non-negative integer")
+				os.Exit(1)
+			}
+			v, err := strconv.Atoi(encodeArgs[i+1])
+			if err != nil || v < 0 || v > 8 {
+				fmt.Fprintln(os.Stderr, "blur must be an integer between 0 and 8")
+				os.Exit(1)
+			}
+			blur = v
+			i++
+			continue
+		}
 		if strings.EqualFold(filepath.Ext(a), ".png") {
 			decodeOutPath = a
 		}
@@ -180,25 +210,25 @@ func main() {
 		}
 		levels = parsed
 	}
-	if err := encodeToBabe(inputPath, outPath, quality, bwmode, patternCount, yQuantShift, tile, levels); err != nil {
+	if err := encodeToBabe(inputPath, outPath, quality, bwmode, patternCount, yQuantShift, tile, levels, blur); err != nil {
 		fmt.Fprintln(os.Stderr, "encode error:", err)
 		os.Exit(1)
 	}
 	if decodeOutPath != "" {
-		if err := decodeBabe(outPath, decodeOutPath, false, filmGrain); err != nil {
+		if err := decodeBabe(outPath, decodeOutPath, false, filmGrain, blur); err != nil {
 			fmt.Fprintln(os.Stderr, "decode error:", err)
 			os.Exit(1)
 		}
 	}
 	if layersOut {
-		if err := decodeBabe(outPath, base+".png", true, filmGrain); err != nil {
+		if err := decodeBabe(outPath, base+".png", true, filmGrain, blur); err != nil {
 			fmt.Fprintln(os.Stderr, "decode error:", err)
 			os.Exit(1)
 		}
 	}
 }
 
-func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount int, yQuantShift int, tile int, levels []int) error {
+func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount int, yQuantShift int, tile int, levels []int, blur int) error {
 	info, err := os.Stat(inPath)
 	if err != nil {
 		return err
@@ -261,7 +291,7 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount
 	return nil
 }
 
-func decodeBabe(inPath, outPath string, splitChannels bool, filmGrain float64) error {
+func decodeBabe(inPath, outPath string, splitChannels bool, filmGrain float64, blur int) error {
 
 	in, err := os.Open(inPath)
 	if err != nil {
@@ -278,8 +308,10 @@ func decodeBabe(inPath, outPath string, splitChannels bool, filmGrain float64) e
 
 	start := time.Now()
 	activeFilmGrain = filmGrain
+	activePatternBlur = blur
 	defer func() {
 		activeFilmGrain = 0.0
+		activePatternBlur = 0
 	}()
 	decoder := NewDecoder()
 	defer decoder.Close()

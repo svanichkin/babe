@@ -48,6 +48,7 @@ const (
 )
 
 var activeFilmGrain = 0.0
+var activePatternBlur = 0
 
 func filmGrainNoiseByte(x, y int) byte {
 	v := uint32((x & 63) | ((y & 63) << 6))
@@ -57,6 +58,51 @@ func filmGrainNoiseByte(x, y int) byte {
 	v *= 0x846ca68b
 	v ^= v >> 16
 	return byte(v)
+}
+
+func blurBlockChannel(pix []byte, strideBytes, imgW, imgH, x0, y0, bw, bh, channelOffset, radius int) {
+	if radius <= 0 || bw <= 0 || bh <= 0 {
+		return
+	}
+	x1 := min(x0+bw, imgW)
+	y1 := min(y0+bh, imgH)
+	if x0 < 0 || y0 < 0 || x0 >= x1 || y0 >= y1 {
+		return
+	}
+	tmpW := x1 - x0
+	tmpH := y1 - y0
+	pass := func(src []uint8, dst []uint8) {
+		for y := 0; y < tmpH; y++ {
+			for x := 0; x < tmpW; x++ {
+				sum := 0
+				count := 0
+				for yy := max(0, y-radius); yy <= min(tmpH-1, y+radius); yy++ {
+					for xx := max(0, x-radius); xx <= min(tmpW-1, x+radius); xx++ {
+						sum += int(src[yy*tmpW+xx])
+						count++
+					}
+				}
+				dst[y*tmpW+x] = uint8(sum / count)
+			}
+		}
+	}
+
+	tmpA := make([]uint8, tmpW*tmpH)
+	tmpB := make([]uint8, tmpW*tmpH)
+	for y := 0; y < tmpH; y++ {
+		row := (y0+y)*strideBytes + x0*4 + channelOffset
+		for x := 0; x < tmpW; x++ {
+			tmpA[y*tmpW+x] = pix[row+x*4]
+		}
+	}
+	pass(tmpA, tmpB)
+	pass(tmpB, tmpA)
+	for y := 0; y < tmpH; y++ {
+		row := (y0+y)*strideBytes + x0*4 + channelOffset
+		for x := 0; x < tmpW; x++ {
+			pix[row+x*4] = tmpA[y*tmpW+x]
+		}
+	}
 }
 
 // Quality mapping:
@@ -3436,6 +3482,19 @@ func drawBlockIntoPixFullMask(pix []byte, strideBytes int, x0, y0, bw, bh int, p
 				bit--
 			}
 		}
+	}
+	if activePatternBlur > 0 && channelOffset == 0 {
+		imgW := strideBytes / 4
+		imgH := len(pix) / strideBytes
+		size := bw
+		if bh < size {
+			size = bh
+		}
+		radius := (activePatternBlur * size) / 64
+		if radius < 1 {
+			radius = 1
+		}
+		blurBlockChannel(pix, strideBytes, imgW, imgH, x0, y0, bw, bh, channelOffset, radius)
 	}
 }
 
