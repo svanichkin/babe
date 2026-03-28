@@ -42,7 +42,7 @@ func main() {
 	}
 
 	// Otherwise: encode image → .babe with default or provided quality
-	quality := 70
+	quality := defaultEncodeQuality
 	encodeArgs := os.Args[2:]
 	if len(os.Args) >= 3 {
 		q, err := strconv.Atoi(os.Args[2])
