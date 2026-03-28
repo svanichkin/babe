@@ -18,7 +18,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 || len(os.Args) > 16 {
-		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png] [-patterns=N] [-blocks=A,B|A-B] [-q N] [-tile N] [-filmgrain F] [-blur N]\n  babe <input.babe> [-layers] [-filmgrain F] [-blur N]\n  (bw flag, decoded.png, -patterns=N, -blocks=A,B|A-B, -q N, -tile N, -filmgrain F, -blur N can appear anywhere after quality)\n")
+		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png] [-patterns=N] [-blocks=A,B|A-B] [-q N] [-tile N] [-filmgrain F] [-blur N]\n  babe <input.babe> [-layers] [-filmgrain F] [-blur N]\n  (quality is optional; when provided, it also drives the linear preset for blocks/tile/q unless overridden by flags)\n")
 		os.Exit(1)
 	}
 
@@ -75,28 +75,30 @@ func main() {
 	// Otherwise: encode image → .babe with default or provided quality
 	quality := 70
 	encodeArgs := os.Args[2:]
-	if len(os.Args) >= 3 {
-		q, err := strconv.Atoi(os.Args[2])
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "quality must be an integer between 0 and 100")
-			os.Exit(1)
+	if len(os.Args) >= 3 && !strings.HasPrefix(os.Args[2], "-") {
+		if q, err := strconv.Atoi(os.Args[2]); err == nil {
+			if q < 0 || q > 100 {
+				fmt.Fprintln(os.Stderr, "quality must be between 0 and 100")
+				os.Exit(1)
+			}
+			quality = q
+			encodeArgs = os.Args[3:]
 		}
-		if q < 0 || q > 100 {
-			fmt.Fprintln(os.Stderr, "quality must be between 0 and 100")
-			os.Exit(1)
-		}
-		quality = q
-		encodeArgs = os.Args[3:]
+	}
+	preset, err := linearEncodePreset(quality)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 
 	bwmode := false
 	decodeOutPath := ""
 	layersOut := false
 	patternCount := defaultPatternCount
-	blockSpec := ""
+	blockSpec := preset.blockSpec
 	var levels []int
-	tile := 0
-	yQuantShift := 0
+	tile := preset.tile
+	yQuantShift := preset.q
 	filmGrain := 0.0
 	blur := 0
 	for i := 0; i < len(encodeArgs); i++ {

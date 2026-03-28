@@ -135,17 +135,28 @@ func blocksFromSpec(spec string) ([]int, error) {
 		if errMin != nil || errMax != nil || minV < 1 || maxV < minV {
 			return nil, fmt.Errorf("blocks range must contain positive sizes like 2-64")
 		}
-		sizes := make([]int, 0, 8)
-		for v := minV; v <= maxV; v *= 2 {
-			sizes = append(sizes, v)
-			if v == maxV {
-				break
-			}
-			if v > maxV/2 {
-				return nil, fmt.Errorf("blocks range %q must double exactly, e.g. 2-64 or 4-32", spec)
+		ratio := maxV / minV
+		if minV == maxV {
+			return []int{minV}, nil
+		}
+		if ratio < 1 || minV*ratio != maxV {
+			return nil, fmt.Errorf("blocks range %q must end on an integer geometric step", spec)
+		}
+		for factor := 2; factor <= ratio; factor++ {
+			sizes := make([]int, 0, 8)
+			v := minV
+			for {
+				sizes = append(sizes, v)
+				if v == maxV {
+					return normalizeLevels(sizes), nil
+				}
+				if v > maxV/factor {
+					break
+				}
+				v *= factor
 			}
 		}
-		return normalizeLevels(sizes), nil
+		return nil, fmt.Errorf("blocks range %q must form an integer geometric ladder, e.g. 15-120 or 3-27", spec)
 	}
 
 	parts := strings.Split(spec, ",")
@@ -165,10 +176,9 @@ func blocksFromSpec(spec string) ([]int, error) {
 			return nil, fmt.Errorf("blocks must be strictly increasing, got %v", sizes)
 		}
 	}
-	base := sizes[0]
 	for i := 1; i < len(sizes); i++ {
-		if sizes[i]%base != 0 {
-			return nil, fmt.Errorf("each block size must be divisible by the first one, got %v", sizes)
+		if sizes[i]%sizes[i-1] != 0 {
+			return nil, fmt.Errorf("each block size must be divisible by the previous one, got %v", sizes)
 		}
 	}
 	return normalizeLevels(sizes), nil
@@ -1860,7 +1870,7 @@ func estimateChannelBytes(w4, h4, fullW, fullH int, levels []int, patternCount i
 	}
 	patternBytes := 0
 	if patternBits > 0 {
-		patternBytes = (patternBits * int(patternIndexBitsForCount(patternCount)) + 7) / 8
+		patternBytes = (patternBits*int(patternIndexBitsForCount(patternCount)) + 7) / 8
 	}
 
 	// 4 u32 lengths/counts + streams + fg/bg packed bytes worst-case.
