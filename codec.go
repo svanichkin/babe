@@ -4157,7 +4157,7 @@ func decodeChannelToPix(data []byte, imgW, imgH int, levels []int, patternCount 
 	return nil
 }
 
-func (d *Decoder) Decode(compData []byte) (*image.RGBA, error) {
+func (d *Decoder) decodeRGBA(compData []byte) (*image.RGBA, error) {
 	if d.zdec == nil {
 		d.zdec = mustNewZstdDecoder()
 	}
@@ -4385,6 +4385,32 @@ func (d *Decoder) Decode(compData []byte) (*image.RGBA, error) {
 	}
 
 	return dst, nil
+}
+
+func (d *Decoder) Decode(compData []byte, postfilter ...bool) (*image.RGBA, error) {
+	enabled := true
+	if len(postfilter) > 0 {
+		enabled = postfilter[0]
+	}
+	if enabled {
+		return d.decodeRGBA(compData)
+	}
+
+	prevFilmGrain := activeFilmGrain
+	prevPatternBlur := activePatternBlur
+	activeFilmGrain = 0
+	activePatternBlur = 0
+	defer func() {
+		activeFilmGrain = prevFilmGrain
+		activePatternBlur = prevPatternBlur
+	}()
+	return d.decodeRGBA(compData)
+}
+
+func Decode(compData []byte, postfilter bool) (image.Image, error) {
+	d := NewDecoder()
+	defer d.Close()
+	return d.Decode(compData, postfilter)
 }
 
 func DecodeLayers(compData []byte) (int, int, []uint8, []image.Rectangle, []uint8, []image.Rectangle, []uint8, []image.Rectangle, bool, bool, error) {
