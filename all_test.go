@@ -42,8 +42,9 @@ func TestDefaultLevels(t *testing.T) {
 		if _, err := enc.Encode(img, quality, false); err != nil {
 			t.Fatalf("Encode(quality=%d): %v", quality, err)
 		}
-		if len(enc.levels) != 2 || enc.levels[0] != 1 || enc.levels[1] != 2 {
-			t.Fatalf("quality %d: got levels %v want [1 2]", quality, enc.levels)
+		levels := enc.Levels()
+		if len(levels) != 2 || levels[0] != 1 || levels[1] != 2 {
+			t.Fatalf("quality %d: got levels %v want [1 2]", quality, levels)
 		}
 	}
 }
@@ -108,7 +109,7 @@ func TestEncodeDecode_RoundTrip_BackgroundTile(t *testing.T) {
 	src := makeTestImage(64, 48)
 
 	enc := NewEncoder()
-	enc.backgroundTile = 10
+	enc.SetBackgroundTile(10)
 	comp, err := enc.Encode(src, 70, false)
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
@@ -159,7 +160,7 @@ func TestEncodeDecode_RoundTrip_BlockRange(t *testing.T) {
 		t.Fatalf("blocksFromSpec: %v", err)
 	}
 	enc := NewEncoder()
-	enc.levels = levels
+	enc.SetLevels(levels)
 	comp, err := enc.Encode(src, 70, false)
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
@@ -182,7 +183,7 @@ func TestEncodeDecode_RoundTrip_SingleBlockLevel(t *testing.T) {
 		t.Fatalf("blocksFromSpec: %v", err)
 	}
 	enc := NewEncoder()
-	enc.levels = levels
+	enc.SetLevels(levels)
 	comp, err := enc.Encode(src, 0, true)
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
@@ -461,14 +462,14 @@ func benchmarkBABEQuality(b *testing.B, quality int, bw bool) {
 func BenchmarkBABEEncode4JPGTile32Scale4(b *testing.B) {
 	img := loadTestImagePrefer(b, "4.jpg", "benchmark.jpg")
 	enc := NewEncoder()
-	enc.patternCount = 64
+	enc.SetPatternCount(64)
 	levels, err := blocksFromSpec("8-128")
 	if err != nil {
 		b.Fatalf("blocksFromSpec: %v", err)
 	}
-	enc.levels = levels
-	enc.backgroundTile = 32
-	enc.yQuantShift = 4
+	enc.SetLevels(levels)
+	enc.SetBackgroundTile(32)
+	enc.SetYQuantShift(4)
 	var buf bytes.Buffer
 
 	buf.Reset()
@@ -489,14 +490,14 @@ func BenchmarkBABEEncode4JPGTile32Scale4(b *testing.B) {
 func BenchmarkBABEDecode4JPGTile32Scale4(b *testing.B) {
 	img := loadTestImagePrefer(b, "4.jpg", "benchmark.jpg")
 	enc := NewEncoder()
-	enc.patternCount = 64
+	enc.SetPatternCount(64)
 	levels, err := blocksFromSpec("8-128")
 	if err != nil {
 		b.Fatalf("blocksFromSpec: %v", err)
 	}
-	enc.levels = levels
-	enc.backgroundTile = 32
-	enc.yQuantShift = 4
+	enc.SetLevels(levels)
+	enc.SetBackgroundTile(32)
+	enc.SetYQuantShift(4)
 	dec := NewDecoder()
 	var buf bytes.Buffer
 
@@ -541,10 +542,10 @@ func BenchmarkBABEDecodeQ0Patterns64Blocks8_128Tile32Q4(b *testing.B) {
 		b.Fatalf("blocksFromSpec: %v", err)
 	}
 	enc := NewEncoder()
-	enc.patternCount = 64
-	enc.backgroundTile = 32
-	enc.yQuantShift = 4
-	enc.levels = levels
+	enc.SetPatternCount(64)
+	enc.SetBackgroundTile(32)
+	enc.SetYQuantShift(4)
+	enc.SetLevels(levels)
 	comp, err := enc.Encode(img, 0, false)
 	if err != nil {
 		b.Fatalf("Encode: %v", err)
@@ -569,10 +570,10 @@ func BenchmarkBABEEncodeQ0Patterns64Blocks8_128Tile32Q4(b *testing.B) {
 		b.Fatalf("blocksFromSpec: %v", err)
 	}
 	enc := NewEncoder()
-	enc.patternCount = 64
-	enc.backgroundTile = 32
-	enc.yQuantShift = 4
-	enc.levels = levels
+	enc.SetPatternCount(64)
+	enc.SetBackgroundTile(32)
+	enc.SetYQuantShift(4)
+	enc.SetLevels(levels)
 
 	if _, err := enc.Encode(img, 0, false); err != nil {
 		b.Fatalf("warmup Encode: %v", err)
@@ -593,10 +594,10 @@ func BenchmarkBABEEncodeCmd4JPG(b *testing.B) {
 		b.Fatalf("blocksFromSpec: %v", err)
 	}
 	enc := NewEncoder()
-	enc.patternCount = 64
-	enc.backgroundTile = 32
-	enc.yQuantShift = 4
-	enc.levels = levels
+	enc.SetPatternCount(64)
+	enc.SetBackgroundTile(32)
+	enc.SetYQuantShift(4)
+	enc.SetLevels(levels)
 
 	if _, err := enc.Encode(img, 0, false); err != nil {
 		b.Fatalf("warmup Encode: %v", err)
@@ -617,21 +618,19 @@ func BenchmarkBABEDecodeCmd4JPGFilmgrain2Blur8(b *testing.B) {
 		b.Fatalf("blocksFromSpec: %v", err)
 	}
 	enc := NewEncoder()
-	enc.patternCount = 64
-	enc.backgroundTile = 32
-	enc.yQuantShift = 4
-	enc.levels = levels
+	enc.SetPatternCount(64)
+	enc.SetBackgroundTile(32)
+	enc.SetYQuantShift(4)
+	enc.SetLevels(levels)
 	comp, err := enc.Encode(img, 0, false)
 	if err != nil {
 		b.Fatalf("Encode: %v", err)
 	}
 	dec := NewDecoder()
 
-	activeFilmGrain = 2
-	activePatternBlur = 8
+	setPostFilterOptions(2, 8)
 	defer func() {
-		activeFilmGrain = 0
-		activePatternBlur = 0
+		setPostFilterOptions(0, 0)
 	}()
 
 	if _, err := dec.Decode(comp); err != nil {
@@ -653,10 +652,10 @@ func BenchmarkBABEDecodeCmd4JPG(b *testing.B) {
 		b.Fatalf("blocksFromSpec: %v", err)
 	}
 	enc := NewEncoder()
-	enc.patternCount = 64
-	enc.backgroundTile = 32
-	enc.yQuantShift = 4
-	enc.levels = levels
+	enc.SetPatternCount(64)
+	enc.SetBackgroundTile(32)
+	enc.SetYQuantShift(4)
+	enc.SetLevels(levels)
 	comp, err := enc.Encode(img, 0, false)
 	if err != nil {
 		b.Fatalf("Encode: %v", err)
@@ -681,10 +680,10 @@ func BenchmarkBABEDecodeQ0Patterns64Blocks16_128Tile32Q4Benchmark(b *testing.B) 
 		b.Fatalf("blocksFromSpec: %v", err)
 	}
 	enc := NewEncoder()
-	enc.patternCount = 64
-	enc.backgroundTile = 32
-	enc.yQuantShift = 4
-	enc.levels = levels
+	enc.SetPatternCount(64)
+	enc.SetBackgroundTile(32)
+	enc.SetYQuantShift(4)
+	enc.SetLevels(levels)
 	comp, err := enc.Encode(img, 0, false)
 	if err != nil {
 		b.Fatalf("Encode: %v", err)
@@ -709,10 +708,10 @@ func BenchmarkBABEEncodeQ0Patterns64Blocks16_128Tile32Q4Benchmark(b *testing.B) 
 		b.Fatalf("blocksFromSpec: %v", err)
 	}
 	enc := NewEncoder()
-	enc.patternCount = 64
-	enc.backgroundTile = 32
-	enc.yQuantShift = 4
-	enc.levels = levels
+	enc.SetPatternCount(64)
+	enc.SetBackgroundTile(32)
+	enc.SetYQuantShift(4)
+	enc.SetLevels(levels)
 
 	if _, err := enc.Encode(img, 0, false); err != nil {
 		b.Fatalf("warmup Encode: %v", err)
@@ -733,10 +732,10 @@ func BenchmarkBABEEncodeQ0Patterns64Blocks16_128Tile32Q4Small(b *testing.B) {
 		b.Fatalf("blocksFromSpec: %v", err)
 	}
 	enc := NewEncoder()
-	enc.patternCount = 64
-	enc.backgroundTile = 32
-	enc.yQuantShift = 4
-	enc.levels = levels
+	enc.SetPatternCount(64)
+	enc.SetBackgroundTile(32)
+	enc.SetYQuantShift(4)
+	enc.SetLevels(levels)
 
 	if _, err := enc.Encode(img, 0, false); err != nil {
 		b.Fatalf("warmup Encode: %v", err)

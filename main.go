@@ -201,11 +201,11 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool, patternCount
 	start := time.Now()
 	enc := NewEncoder()
 	defer enc.Close()
-	enc.patternCount = patternCount
-	enc.yQuantShift = yQuantShift
-	enc.backgroundTile = tile
+	enc.SetPatternCount(patternCount)
+	enc.SetYQuantShift(yQuantShift)
+	enc.SetBackgroundTile(tile)
 	if len(levels) > 0 {
-		enc.levels = append([]int(nil), levels...)
+		enc.SetLevels(levels)
 	}
 	encBytes, err := enc.Encode(img, quality, bwmode)
 	if err != nil {
@@ -259,11 +259,9 @@ func decodeBabe(inPath, outPath string, splitChannels bool, filmGrain float64, b
 	compSize := len(compData)
 
 	start := time.Now()
-	activeFilmGrain = filmGrain
-	activePatternBlur = blur
+	setPostFilterOptions(filmGrain, blur)
 	defer func() {
-		activeFilmGrain = 0.0
-		activePatternBlur = 0
+		setPostFilterOptions(0.0, 0)
 	}()
 	decoder := NewDecoder()
 	defer decoder.Close()
