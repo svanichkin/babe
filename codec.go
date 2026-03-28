@@ -9,6 +9,7 @@ import (
 type Encoder = light.Encoder
 type Decoder = light.Decoder
 type patternMask = light.PatternMask
+type encodePreset = light.EncodePreset
 
 const defaultPatternCount = light.DefaultPatternCount
 
@@ -26,6 +27,10 @@ func Encode(img image.Image, quality int, bwmode bool) ([]byte, error) {
 
 func Decode(compData []byte, postfilter bool) (image.Image, error) {
 	return light.Decode(compData, postfilter)
+}
+
+func presetFromQuality(quality int) (encodePreset, error) {
+	return light.PresetFromQuality(quality)
 }
 
 func DecodeLayers(compData []byte) (int, int, []uint8, []image.Rectangle, []uint8, []image.Rectangle, []uint8, []image.Rectangle, bool, bool, error) {

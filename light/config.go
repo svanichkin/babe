@@ -1,12 +1,12 @@
-package main
+package light
 
 import "fmt"
 
-type encodePreset struct {
-	quality   int
-	blockSpec string
-	tile      int
-	q         int
+type EncodePreset struct {
+	Quality   int
+	BlockSpec string
+	Tile      int
+	Q         int
 }
 
 func lerpInt(p, lo, hi, pMax int) int {
@@ -19,9 +19,9 @@ func lerpInt(p, lo, hi, pMax int) int {
 	return lo + (hi-lo)*p/pMax
 }
 
-func linearEncodePreset(p int) (encodePreset, error) {
+func PresetFromQuality(p int) (EncodePreset, error) {
 	if p < 0 || p > 100 {
-		return encodePreset{}, fmt.Errorf("p must be an integer between 0 and 100")
+		return EncodePreset{}, fmt.Errorf("quality must be an integer between 0 and 100")
 	}
 
 	type stage struct {
@@ -66,10 +66,10 @@ func linearEncodePreset(p int) (encodePreset, error) {
 	}
 	tile := lerpInt(stagePos, cur.tileLo, cur.tileHi, max(1, span-1))
 
-	return encodePreset{
-		quality:   p,
-		blockSpec: cur.blockSpec,
-		tile:      tile,
-		q:         cur.q,
+	return EncodePreset{
+		Quality:   p,
+		BlockSpec: cur.blockSpec,
+		Tile:      tile,
+		Q:         cur.q,
 	}, nil
 }

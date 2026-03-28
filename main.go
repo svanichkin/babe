@@ -85,7 +85,7 @@ func main() {
 			encodeArgs = os.Args[3:]
 		}
 	}
-	preset, err := linearEncodePreset(quality)
+	preset, err := presetFromQuality(quality)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -95,10 +95,10 @@ func main() {
 	decodeOutPath := ""
 	layersOut := false
 	patternCount := defaultPatternCount
-	blockSpec := preset.blockSpec
+	blockSpec := preset.BlockSpec
 	var levels []int
-	tile := preset.tile
-	yQuantShift := preset.q
+	tile := preset.Tile
+	yQuantShift := preset.Q
 	filmGrain := 0.0
 	blur := 0
 	for i := 0; i < len(encodeArgs); i++ {
