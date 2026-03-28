@@ -88,25 +88,9 @@ For patterned blocks, the encoder also avoids changing `fg` into a value equal t
 
 ## Block Hierarchy
 
-By default, block sizes come from quality presets. They can also be overridden explicitly.
+By default, block sizes come from the built-in quality presets.
 
-Current default quality mapping:
-
-- `80..100` => `1,2`
-- `60..79` => `1,3`
-- `40..59` => `2,4`
-- `20..39` => `3,6`
-- `0..19` => `16,32`
-
-You can override this with `-blocks=...`.
-
-Examples:
-
-- `-blocks=2-64`
-- `-blocks=2,4,8,16,32,64`
-- `-blocks=4,8,16`
-
-The hierarchy must be strictly increasing, and every level must be a multiple of the previous one.
+Current default quality mapping is driven internally from `quality 0..100`.
 
 ## Patterns
 
@@ -118,16 +102,6 @@ Relevant knobs:
   default: `64`
   valid range: `1..1024`
  
-
-## Chroma Grid Overlay
-
-Optional chroma simplification can be enabled with:
-
-- `-tile N`
-  valid range: `2..255`
-  default: disabled (`0`)
-
-When enabled, chroma can be stored as a coarse grid overlay instead of full Cb/Cr block streams.
 
 ## CLI
 
@@ -157,15 +131,6 @@ babe input.babe -layers
   grayscale mode, stores only Y
 - `-patterns=N`
   pattern codebook size, `1..1024`
-- `-blocks=A,B,...`
-  explicit block hierarchy
-- `-blocks=A-B`
-  power-of-two hierarchy from `A` to `B`
-- `-q N`
-  Y quantization shift, `0..7`
-- `-tile N`
-  or `-tile=N`
-  chroma grid tile size, `2..255`
 - `-layers`
   after encode, also writes layer debug output through the decode path
 - `<decoded.png>`

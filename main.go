@@ -18,7 +18,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 || len(os.Args) > 16 {
-		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png] [-patterns=N] [-blocks=A,B|A-B] [-q N] [-tile N] [-filmgrain F] [-blur N]\n  babe <input.babe> [-layers] [-filmgrain F] [-blur N]\n  (quality is optional; when provided, it also drives the linear preset for blocks/tile/q unless overridden by flags)\n")
+		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png] [-patterns=N] [-layers] [-filmgrain F] [-blur N]\n  babe <input.babe> [-layers] [-filmgrain F] [-blur N]\n  (quality is optional; when provided, it drives the built-in preset for blocks/tile/q)\n")
 		os.Exit(1)
 	}
 
@@ -118,56 +118,6 @@ func main() {
 				os.Exit(1)
 			}
 			patternCount = v
-			continue
-		}
-		if strings.HasPrefix(a, "-blocks=") {
-			blockSpec = strings.TrimPrefix(a, "-blocks=")
-			continue
-		}
-		if a == "-q" {
-			if i+1 >= len(encodeArgs) {
-				fmt.Fprintln(os.Stderr, "q requires a value between 0 and 7")
-				os.Exit(1)
-			}
-			v, err := strconv.Atoi(encodeArgs[i+1])
-			if err != nil || v < 0 || v > 7 {
-				fmt.Fprintln(os.Stderr, "q must be an integer between 0 and 7")
-				os.Exit(1)
-			}
-			yQuantShift = v
-			i++
-			continue
-		}
-		if strings.HasPrefix(a, "-q=") {
-			v, err := strconv.Atoi(strings.TrimPrefix(a, "-q="))
-			if err != nil || v < 0 || v > 7 {
-				fmt.Fprintln(os.Stderr, "q must be an integer between 0 and 7")
-				os.Exit(1)
-			}
-			yQuantShift = v
-			continue
-		}
-		if a == "-tile" {
-			if i+1 >= len(encodeArgs) {
-				fmt.Fprintln(os.Stderr, "tile requires a value between 2 and 255")
-				os.Exit(1)
-			}
-			v, err := strconv.Atoi(encodeArgs[i+1])
-			if err != nil || v < 2 || v > 255 {
-				fmt.Fprintln(os.Stderr, "tile must be an integer between 2 and 255")
-				os.Exit(1)
-			}
-			tile = v
-			i++
-			continue
-		}
-		if strings.HasPrefix(a, "-tile=") {
-			v, err := strconv.Atoi(strings.TrimPrefix(a, "-tile="))
-			if err != nil || v < 2 || v > 255 {
-				fmt.Fprintln(os.Stderr, "tile must be an integer between 2 and 255")
-				os.Exit(1)
-			}
-			tile = v
 			continue
 		}
 		if a == "-filmgrain" {
