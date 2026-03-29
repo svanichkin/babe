@@ -29,6 +29,14 @@ func Decode(compData []byte, postfilter bool) (image.Image, error) {
 	return light.Decode(compData, postfilter)
 }
 
+func writePatternsPNG(compData []byte, outPath string) error {
+	return light.WritePatternsPNG(compData, outPath)
+}
+
+func writeCodebookPNG(compData []byte, outPath string) error {
+	return light.WriteCodebookPNG(compData, outPath)
+}
+
 func presetFromQuality(quality int) (encodePreset, error) {
 	return light.PresetFromQuality(quality)
 }

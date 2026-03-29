@@ -18,7 +18,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 || len(os.Args) > 16 {
-		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png] [-patterns=N] [-layers] [-filmgrain F] [-blur N]\n  babe <input.babe> [-layers] [-filmgrain F] [-blur N]\n  (quality is optional; when provided, it drives the built-in preset for blocks/tile/q)\n")
+		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png] [-patterns=N] [-layers] [-filmgrain F] [-blur N] [-log]\n  babe <input.babe> [-layers] [-filmgrain F] [-blur N] [-log]\n  (quality is optional; when provided, it drives the built-in preset for blocks/tile/q)\n")
 		os.Exit(1)
 	}
 
@@ -31,10 +31,15 @@ func main() {
 		splitChannels := false
 		filmGrain := 0.0
 		blur := 0
+		logPatterns := false
 		for i := 2; i < len(os.Args); i++ {
 			a := os.Args[i]
 			if a == "-layers" {
 				splitChannels = true
+				continue
+			}
+			if a == "-log" {
+				logPatterns = true
 				continue
 			}
 			if a == "-filmgrain" {
@@ -69,6 +74,21 @@ func main() {
 			fmt.Fprintln(os.Stderr, "decode error:", err)
 			os.Exit(1)
 		}
+		if logPatterns {
+			compData, err := os.ReadFile(inputPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "log error:", err)
+				os.Exit(1)
+			}
+			if err := writePatternsPNG(compData, base+".patterns.png"); err != nil {
+				fmt.Fprintln(os.Stderr, "log error:", err)
+				os.Exit(1)
+			}
+			if err := writeCodebookPNG(compData, base+".codebook.png"); err != nil {
+				fmt.Fprintln(os.Stderr, "log error:", err)
+				os.Exit(1)
+			}
+		}
 		return
 	}
 
@@ -101,6 +121,7 @@ func main() {
 	yQuantShift := preset.Q
 	filmGrain := 0.0
 	blur := 0
+	logPatterns := false
 	for i := 0; i < len(encodeArgs); i++ {
 		a := encodeArgs[i]
 		if a == "bw" {
@@ -109,6 +130,10 @@ func main() {
 		}
 		if a == "-layers" {
 			layersOut = true
+			continue
+		}
+		if a == "-log" {
+			logPatterns = true
 			continue
 		}
 		if strings.HasPrefix(a, "-patterns=") {
@@ -175,6 +200,21 @@ func main() {
 	if layersOut {
 		if err := decodeBabe(outPath, base+".png", true, filmGrain, blur); err != nil {
 			fmt.Fprintln(os.Stderr, "decode error:", err)
+			os.Exit(1)
+		}
+	}
+	if logPatterns {
+		compData, err := os.ReadFile(outPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "log error:", err)
+			os.Exit(1)
+		}
+		if err := writePatternsPNG(compData, base+".patterns.png"); err != nil {
+			fmt.Fprintln(os.Stderr, "log error:", err)
+			os.Exit(1)
+		}
+		if err := writeCodebookPNG(compData, base+".codebook.png"); err != nil {
+			fmt.Fprintln(os.Stderr, "log error:", err)
 			os.Exit(1)
 		}
 	}
