@@ -73,18 +73,6 @@ go build -o Babe .
 
 This writes `1.babe` and immediately decodes it into `1.png`. Range coding is enabled by default; no compression flag is needed. Use `./Babe 1.jpg 10 bw 1.png` for grayscale.
 
-To try experimental gradient blocks on a lossy image:
-
-```sh
-./Babe 1.jpg 17 -gradient 1-gradient.png
-```
-
-The option can smooth some horizontal and vertical gradients, but can increase
-file size or worsen quality on particular images. It affects eligible 4×4 and
-8×8 blocks; it has no effect on quality 100 or on the current 2×2 high-quality
-layout. Files created with `-gradient` require a decoder with gradient support;
-older decoders reject them. See [measurements and limitations](docs/performance.md#experimental-gradient-blocks).
-
 ### Encode an image → `.babe`
 
 ```

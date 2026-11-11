@@ -43,13 +43,10 @@ func parsePayloadHeader(data []byte) (payloadHeader, error) {
 		return h, fmt.Errorf("invalid block sizes %d/%d", h.small, h.macro)
 	}
 	mask := data[9]
-	if mask&channelFlagY == 0 || mask & ^byte(channelFlagY|channelFlagCb|channelFlagCr|channelFlagLossless|channelFlagGradient) != 0 {
+	if mask&channelFlagY == 0 || mask & ^byte(channelFlagY|channelFlagCb|channelFlagCr|channelFlagLossless) != 0 {
 		return h, fmt.Errorf("invalid channel mask %d", mask)
 	}
 	if mask&channelFlagLossless != 0 {
-		if mask&channelFlagGradient != 0 {
-			return h, fmt.Errorf("gradient mode is incompatible with lossless mode")
-		}
 		color := mask & (channelFlagCb | channelFlagCr)
 		if h.small != 1 || h.macro != 2 || (color != 0 && color != channelFlagCb|channelFlagCr) {
 			return h, fmt.Errorf("invalid lossless block sizes or channel mask")
