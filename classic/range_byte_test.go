@@ -57,7 +57,7 @@ func TestQuadMeanExact(t *testing.T) {
 			}
 		}
 	}
-	for _, step := range []int{1, 2, 4, 8} {
+	for _, step := range []int{1, 2, 4, 8, 16, 32} {
 		for v := 0; v < 256; v++ {
 			want := uint8(min(255, (v+step/2)/step*step))
 			if quantizeLevel(uint8(v), step) != want {

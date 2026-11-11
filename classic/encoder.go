@@ -131,6 +131,10 @@ func (e *Encoder) encodeChannelReuse(plane []uint8, stride, w4, h4, fullW, fullH
 	var blockCount uint32
 	height := h4
 	spread := allowedMacroSpreadForQuality(encQuality)
+	if encQuality == 0 {
+		// Every possible 8-bit spread fits; q0 uses the existing 8x8 blocks.
+		spread = 256
+	}
 
 	if useMacro && smallBlock == 1 && macroBlock == 2 {
 		// Specialized hot path for the most common setting (quality >= 80):
@@ -230,7 +234,7 @@ func (e *Encoder) encodeChannelReuse(plane []uint8, stride, w4, h4, fullW, fullH
 			useBig := useMacro && canUseBigBlockChannel(plane, stride, height, mx, my, spread)
 			sizeW.writeBit(useBig)
 			if useBig {
-				fg, bg, isPattern, err := encodeBlockPlane(plane, stride, height, mx, my, macroBlock, macroBlock, step, &patternW)
+				fg, bg, isPattern, err := encodeChannelBlock(plane, stride, height, mx, my, macroBlock, macroBlock, step, scratch.solid, &patternW)
 				if err != nil {
 					return 0, nil, nil, nil, nil, nil, err
 				}
@@ -250,7 +254,7 @@ func (e *Encoder) encodeChannelReuse(plane []uint8, stride, w4, h4, fullW, fullH
 						if smallBlock > 1 {
 							pw = &patternW
 						}
-						fg, bg, isPattern, err := encodeBlockPlane(plane, stride, height, xx, yy, smallBlock, smallBlock, step, pw)
+						fg, bg, isPattern, err := encodeChannelBlock(plane, stride, height, xx, yy, smallBlock, smallBlock, step, scratch.solid, pw)
 						if err != nil {
 							return 0, nil, nil, nil, nil, nil, err
 						}
@@ -273,7 +277,7 @@ func (e *Encoder) encodeChannelReuse(plane []uint8, stride, w4, h4, fullW, fullH
 			if smallBlock > 1 {
 				pw = &patternW
 			}
-			fg, bg, isPattern, err := encodeBlockPlane(plane, stride, height, mx, my, smallBlock, smallBlock, step, pw)
+			fg, bg, isPattern, err := encodeChannelBlock(plane, stride, height, mx, my, smallBlock, smallBlock, step, scratch.solid, pw)
 			if err != nil {
 				return 0, nil, nil, nil, nil, nil, err
 			}
@@ -292,7 +296,7 @@ func (e *Encoder) encodeChannelReuse(plane []uint8, stride, w4, h4, fullW, fullH
 			if smallBlock > 1 {
 				pw = &patternW
 			}
-			fg, bg, isPattern, err := encodeBlockPlane(plane, stride, height, mx, my, smallBlock, smallBlock, step, pw)
+			fg, bg, isPattern, err := encodeChannelBlock(plane, stride, height, mx, my, smallBlock, smallBlock, step, scratch.solid, pw)
 			if err != nil {
 				return 0, nil, nil, nil, nil, nil, err
 			}
@@ -331,6 +335,9 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 	e.ch[chY].quantStep = yStep
 	e.ch[chCb].quantStep = cStep
 	e.ch[chCr].quantStep = cStep
+	e.ch[chY].solid = false
+	e.ch[chCb].solid = encQuality == 0
+	e.ch[chCr].solid = encQuality == 0
 
 	e.ensurePlanes(w, h)
 	if encQuality == 100 {
@@ -341,6 +348,9 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 		extractYCbCrPlanesInto(img, e.yPlane, e.cbPlane, e.crPlane)
 	} else {
 		extractYCbCrPlanesIntoSerial(img, e.yPlane, e.cbPlane, e.crPlane)
+	}
+	if encQuality == 0 {
+		smoothLowQualityLuma(e.yPlane, w, h)
 	}
 
 	// Decide which channels will be stored. Y is always present; Cb/Cr

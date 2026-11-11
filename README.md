@@ -33,7 +33,8 @@ At a high level, Babe is a block-based codec with a dual-tone model per block an
 4. **Block-level quantization**
    - Each block's foreground and background levels are rounded according to quality.
    - Chroma uses coarser steps than luma. If both levels become equal, the block is stored as solid, without a pattern or background value.
-   - Quantization steps for Y / Cb,Cr: quality 0–19: 4 / 8; 20–59: 2 / 4; 60–89: 1 / 2; 90–99: 1 / 1. Quality 100 uses no quantization or block approximation.
+   - Quantization steps for Y / Cb,Cr: quality 0: 32 / 16; 1–19: 4 / 8; 20–59: 2 / 4; 60–89: 1 / 2; 90–99: 1 / 1. Quality 100 uses no quantization or block approximation.
+   - At quality 0, 2×2 luma samples are averaged, 8×8 macroblocks are used wherever they fit, and chroma blocks are stored as solid colors. This produces much smaller files at the cost of visible detail and color precision.
    - At quality 100 opaque 8-bit RGB pixels are restored exactly. Transparency and 16-bit inputs are rejected in this mode. For JPEG input this means the decoded 8-bit RGB pixels, not the original JPEG bitstream or metadata. BW mode at quality 100 requires an already grayscale image.
 
 5. **Delta coding**
@@ -139,8 +140,8 @@ In-memory BABE encoder/decoder timings and size tradeoffs are recorded in [the s
 
 Measured on an Apple M3 with Go 1.27.3 using the local `benchmark.jpg`
 (5152×7728). Times are medians of three runs with two operations each, after
-warm-up. The BABE quality-100 measurements were refreshed after introducing
-lossless mode; other rows are from the earlier build. The same decoded RGBA image is fed to both encoders; image loading and
+warm-up. The BABE quality-100 and quality-0 measurements were refreshed after
+their respective changes; other rows are from the earlier build. The same decoded RGBA image is fed to both encoders; image loading and
 file I/O are excluded. Encoder buffers and BABE decoder buffers are reused.
 JPEG decoding returns Go's native YCbCr image, while BABE returns RGBA. Results
 vary with the image and machine load; the source image is itself a JPEG.
@@ -180,7 +181,7 @@ conditions:
 | 80 | 0.786 s | 0.278 s | 0.420 s | 0.296 s | 13.98 MB | 22.69 MB |
 | 50 | 0.533 s | 0.354 s | 0.242 s | 0.336 s | 5.30 MB | 17.47 MB |
 | 10 | 0.417 s | 0.249 s | 0.155 s | 0.135 s | 0.97 MB | 7.47 MB |
-| 0 | 0.398 s | 0.280 s | 0.148 s | 0.217 s | 0.67 MB | 6.48 MB |
+| 0 | 0.398 s | 0.200 s | 0.148 s | 0.112 s | 0.67 MB | 0.78 MB |
 
 Go's JPEG encoder clamps quality 0 to **1**. Equal quality numbers do not mean
 equal visual quality or equal file size; BABE quality 100 is lossless. MB is
@@ -202,7 +203,7 @@ core). Values are medians of three processes with two warmed operations each.
 | 10 | JPEG | 0.416 | 0.159 | 0.99 | 1.00 |
 | 10 | BABE | 0.574 | 0.333 | 2.19 | 2.37 |
 | 0 | JPEG | 0.469 | 0.154 | 0.83 | 0.98 |
-| 0 | BABE | 0.613 | 0.409 | 2.00 | 1.77 |
+| 0 | BABE | 0.396 | 0.256 | 2.14 | 2.39 |
 | Lossless | QOI (lossless) | 1.038 | 0.279 | 0.99 | 0.98 |
 
 Memory allocated during a warmed operation and peak resident memory of its
@@ -219,7 +220,7 @@ entire process, in MiB (1 MiB = 1,048,576 bytes):
 | 10 | JPEG | 0.00 | 56.98 | 443.7 | 121.3 |
 | 10 | BABE | 0.03 | 0.01 | 444.6 | 178.7 |
 | 0 | JPEG | 0.00 | 56.98 | 443.4 | 120.9 |
-| 0 | BABE | 0.03 | 0.01 | 443.9 | 174.9 |
+| 0 | BABE | 0.02 | 0.01 | 444.0 | 164.4 |
 | Lossless | QOI (lossless) | 303.77 | 151.89 | 656.2 | 385.9 |
 
 Allocation counts do **not** include retained buffers created during warm-up:
@@ -256,24 +257,16 @@ Quality 0 (Go's JPEG encoder uses quality 1, its minimum). Quality scales and
 quantization tables vary by encoder, so another application's minimum setting
 can produce a different image:
 
-| JPEG q1 — 9,256 bytes | BABE q0 — 60,738 bytes |
+| JPEG q1 — 9,256 bytes | BABE q0 — 8,843 bytes |
 |:---:|:---:|
 | [![JPEG quality 1](samples/jpeg-q0.jpg)](samples/jpeg-q0.jpg) | [![BABE quality 0](samples/babe-q0.png)](samples/babe-q0.png) |
-
-For a roughly equal-size comparison, JPEG at quality 73 uses 60,191 bytes,
-versus 60,738 bytes for BABE q0:
-
-| JPEG q73 — 60,191 bytes | BABE q0 — 60,738 bytes |
-|:---:|:---:|
-| [![JPEG quality 73](samples/jpeg-q73.jpg)](samples/jpeg-q73.jpg) | [![BABE quality 0](samples/babe-q0.png)](samples/babe-q0.png) |
 
 The JPEG images are the encoded JPEGs themselves. The BABE images are its
 decoded pixels saved losslessly for display; the stated BABE sizes are the
 `.babe` bitstreams, not the previews. RGB PSNR against the decoded source is
-35.40 / 40.18 dB for JPEG / BABE at q80, and 21.73 / 30.20 dB at minimum
-quality. On this source, BABE uses 2.98× as many bytes at q80 and 6.56× at q0.
-At approximately 60 KB, JPEG q73 reaches 34.24 dB versus BABE q0's 30.20 dB;
-PSNR is one measure and is not a complete measure of perceived quality. Equal
+35.40 / 40.18 dB for JPEG / BABE at q80, and 21.73 / 23.91 dB at minimum
+quality. On this source, BABE uses 2.98× as many bytes at q80 and 4.5% fewer at
+q0. PSNR is one measure and is not a complete measure of perceived quality. Equal
 numeric quality does not mean equal bitrate or perceived quality. The source
 was already JPEG-compressed.
 
@@ -282,8 +275,6 @@ Recreate the images and size/PSNR figures with:
 ```sh
 go run ./cmd/compareimages -input samples/source.jpg -out samples -quality 80
 go run ./cmd/compareimages -input samples/source.jpg -out samples -quality 0
-go run ./cmd/compareimages -input samples/source.jpg -out /tmp/comparison-q73 -quality 73
-cp /tmp/comparison-q73/jpeg-q73.jpg samples/
 ```
 
 ## License

@@ -1172,8 +1172,30 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh, quantStep i
 	return fg, bg, true, nil
 }
 
+// encodeChannelBlock optionally replaces a block with its quantized average.
+// Quality 0 uses this for chroma: color detail is reduced without affecting
+// the existing block layout or the entropy coder.
+func encodeChannelBlock(plane []uint8, stride, height, x0, y0, bw, bh, step int, solid bool, pw *bitWriter) (uint8, uint8, bool, error) {
+	if !solid {
+		return encodeBlockPlane(plane, stride, height, x0, y0, bw, bh, step, pw)
+	}
+	if x0 < 0 || y0 < 0 || bw <= 0 || bh <= 0 || stride <= 0 || height <= 0 || x0+bw > stride || y0+bh > height || (y0+bh-1)*stride+x0+bw > len(plane) {
+		return 0, 0, false, fmt.Errorf("encodeChannelBlock: index out of range")
+	}
+	var sum int
+	for y := 0; y < bh; y++ {
+		row := (y0+y)*stride + x0
+		for x := 0; x < bw; x++ {
+			sum += int(plane[row+x])
+		}
+	}
+	v := quantizeLevel(uint8(sum/(bw*bh)), step)
+	return v, v, false, nil
+}
+
 type encoderChannelScratch struct {
 	quantStep  int
+	solid      bool
 	sizeBuf    bytes.Buffer
 	typeBuf    bytes.Buffer
 	patternBuf bytes.Buffer

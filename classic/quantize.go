@@ -5,6 +5,8 @@ package classic
 // become solid blocks, so their pattern and background are never written.
 func quantStepsForQuality(quality int) (y, chroma int) {
 	switch {
+	case quality <= 0:
+		return 32, 16
 	case quality < 20:
 		return 4, 8
 	case quality < 60:

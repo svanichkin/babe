@@ -80,6 +80,21 @@ was 1,389,521 bytes; the lossless file is 36.8% larger in this example. Their
 decoded pixels differ: q100 matches the 8-bit RGB input exactly. These are
 measurements of the image codec only, not file I/O or source-image loading.
 
+Quality 0 was subsequently retuned to prioritize smaller files. The same
+decoded RGBA inputs produced these results; PSNR is relative to those inputs:
+
+| Image | BABE q0 before | BABE q0 after | JPEG q1 | BABE PSNR before → after | JPEG PSNR |
+|---|---:|---:|---:|---:|---:|
+| `1.jpg` (800×572) | 60,738 B | 8,843 B | 9,256 B | 30.20 → 23.91 dB | 21.73 dB |
+| `3.jpg` (1920×1080) | 300,102 B | 43,292 B | 41,913 B | 29.17 → 23.27 dB | 20.66 dB |
+
+The lower quality is intentional. JPEG quality 0 is clamped to 1 by Go, and
+its scale does not correspond to BABE's quality scale. These two images do not
+guarantee a size or visual-quality result on other inputs. The new q0 files use
+the existing BRC1 format and were decoded with the previous BABE decoder.
+Checked qualities 1, 2, 10, 20, 50, 80, 99 and 100 produced byte-identical
+files before and after the q0 change on `1.jpg`.
+
 ## Entropy coder alone
 
 The same uncompressed streams extracted from `3.jpg` are processed serially by
@@ -106,8 +121,9 @@ time comparison. Measurements were made on Apple M3, darwin/arm64, Go 1.27.3,
 `GOMAXPROCS=8`, using three separate processes per case with two timed, warmed
 operations in each. Execution order was shuffled. The tables use medians of
 the three process results. The [original individual measurements](benchmarks/resources-apple-m3.json)
-are retained; the README's q100 BABE row uses the separate
-[lossless q100 measurements](benchmarks/resources-lossless100-apple-m3.json).
+are retained; the README's BABE rows use the separate
+[lossless q100](benchmarks/resources-lossless100-apple-m3.json) and
+[retuned q0](benchmarks/resources-quality0-apple-m3.json) measurements.
 
 CPU time is the change in process user plus system CPU time, including all Go
 threads and any GC work during the interval. Cores is CPU time divided by wall
@@ -159,8 +175,8 @@ The README retains the JPEG/BABE/QOI comparison on `benchmark.jpg`, quality 80
 for JPEG and BABE, QOI lossless, and adds JPEG/BABE at qualities 0, 10, 50, 80
 and 100. Those numbers are medians of three runs with two operations per run
 using `BenchmarkQualityComparison`; JPEG quality 0 is clamped to 1. The BABE
-q100 speed and resource numbers were remeasured separately with lossless mode;
-other rows are from v0.2.1. The table
+q100 and q0 speed and resource numbers were remeasured separately after their
+respective changes; other rows are from v0.2.1. The table
 reports encode and decode medians separately. A previous single-run README
 measurement reported 8.638 s for JPEG encoding and 16.948 s for QOI encoding,
 despite neither codec receiving comparable optimization here. That run cannot

@@ -110,12 +110,17 @@ multiple of the step, with half steps rounded upward and values clamped to 255:
 
 | Quality | Y step | Cb/Cr step |
 |---|---:|---:|
-| 0–19 | 4 | 8 |
+| 0 | 32 | 16 |
+| 1–19 | 4 | 8 |
 | 20–59 | 2 | 4 |
 | 60–89 | 1 | 2 |
 | 90–99 | 1 | 1 |
 
-Thresholds and block subdivision decisions use the original input precision.
+At quality 0 the encoder averages complete 2×2 groups in the luma plane,
+always selects the 8×8 macroblock in the main image area, and stores each
+chroma block as its quantized average. Image edges use the existing 4×4 blocks.
+These are encoder choices within the existing block format. For qualities
+1–99, thresholds and block subdivision decisions use the original input precision.
 If both rounded levels are equal, the block becomes solid; no pattern bits or
 background entry are emitted. BW stores only Y. At qualities below 90 the decoded
 image can differ from previous builds at the same numeric quality. Entropy coding
