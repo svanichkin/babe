@@ -13,8 +13,8 @@
 *.babe
 !classic/testdata/*.babe
 !classic/testdata/*.png
-!docs/comparison/*.jpg
-!docs/comparison/*.png
+!samples/*.jpg
+!samples/*.png
 *.jpeg
 *._
 *.rsls

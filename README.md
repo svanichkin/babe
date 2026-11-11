@@ -243,27 +243,29 @@ and complete encode/decode cycle comparison against the earlier version.
 
 ## Visual comparison
 
-The same [800×572 source image](docs/comparison/source.jpg) was encoded by
+The same [800×572 source image](samples/source.jpg) was encoded by
 each codec. Click an image to inspect it at full resolution.
 
 Quality 80:
 
 | JPEG q80 — 71,042 bytes | BABE q80 — 211,612 bytes |
 |:---:|:---:|
-| [![JPEG q80](docs/comparison/jpeg-q80.jpg)](docs/comparison/jpeg-q80.jpg) | [![BABE q80](docs/comparison/babe-q80.png)](docs/comparison/babe-q80.png) |
+| [![JPEG q80](samples/jpeg-q80.jpg)](samples/jpeg-q80.jpg) | [![BABE q80](samples/babe-q80.png)](samples/babe-q80.png) |
 
-Quality 0 (JPEG actually uses quality 1, its minimum):
+Quality 0 (Go's JPEG encoder uses quality 1, its minimum). Quality scales and
+quantization tables vary by encoder, so another application's minimum setting
+can produce a different image:
 
 | JPEG q1 — 9,256 bytes | BABE q0 — 60,738 bytes |
 |:---:|:---:|
-| [![JPEG quality 1](docs/comparison/jpeg-q0.jpg)](docs/comparison/jpeg-q0.jpg) | [![BABE quality 0](docs/comparison/babe-q0.png)](docs/comparison/babe-q0.png) |
+| [![JPEG quality 1](samples/jpeg-q0.jpg)](samples/jpeg-q0.jpg) | [![BABE quality 0](samples/babe-q0.png)](samples/babe-q0.png) |
 
 For a roughly equal-size comparison, JPEG at quality 73 uses 60,191 bytes,
 versus 60,738 bytes for BABE q0:
 
 | JPEG q73 — 60,191 bytes | BABE q0 — 60,738 bytes |
 |:---:|:---:|
-| [![JPEG quality 73](docs/comparison/jpeg-q73.jpg)](docs/comparison/jpeg-q73.jpg) | [![BABE quality 0](docs/comparison/babe-q0.png)](docs/comparison/babe-q0.png) |
+| [![JPEG quality 73](samples/jpeg-q73.jpg)](samples/jpeg-q73.jpg) | [![BABE quality 0](samples/babe-q0.png)](samples/babe-q0.png) |
 
 The JPEG images are the encoded JPEGs themselves. The BABE images are its
 decoded pixels saved losslessly for display; the stated BABE sizes are the
@@ -278,10 +280,10 @@ was already JPEG-compressed.
 Recreate the images and size/PSNR figures with:
 
 ```sh
-go run ./cmd/compareimages -input docs/comparison/source.jpg -out docs/comparison -quality 80
-go run ./cmd/compareimages -input docs/comparison/source.jpg -out docs/comparison -quality 0
-go run ./cmd/compareimages -input docs/comparison/source.jpg -out /tmp/comparison-q73 -quality 73
-cp /tmp/comparison-q73/jpeg-q73.jpg docs/comparison/
+go run ./cmd/compareimages -input samples/source.jpg -out samples -quality 80
+go run ./cmd/compareimages -input samples/source.jpg -out samples -quality 0
+go run ./cmd/compareimages -input samples/source.jpg -out /tmp/comparison-q73 -quality 73
+cp /tmp/comparison-q73/jpeg-q73.jpg samples/
 ```
 
 ## License
