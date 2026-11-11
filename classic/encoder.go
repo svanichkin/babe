@@ -15,6 +15,10 @@ type Encoder struct {
 	// Set to false to reduce goroutine overhead and allocations.
 	Parallel bool
 
+	// Gradient enables experimental directional gradient blocks for lossy images.
+	// Files using this option require a decoder that supports gradient blocks.
+	Gradient bool
+
 	yPlane      []uint8
 	cbPlane     []uint8
 	crPlane     []uint8
@@ -331,6 +335,7 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 	if err := setBlocksForQuality(quality); err != nil {
 		return nil, err
 	}
+	gradientMode = e.Gradient && encQuality != 100
 	b := img.Bounds()
 	w, h := b.Dx(), b.Dy()
 	if err := checkImageSize(w, h); err != nil {
@@ -371,6 +376,9 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 	channelsMask := byte(channelFlagY)
 	if encQuality == 100 {
 		channelsMask |= channelFlagLossless
+	}
+	if gradientMode {
+		channelsMask |= channelFlagGradient
 	}
 	if !encodeBW {
 		channelsMask |= channelFlagCb | channelFlagCr
@@ -643,6 +651,22 @@ func drawBlockPlane(plane []uint8, stride int, x0, y0, bw, bh int, br *bitReader
 	if err != nil {
 		return err
 	}
+	if vertical, ok := gradientPattern(pattern, bw, bh); ok {
+		for y := 0; y < bh; y++ {
+			for x := 0; x < bw; x++ {
+				pos := x
+				if vertical {
+					pos = y
+				}
+				idx := (y0+y)*stride + x0 + x
+				if idx < 0 || idx >= len(plane) {
+					return fmt.Errorf("drawBlockPlane: index out of range")
+				}
+				plane[idx] = byte(gradientValue(int(fg), int(bg), pos, bw))
+			}
+		}
+		return nil
+	}
 	for yy := 0; yy < bh; yy++ {
 		for xx := 0; xx < bw; xx++ {
 			val := bg
@@ -678,6 +702,22 @@ func drawBlockPix(pix []byte, strideBytes int, x0, y0, bw, bh int, br *bitReader
 	pattern, err := readPatternComposite(br, bw, bh)
 	if err != nil {
 		return err
+	}
+	if vertical, ok := gradientPattern(pattern, bw, bh); ok {
+		for y := 0; y < bh; y++ {
+			for x := 0; x < bw; x++ {
+				pos := x
+				if vertical {
+					pos = y
+				}
+				idx := (y0+y)*strideBytes + (x0+x)*4 + channelOffset
+				if idx < 0 || idx >= len(pix) {
+					return fmt.Errorf("drawBlockPix: index out of range")
+				}
+				pix[idx] = byte(gradientValue(int(fg), int(bg), pos, bw))
+			}
+		}
+		return nil
 	}
 	if bw == 1 && bh == 1 {
 		o := y0*strideBytes + x0*4 + channelOffset

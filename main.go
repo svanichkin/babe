@@ -13,11 +13,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/svanichkin/Babe/classic"
 )
 
 func main() {
-	if len(os.Args) < 2 || len(os.Args) > 5 {
-		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png]\n  babe <input.babe> [-postfilter]\n  (bw flag and decoded.png can appear anywhere after quality)\n")
+	if len(os.Args) < 2 || len(os.Args) > 6 {
+		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [-gradient] [decoded.png]\n  babe <input.babe> [-postfilter]\n  (options and decoded.png can appear after quality)\n")
 		os.Exit(1)
 	}
 
@@ -59,8 +61,13 @@ func main() {
 	}
 
 	bwmode := false
+	gradient := false
 	decodeOutPath := ""
 	for _, a := range encodeArgs {
+		if a == "-gradient" {
+			gradient = true
+			continue
+		}
 		if a == "bw" {
 			bwmode = true
 			continue
@@ -71,7 +78,7 @@ func main() {
 	}
 
 	outPath := base + ".babe"
-	if err := encodeToBabe(inputPath, outPath, quality, bwmode); err != nil {
+	if err := encodeToBabe(inputPath, outPath, quality, bwmode, gradient); err != nil {
 		fmt.Fprintln(os.Stderr, "encode error:", err)
 		os.Exit(1)
 	}
@@ -83,7 +90,7 @@ func main() {
 	}
 }
 
-func encodeToBabe(inPath, outPath string, quality int, bwmode bool) error {
+func encodeToBabe(inPath, outPath string, quality int, bwmode, gradient bool) error {
 	info, err := os.Stat(inPath)
 	if err != nil {
 		return err
@@ -102,7 +109,9 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool) error {
 	}
 
 	start := time.Now()
-	enc, err := Encode(img, quality, bwmode)
+	encoder := classic.NewEncoder()
+	encoder.Gradient = gradient
+	enc, err := encoder.Encode(img, quality, bwmode)
 	if err != nil {
 		return err
 	}

@@ -112,6 +112,46 @@ they do not represent the full image codec. Both paths allocate zero bytes per
 iteration after warm-up. Faster entropy coding exposes the remaining cost of
 block processing, validation and color conversion.
 
+## Experimental gradient blocks
+
+The optional `-gradient` encoder mode adds horizontal and vertical ramp blocks
+to the lossy representation. See [BRC1](BRC1.md#experimental-gradient-blocks)
+for the format and compatibility details. It only considers 4×4 and 8×8
+blocks already accepted by the block partitioner; it cannot improve the
+current 2×2 high-quality layout, diagonal ramps or boundaries between blocks.
+Lossless q100 is unchanged. In Go, set `classic.NewEncoder().Gradient = true`
+on an encoder instance before calling `Encode`.
+
+The following are exploratory measurements on Apple M3, Go 1.27.3. Each cell
+uses three complete in-memory encode/decode cycles after a warm-up. The modes
+were alternated, input loading and PSNR computation excluded, and each cycle
+created new encoder and decoder instances. Times are medians. The large photo is
+the local 5152×7728 `benchmark.jpg`; the ramp is a synthetic 800×572 grayscale
+horizontal gradient. RGB PSNR is against the decoded input. This is not a
+matched-size quality comparison.
+
+| Image / quality | Mode | Size | RGB PSNR | Complete cycle |
+|---|---|---:|---:|---:|
+| Photo q17 | Normal | 8,309,362 B | 29.94 dB | 0.383 s |
+| Photo q17 | Gradient | 8,431,827 B | 29.96 dB | 0.660 s |
+| Ramp q0 | Normal | 762 B | 28.83 dB | 0.00206 s |
+| Ramp q0 | Gradient | 5,189 B | 30.68 dB | 0.00342 s |
+| Ramp q17 | Normal | 9,376 B | 40.93 dB | 0.00310 s |
+| Ramp q17 | Gradient | 11,418 B | 40.82 dB | 0.00398 s |
+
+For the photo at q17 the three full-cycle times were 0.379–0.409 s without
+gradient blocks and 0.639–0.694 s with them. At q80 both modes produced
+37,200,272-byte files and 43.13 dB, since that layout has only 1×1 and
+2×2 blocks. On a separate ideal 256×256 gradient at q20, the test restored
+both horizontal and vertical ramps exactly. These examples show that the mode
+can help, but it is not yet a general fix: it can increase size, slow encoding,
+or slightly reduce PSNR. It remains opt-in while the selection is refined.
+
+```sh
+go run ./cmd/gradientbench -input samples/source.jpg
+go run ./cmd/gradientbench -input benchmark.jpg
+```
+
 ## Lossless CLI comparison
 
 The [README table](../README.md#lossless-complete-encodedecode-cycle) uses the

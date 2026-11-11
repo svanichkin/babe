@@ -72,7 +72,11 @@ const (
 	channelFlagCb       = 1 << 1
 	channelFlagCr       = 1 << 2
 	channelFlagLossless = 1 << 3
+	channelFlagGradient = 1 << 4
 )
+
+// Protected by codecStateMu, including channel workers.
+var gradientMode bool
 
 // encodeBW toggles grayscale mode; when true, only the Y channel is stored.
 var encodeBW bool
@@ -1154,6 +1158,16 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh, quantStep i
 // encodeChannelBlock optionally replaces a low-contrast block with its
 // quantized average. This reduces chroma detail at the lower quality levels.
 func encodeChannelBlock(plane []uint8, stride, height, x0, y0, bw, bh, step int, solidThreshold int, pw *bitWriter) (uint8, uint8, bool, error) {
+	if gradientMode && pw != nil && bw == bh && bw >= 4 && x0 >= 0 && y0 >= 0 && stride > 0 && height > 0 && x0+bw <= stride && y0+bh <= height && (y0+bh-1)*stride+x0+bw <= len(plane) {
+		if start, end, vertical, ok := fitGradient(plane, stride, x0, y0, bw); ok {
+			var bits uint64
+			if vertical {
+				bits = ^uint64(0) >> (64 - uint(bw*bh))
+			}
+			writePatternComposite(pw, bits, bw, bh)
+			return start, end, true, nil
+		}
+	}
 	if solidThreshold <= 0 {
 		return encodeBlockPlane(plane, stride, height, x0, y0, bw, bh, step, pw)
 	}

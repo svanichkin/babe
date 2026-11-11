@@ -27,8 +27,9 @@ are MSB-first. Method 16 uses unsigned varints and a bitmap as specified below.
 
 Channel mask bits 0, 1, 2 indicate the three color streams respectively. The
 first is required. Bit 3 indicates the reversible lossless RGB transform below;
-without it the streams use the original Y/Cb/Cr interpretation. Other bits are
-invalid. Lossless mode requires small blocks of 1, macroblocks of 2, and either
+without it the streams use the original Y/Cb/Cr interpretation. Bit 4 enables
+experimental gradient block patterns described below; it cannot be combined
+with bit 3. Other bits are invalid. Lossless mode requires small blocks of 1, macroblocks of 2, and either
 all three channels or the first channel alone (for an already grayscale input).
 Each channel record begins with a 4-byte block count, followed by five streams:
 
@@ -121,6 +122,26 @@ If both rounded levels are equal, the block becomes solid; no pattern bits or
 background entry are emitted. BW stores only Y. At qualities below 90 the decoded
 image can differ from previous builds at the same numeric quality. Entropy coding
 and PNG compression add no further loss.
+
+## Experimental gradient blocks
+
+When channel mask bit 4 is set, a patterned square block of size 4×4 or 8×8
+whose pattern bits are all zero represents a horizontal linear ramp, and one
+whose bits are all one represents a vertical ramp. FG stores the first endpoint
+and BG the last. For coordinate `i` along the selected axis, the output is
+`(FG*(n-1-i) + BG*i + (n-1)/2) / (n-1)` using integer division. Endpoints may
+increase or decrease. All other patterns retain their existing two-tone
+meaning. The encoder's ordinary two-tone algorithm only emits patterned blocks
+with both bit values present, so these markers do not collide with its output.
+When bit 4 is absent, every pattern has its original meaning, including an
+all-zero or all-one pattern in an older file. Existing decoders reject the
+new channel-mask bit rather than interpreting gradient blocks incorrectly.
+
+The experimental encoder tries a ramp only for eligible square blocks already
+selected by the block partitioning, and requires a close fit that substantially
+improves on an unquantized two-tone fit. Endpoints are stored without level
+quantization. This does not guarantee smaller files or better RGB PSNR, nor
+does it fit diagonal ramps. Quality 100 never emits this flag or these blocks.
 
 ## Lossless quality 100
 

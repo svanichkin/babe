@@ -846,6 +846,7 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	}
 	channelsMask := payload[pos]
 	pos++
+	gradientMode = channelsMask&channelFlagGradient != 0
 	if channelsMask&channelFlagY == 0 {
 		return nil, fmt.Errorf("decode: Y channel missing in header")
 	}
