@@ -1,19 +1,21 @@
 # BRC1 container
 
-The encoder performs a single order-0 range-coding pass for each of the five
-streams in each channel. If the result is not smaller than the original stream,
-it stores raw bytes. Streams of five bytes or fewer are stored raw immediately,
-since range termination alone takes five bytes. New files always use BRC1.
+The encoder uses byte-symbol range coding for each of the five streams in each
+channel. Each block of up to 32 KiB gets a static frequency table. If the result
+is not smaller than the original stream, it stores raw bytes. Streams of five
+bytes or fewer are stored raw immediately. New files always use BRC1.
 
 Encoding and decoding process independent streams with up to four workers and
 reuse output buffers. Payloads smaller than 16 KiB stay serial. Setting the
 encoder/decoder's `Parallel` field to false also disables entropy workers.
 
 The decoder recognizes both BRC1 and previous Zstd-based files, including mixed
-range/Zstd containers produced by the earlier exhaustive encoder. Older decoders
-cannot read BRC1. The block payload itself retains its previous layout.
+range/Zstd containers produced by the earlier exhaustive encoder. Earlier BRC1
+decoders do not support method 16; Zstd-only decoders cannot read BRC1 at all.
+The reconstructed block payload retains its previous layout and pixel values.
 
-All multibyte integers are unsigned, big-endian. All bit streams are MSB-first.
+Fixed-width multibyte integers are unsigned, big-endian. Block pattern streams
+are MSB-first. Method 16 uses unsigned varints and a bitmap as specified below.
 
 | Field | Bytes | Meaning |
 |---|---:|---|
@@ -36,13 +38,51 @@ method, and `stored length` bytes. Methods:
 
 | Method | Representation |
 |---:|---|
-| 0 | Adaptive range-coded bytes, no previous-byte context; current encoder |
+| 0 | Read compatibility: adaptive binary range coding, no previous-byte context |
 | 4 | Read compatibility: range context is the high nibble of the preceding byte |
 | 8 | Read compatibility: range context is the whole preceding byte |
+| 16 | Byte-symbol range coding with a static model per block; current encoder |
 | 254 | Read compatibility: Zstd frame |
 | 255 | Raw bytes; stored and raw lengths must be equal |
 
-For each range stream, probabilities reset to 1024 out of 2048. Each context has
+## Byte-symbol range coding (method 16)
+
+Split the declared raw length into consecutive blocks of at most 32,768 bytes.
+Each block starts with a one-byte kind:
+
+| Kind | Following data |
+|---:|---|
+| 0 | Raw bytes, exactly the decoded block length |
+| 1 | One byte repeated for the entire decoded block |
+| 2 | Stored length (4 bytes), 32-byte symbol bitmap, frequencies, range data |
+| 3 | Stored length (4 bytes), symbol count (1 byte, 2–31), sorted symbol bytes, frequencies, range data |
+
+For kinds 2 and 3 the stored length includes everything after the length field
+in that block. Bitmap bit `i % 8` of byte `i / 8` marks symbol `i`. Enumerate
+present symbols in ascending order. Store the frequency of every symbol except
+the last as an unsigned base-128 varint (low seven bits first, high bit means
+continuation). Frequencies are positive and sum to 4096; the last is implied.
+The encoder reserves one count per present symbol, then distributes the
+remaining counts proportionally using cumulative integer rounding.
+
+The interval starts at `0xffffffff`, low at zero. For each byte:
+`unit = interval >> 12`, `low += cumulative[symbol] * unit`, and
+`interval = frequency[symbol] * unit`. While the interval is below `1 << 24`,
+shift it by eight and emit a byte with carry propagation. Five final low shifts
+terminate the range data, followed by two zero guard bytes. The range data
+starts with zero. The decoder initializes its code from the next four bytes,
+uses `code / unit` to look up a symbol in a 4096-entry table, subtracts the
+cumulative interval and normalizes. At completion the code must be zero and
+exactly the two zero guard bytes must remain unread. These guards allow a
+speculative normalization read within the stored buffer.
+
+The encoder can store an individual block raw or as a repeated byte. It also
+falls back to method 255 if the whole method-16 stream is not smaller than raw.
+No Zstd or alternative context-model search is performed.
+
+## Legacy binary range coding (methods 0, 4, 8)
+
+For each legacy range stream, probabilities reset to 1024 out of 2048. Each context has
 a binary tree for the eight bits of a byte. The initial previous byte is zero.
 The probability update shifts by 5. The 32-bit interval is normalized below
 `1 << 24`, with bytewise carry propagation. Five final shifts terminate the

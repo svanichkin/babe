@@ -49,6 +49,19 @@ func BenchmarkImageCodec(b *testing.B) {
 						}
 					}
 				})
+				b.Run("Cycle", func(b *testing.B) {
+					b.ReportAllocs()
+					for i := 0; i < b.N; i++ {
+						encoded, err = e.Encode(img, q, false)
+						if err != nil {
+							b.Fatal(err)
+						}
+						if _, err := d.Decode(encoded, false); err != nil {
+							b.Fatal(err)
+						}
+					}
+					b.ReportMetric(float64(len(encoded)), "file-bytes")
+				})
 			})
 		}
 	}

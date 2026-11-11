@@ -1,14 +1,14 @@
 # Babe — Bi-Level Adaptive Block Encoding
 
 **Babe** is an experimental dual‑tone block-based image codec designed for extremely lightweight compression with visually smooth output.
-The encoder uses one adaptive range-coding pass per stream, with parallel processing and reusable buffers. Encoding is lossy; decoding restores the encoded image without further loss.
+The encoder uses byte-symbol range coding with local frequency tables, parallel processing and reusable buffers. Encoding is lossy; decoding restores the encoded image without further loss.
 
 ## Features
 
 - Two‑tone block encoding with adaptive subdivision
 - Quality-dependent quantization of YCbCr block levels
 - Delta-coded block levels
-- Adaptive range coding with parallel stream compression and decompression
+- Byte-symbol range coding with parallel stream compression and decompression
 - Lossy encoder, PNG output on decode
 - Minimal API: `Encode(image, quality, bw)` and `Decode(data, postfilter)`
 
@@ -47,10 +47,10 @@ At a high level, Babe works as a lossy, block-based codec with a dual-tone model
    - Channels are independent. The header contains dimensions, block sizes and a channel mask; BW mode stores only luma.
 
 8. **Range compression**
-   - Each stream uses one adaptive order-0 range-coding pass. Incompressible streams are stored raw when that is smaller.
+   - Each stream is split into blocks of up to 32 KiB, with one frequency table per block. The range coder processes a whole byte per step. Constant blocks store a single repeated byte; incompressible blocks or streams are stored raw when that is smaller.
    - New files always use the `BRC1` container with a checksum. There is no search across codecs or context models, and Zstd is not used for encoding.
    - Up to four entropy workers process independent streams. Small payloads run serially; `Encoder.Parallel` and `Decoder.Parallel` also control these workers.
-   - The decoder still accepts older Zstd-based `.babe` files and mixed range/Zstd `BRC1` files. Older Zstd-only programs cannot decode `BRC1` files.
+   - The decoder still accepts older binary-range and Zstd-based `.babe` files, including mixed range/Zstd `BRC1` files. Older programs do not support the new byte-range method (16).
 
 9. **Decoding**
    - Decode reverses the process:
@@ -132,24 +132,73 @@ if err != nil {
 This codec is currently experimental.
 Format details, quality tuning, and performance optimizations are still evolving.
 
-Current CLI timings and size tradeoffs are recorded in [the speed measurements](docs/performance.md).
+In-memory BABE encoder/decoder timings and size tradeoffs are recorded in [the speed measurements](docs/performance.md).
 
 ## Benchmark comparison
 
-Current single-run measurement on an Apple M3 using the repository's
-`benchmark.jpg`. JPEG and BABE use quality 80; QOI is lossless. Timings cover
-only in-memory encoding and decoding.
+Measured on an Apple M3 with Go 1.27.3 using the local `benchmark.jpg`
+(5152×7728). Times are medians of three runs with two operations each, after
+warm-up. The same decoded RGBA image is fed to both encoders; image loading and
+file I/O are excluded. Encoder buffers and BABE decoder buffers are reused.
+JPEG decoding returns Go's native YCbCr image, while BABE returns RGBA. Results
+vary with the image and machine load; the source image is itself a JPEG.
+
+JPEG and BABE at quality 80, with lossless QOI for reference:
 
 | Metric | JPEG (q=80) | BABE (q=80) | QOI |
 |---|---:|---:|---:|
-| Encode time | 8.638 s | 14.609 s | 16.948 s |
-| Decode time | 3.770 s | 13.754 s | 4.193 s |
-| Total | 12.409 s | 28.363 s | 21.141 s |
-| Output size | 13.98 MB | 22.98 MB | 78.98 MB |
+| Encode time | 0.786 s | 0.278 s | 1.096 s |
+| Decode time | 0.420 s | 0.296 s | 0.300 s |
+| Total | 1.206 s | 0.574 s | 1.396 s |
+| Output size | 13.98 MB | 22.69 MB | 78.98 MB |
 
-Run `go test -run '^TestBenchmarkSummary$' -v` to refresh the comparison on a
-local machine. See [the speed measurements](docs/performance.md) for the
-smaller-image CLI measurement and the range-coder optimization comparison.
+Total is the sum of the separately measured encode and decode medians.
+
+JPEG and BABE at each requested quality, on the same image and under the same
+conditions:
+
+| Quality | JPEG encode | BABE encode | JPEG decode | BABE decode | JPEG size | BABE size |
+|---:|---:|---:|---:|---:|---:|---:|
+| 100 | 0.961 s | 0.321 s | 0.799 s | 0.455 s | 37.66 MB | 37.14 MB |
+| 80 | 0.786 s | 0.278 s | 0.420 s | 0.296 s | 13.98 MB | 22.69 MB |
+| 50 | 0.533 s | 0.354 s | 0.242 s | 0.336 s | 5.30 MB | 17.47 MB |
+| 10 | 0.417 s | 0.249 s | 0.155 s | 0.135 s | 0.97 MB | 7.47 MB |
+| 0 | 0.398 s | 0.280 s | 0.148 s | 0.217 s | 0.67 MB | 6.48 MB |
+
+Go's JPEG encoder clamps quality 0 to **1**. Equal quality numbers do not mean
+equal visual quality or equal file size; BABE quality 100 is still lossy. MB is
+1,000,000 bytes. This is one image, not a claim about every image or JPEG codec.
+
+To reproduce these measurements with a local `benchmark.jpg`:
+
+```sh
+go test -run '^$' -bench '^BenchmarkQualityComparison$' -benchtime=2x -count=3
+```
+
+See [the speed measurements](docs/performance.md) for the BABE encoder, decoder
+and complete encode/decode cycle comparison against the earlier version.
+
+## Visual comparison
+
+The same [800×572 source image](docs/comparison/source.jpg) was encoded at
+quality 80 by each codec. Click an image to inspect it at full resolution.
+
+| JPEG q80 — 71,042 bytes | BABE q80 — 211,612 bytes |
+|:---:|:---:|
+| [![JPEG q80](docs/comparison/jpeg-q80.jpg)](docs/comparison/jpeg-q80.jpg) | [![BABE q80](docs/comparison/babe-q80.png)](docs/comparison/babe-q80.png) |
+
+The JPEG image is the encoded JPEG itself. The BABE image is its decoded pixels
+saved losslessly for display; the stated BABE size is the `.babe` bitstream, not
+the preview. Against the decoded source, RGB PSNR is 35.40 dB for JPEG and
+40.18 dB for BABE on this example. BABE uses about 2.98× as many bytes here;
+the quality numbers and PSNR do not by themselves establish equal visual quality.
+The source was already JPEG-compressed.
+
+Recreate the images and size/PSNR figures with:
+
+```sh
+go run ./cmd/compareimages -input docs/comparison/source.jpg -out docs/comparison -quality 80
+```
 
 ## License
 

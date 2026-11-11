@@ -149,88 +149,15 @@ func (e *Encoder) encodeChannelReuse(plane []uint8, stride, w4, h4, fullW, fullH
 				v2 := plane[idx2]
 				v3 := plane[idx2+1]
 
-				minV := v0
-				maxV := v0
-				if v1 < minV {
-					minV = v1
-				} else if v1 > maxV {
-					maxV = v1
-				}
-				if v2 < minV {
-					minV = v2
-				} else if v2 > maxV {
-					maxV = v2
-				}
-				if v3 < minV {
-					minV = v3
-				} else if v3 > maxV {
-					maxV = v3
-				}
+				minV := min(v0, v1, v2, v3)
+				maxV := max(v0, v1, v2, v3)
 
 				useBig := int32(maxV)-int32(minV) < spread
 				sizeW.writeBit(useBig)
 
 				if useBig {
-					sum := uint64(v0) + uint64(v1) + uint64(v2) + uint64(v3)
-					avg := uint8(sum / 4)
-					thr := avg
-
-					var bits uint64
-					var fgSum, bgSum uint64
-					var fgCnt, bgCnt uint32
-
-					isFg0 := v0 >= thr
-					bits <<= 1
-					if isFg0 {
-						bits |= 1
-						fgSum += uint64(v0)
-						fgCnt++
-					} else {
-						bgSum += uint64(v0)
-						bgCnt++
-					}
-
-					isFg1 := v1 >= thr
-					bits <<= 1
-					if isFg1 {
-						bits |= 1
-						fgSum += uint64(v1)
-						fgCnt++
-					} else {
-						bgSum += uint64(v1)
-						bgCnt++
-					}
-
-					isFg2 := v2 >= thr
-					bits <<= 1
-					if isFg2 {
-						bits |= 1
-						fgSum += uint64(v2)
-						fgCnt++
-					} else {
-						bgSum += uint64(v2)
-						bgCnt++
-					}
-
-					isFg3 := v3 >= thr
-					bits <<= 1
-					if isFg3 {
-						bits |= 1
-						fgSum += uint64(v3)
-						fgCnt++
-					} else {
-						bgSum += uint64(v3)
-						bgCnt++
-					}
-
-					fg := quantizeLevel(avg, step)
-					bg := fg
-					isPattern := false
-					if fgCnt != 0 && bgCnt != 0 {
-						fg = quantizeLevel(uint8(fgSum/uint64(fgCnt)), step)
-						bg = quantizeLevel(uint8(bgSum/uint64(bgCnt)), step)
-						isPattern = fg != bg
-					}
+					fg, bg, bits := quadLevels(v0, v1, v2, v3, step)
+					isPattern := fg != bg
 
 					scratch.fgVals = append(scratch.fgVals, fg)
 					if isPattern {

@@ -16,6 +16,7 @@ const (
 	payloadHeaderSize = 18
 	maxImagePixels    = 1 << 26
 	maxPayloadSize    = 1 << 30
+	methodByteRange   = 16
 	methodZstd        = 254
 	methodRaw         = 255
 )
@@ -110,8 +111,8 @@ func (h payloadHeader) checkLength(stream, n, blocks int) error {
 }
 
 // BRC1 stores the raw header, checksum, and five streams per channel.
-// New files use a single order-0 range pass, or raw bytes if smaller. Methods
-// 4/8 and Zstd remain supported when reading files from the exhaustive encoder.
+// New files use byte-symbol range coding, or raw bytes if smaller. Binary range
+// models and Zstd remain supported when reading earlier files.
 type payloadStream struct {
 	src, dst []byte
 	size     int
@@ -181,10 +182,10 @@ func (p *payloadPacker) compress(raw, dst []byte, parallel bool) ([]byte, error)
 		job.method = methodRaw
 		job.dst = job.src
 		if len(job.src) > 5 {
-			p.buffers[i] = encodeRangeInto(p.buffers[i], job.src, 0)
+			p.buffers[i] = encodeByteRangeInto(p.buffers[i], job.src)
 			if len(p.buffers[i]) < len(job.src) {
 				job.dst = p.buffers[i]
-				job.method = 0
+				job.method = methodByteRange
 			}
 		}
 	})
@@ -269,7 +270,7 @@ func decompressPayload(data, dst []byte, zd *zstd.Decoder, parallel bool) ([]byt
 				}
 			case methodZstd:
 				hasZstd = true
-			case 0, 4, 8:
+			case 0, 4, 8, methodByteRange:
 			default:
 				return nil, fmt.Errorf("unsupported compression method %d", method[0])
 			}
@@ -315,6 +316,8 @@ func decompressPayload(data, dst []byte, zd *zstd.Decoder, parallel bool) ([]byt
 		switch job.method {
 		case methodRaw:
 			copy(job.dst, job.src)
+		case methodByteRange:
+			job.err = decodeByteRangeInto(job.dst, job.src)
 		case methodZstd:
 			var decoded []byte
 			decoded, job.err = bounded.DecodeAll(job.src, job.dst[:0])
@@ -367,6 +370,12 @@ func validatePayload(data []byte) error {
 				return err
 			}
 		}
+		if h.small == 1 && h.macro == 2 {
+			if err := validateQuadChannel(streams, h.groups, blocks, h.w*h.h-h.fullW*h.fullH); err != nil {
+				return err
+			}
+			continue
+		}
 		bit := func(s, i int) bool { return streams[s][i/8]&(1<<(7-i%8)) != 0 }
 		count, patterns, patternBits := 0, 0, 0
 		visit := func(area int) error {
@@ -408,6 +417,42 @@ func validatePayload(data []byte) error {
 	}
 	if r.pos != len(data) {
 		return fmt.Errorf("trailing payload data")
+	}
+	return nil
+}
+
+func validateQuadChannel(streams [5][]byte, groups, blocks, tail int) error {
+	sizes, types := newBitReader(streams[0]), newBitReader(streams[1])
+	count, patterns := 0, 0
+	for g := 0; g < groups; g++ {
+		if sizes.readBitFast() {
+			if count >= blocks {
+				return fmt.Errorf("too few quad block values")
+			}
+			if types.readBitFast() {
+				patterns++
+			}
+			count++
+		} else {
+			if count+4 > blocks {
+				return fmt.Errorf("too few pixel block values")
+			}
+			if types.readBitsFast(4) != 0 {
+				return fmt.Errorf("single-pixel block cannot have a pattern")
+			}
+			count += 4
+		}
+	}
+	if count+tail != blocks {
+		return fmt.Errorf("inconsistent quad block count")
+	}
+	for i := 0; i < tail; i++ {
+		if types.readBitFast() {
+			return fmt.Errorf("edge pixel cannot have a pattern")
+		}
+	}
+	if len(streams[4]) != patterns || len(streams[2]) != (patterns*4+7)/8 {
+		return fmt.Errorf("inconsistent quad pattern streams")
 	}
 	return nil
 }
