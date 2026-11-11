@@ -169,6 +169,52 @@ Go's JPEG encoder clamps quality 0 to **1**. Equal quality numbers do not mean
 equal visual quality or equal file size; BABE quality 100 is still lossy. MB is
 1,000,000 bytes. This is one image, not a claim about every image or JPEG codec.
 
+CPU and memory were measured separately on the same image, with each codec and
+operation in its own process. CPU time sums user and system time across all
+threads; cores is CPU time divided by elapsed time (1.0 means one fully used
+core). Values are medians of three processes with two warmed operations each.
+
+| Quality | Codec | CPU encode s | CPU decode s | Encode cores | Decode cores |
+|---:|---|---:|---:|---:|---:|
+| 100 | JPEG | 0.918 | 0.778 | 1.00 | 0.95 |
+| 100 | BABE | 0.680 | 0.762 | 2.14 | 1.72 |
+| 80 | JPEG | 0.765 | 0.454 | 0.98 | 0.95 |
+| 80 | BABE | 0.669 | 0.591 | 2.25 | 2.12 |
+| 50 | JPEG | 0.531 | 0.244 | 0.99 | 1.00 |
+| 50 | BABE | 0.829 | 0.656 | 2.04 | 1.88 |
+| 10 | JPEG | 0.416 | 0.159 | 0.99 | 1.00 |
+| 10 | BABE | 0.574 | 0.333 | 2.19 | 2.37 |
+| 0 | JPEG | 0.469 | 0.154 | 0.83 | 0.98 |
+| 0 | BABE | 0.613 | 0.409 | 2.00 | 1.77 |
+| Lossless | QOI | 1.038 | 0.279 | 0.99 | 0.98 |
+
+Memory allocated during a warmed operation and peak resident memory of its
+entire process, in MiB (1 MiB = 1,048,576 bytes):
+
+| Quality | Codec | Alloc encode MiB/op | Alloc decode MiB/op | Peak RSS encode MiB | Peak RSS decode MiB |
+|---:|---|---:|---:|---:|---:|
+| 100 | JPEG | 0.00 | 56.98 | 443.7 | 156.2 |
+| 100 | BABE | 0.03 | 0.00 | 730.8 | 376.4 |
+| 80 | JPEG | 0.00 | 56.98 | 443.5 | 133.7 |
+| 80 | BABE | 0.03 | 0.00 | 660.6 | 345.3 |
+| 50 | JPEG | 0.00 | 56.97 | 443.4 | 125.4 |
+| 50 | BABE | 0.03 | 0.01 | 554.3 | 207.1 |
+| 10 | JPEG | 0.00 | 56.98 | 443.7 | 121.3 |
+| 10 | BABE | 0.03 | 0.01 | 444.6 | 178.7 |
+| 0 | JPEG | 0.00 | 56.98 | 443.4 | 120.9 |
+| 0 | BABE | 0.03 | 0.01 | 443.9 | 174.9 |
+| Lossless | QOI | 303.77 | 151.89 | 656.2 | 385.9 |
+
+Allocation counts do **not** include retained buffers created during warm-up:
+near-zero allocations do not mean near-zero memory use. Peak RSS includes
+runtime startup, loading, warm-up, buffers and the timed operations. Encode
+processes load the same RGBA source; decode processes load only the already
+encoded bitstream, so encoder memory is excluded from decoder RSS. JPEG
+decodes to YCbCr; BABE and QOI decode to RGBA. Memory figures depend on Go's
+garbage collector, allocator and the OS and are not a pure codec-only peak.
+See [resource measurement details](docs/performance.md#cpu-and-memory) for
+the commands and raw results.
+
 To reproduce these measurements with a local `benchmark.jpg`:
 
 ```sh
@@ -180,24 +226,45 @@ and complete encode/decode cycle comparison against the earlier version.
 
 ## Visual comparison
 
-The same [800×572 source image](docs/comparison/source.jpg) was encoded at
-quality 80 by each codec. Click an image to inspect it at full resolution.
+The same [800×572 source image](docs/comparison/source.jpg) was encoded by
+each codec. Click an image to inspect it at full resolution.
+
+Quality 80:
 
 | JPEG q80 — 71,042 bytes | BABE q80 — 211,612 bytes |
 |:---:|:---:|
 | [![JPEG q80](docs/comparison/jpeg-q80.jpg)](docs/comparison/jpeg-q80.jpg) | [![BABE q80](docs/comparison/babe-q80.png)](docs/comparison/babe-q80.png) |
 
-The JPEG image is the encoded JPEG itself. The BABE image is its decoded pixels
-saved losslessly for display; the stated BABE size is the `.babe` bitstream, not
-the preview. Against the decoded source, RGB PSNR is 35.40 dB for JPEG and
-40.18 dB for BABE on this example. BABE uses about 2.98× as many bytes here;
-the quality numbers and PSNR do not by themselves establish equal visual quality.
-The source was already JPEG-compressed.
+Quality 0 (JPEG actually uses quality 1, its minimum):
+
+| JPEG q1 — 9,256 bytes | BABE q0 — 60,738 bytes |
+|:---:|:---:|
+| [![JPEG quality 1](docs/comparison/jpeg-q0.jpg)](docs/comparison/jpeg-q0.jpg) | [![BABE quality 0](docs/comparison/babe-q0.png)](docs/comparison/babe-q0.png) |
+
+For a roughly equal-size comparison, JPEG at quality 73 uses 60,191 bytes,
+versus 60,738 bytes for BABE q0:
+
+| JPEG q73 — 60,191 bytes | BABE q0 — 60,738 bytes |
+|:---:|:---:|
+| [![JPEG quality 73](docs/comparison/jpeg-q73.jpg)](docs/comparison/jpeg-q73.jpg) | [![BABE quality 0](docs/comparison/babe-q0.png)](docs/comparison/babe-q0.png) |
+
+The JPEG images are the encoded JPEGs themselves. The BABE images are its
+decoded pixels saved losslessly for display; the stated BABE sizes are the
+`.babe` bitstreams, not the previews. RGB PSNR against the decoded source is
+35.40 / 40.18 dB for JPEG / BABE at q80, and 21.73 / 30.20 dB at minimum
+quality. On this source, BABE uses 2.98× as many bytes at q80 and 6.56× at q0.
+At approximately 60 KB, JPEG q73 reaches 34.24 dB versus BABE q0's 30.20 dB;
+PSNR is one measure and is not a complete measure of perceived quality. Equal
+numeric quality does not mean equal bitrate or perceived quality. The source
+was already JPEG-compressed.
 
 Recreate the images and size/PSNR figures with:
 
 ```sh
 go run ./cmd/compareimages -input docs/comparison/source.jpg -out docs/comparison -quality 80
+go run ./cmd/compareimages -input docs/comparison/source.jpg -out docs/comparison -quality 0
+go run ./cmd/compareimages -input docs/comparison/source.jpg -out /tmp/comparison-q73 -quality 73
+cp /tmp/comparison-q73/jpeg-q73.jpg docs/comparison/
 ```
 
 ## License

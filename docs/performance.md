@@ -84,6 +84,47 @@ they do not represent the full image codec. Both paths allocate zero bytes per
 iteration after warm-up. Faster entropy coding exposes the remaining cost of
 block processing, validation and color conversion.
 
+## CPU and memory
+
+The [README](../README.md#benchmark-comparison) lists CPU time, average core
+use, Go heap allocations per operation, and peak process RSS for each quality
+and codec. The input is the same local 5152×7728 `benchmark.jpg` used in the
+time comparison. Measurements were made on Apple M3, darwin/arm64, Go 1.27.3,
+`GOMAXPROCS=8`, using three separate processes per case with two timed, warmed
+operations in each. Execution order was shuffled. The tables use medians of
+the three process results; [all individual measurements](benchmarks/resources-apple-m3.json)
+are included.
+
+CPU time is the change in process user plus system CPU time, including all Go
+threads and any GC work during the interval. Cores is CPU time divided by wall
+time for that same process, with 1.0 equal to one fully occupied core. Ratios
+over 1.0 indicate parallel CPU work. It is an interval average, not peak
+utilization or a percentage of the entire machine's capacity.
+
+Allocated bytes are the change in Go `runtime.MemStats.TotalAlloc` during the
+timed operations, divided by their count. They exclude already retained buffers
+and are not peak or total memory usage. RSS is `getrusage(RUSAGE_SELF).Maxrss`,
+the process high-water mark over startup, input loading, warm-up and timed
+operations; it is not an incremental, codec-only memory measurement. Encoding
+loads the same RGBA source for each codec. Decoding reads a pre-encoded stream
+in a fresh process, so an encoder's buffers cannot inflate decoder RSS. JPEG
+returns YCbCr, whereas BABE and QOI return RGBA. Warmed BABE instances retain
+their scratch and output buffers, while JPEG and QOI allocate decoded images.
+The Go runtime, garbage collector, input type and OS affect both allocation and
+RSS results. Peaks are medians of three process high-water marks.
+
+On macOS or Linux, reproduce with a local source image:
+
+```sh
+go build -o /tmp/babe-measurecodec ./cmd/measurecodec
+GOMAXPROCS=8 python3 scripts/measure-codecs.py --binary /tmp/babe-measurecodec --input benchmark.jpg --runs 3 --iterations 2 --output /tmp/babe-resource-results.json
+```
+
+The script runs each case separately, stores encoded decoder inputs in a
+temporary directory, shuffles execution order and prints both tables. A JPEG
+quality of 0 is clamped to 1 by Go's encoder. Sample images are local and may
+be replaced, but results for different images are not directly comparable.
+
 ## Reproduction
 
 Sample JPEGs are local and are not tracked. Run from the repository root:
