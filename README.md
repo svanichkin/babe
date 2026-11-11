@@ -134,20 +134,22 @@ Format details, quality tuning, and performance optimizations are still evolving
 
 Current CLI timings and size tradeoffs are recorded in [the speed measurements](docs/performance.md).
 
-## Current measurements
+## Benchmark comparison
 
-Measured on an Apple M3 at quality 10. Values are medians of five CLI runs after
-warm-up. Encode and decode times are reported by Babe; whole-command time also
-includes JPEG input, PNG output, process startup and file I/O.
+Current single-run measurement on an Apple M3 using the repository's
+`benchmark.jpg`. JPEG and BABE use quality 80; QOI is lossless. Timings cover
+only in-memory encoding and decoding.
 
-| Image | Dimensions | BABE size | Encode | Decode | Whole command |
-|---|---:|---:|---:|---:|---:|
-| `1.jpg` | 800×572 | 61,163 B | 8.15 ms | 6.94 ms | 67.97 ms |
-| `3.jpg` | 1920×1080 | 306,244 B | 51.20 ms | 43.33 ms | 373.48 ms |
+| Metric | JPEG (q=80) | BABE (q=80) | QOI |
+|---|---:|---:|---:|
+| Encode time | 8.638 s | 14.609 s | 16.948 s |
+| Decode time | 3.770 s | 13.754 s | 4.193 s |
+| Total | 12.409 s | 28.363 s | 21.141 s |
+| Output size | 13.98 MB | 22.98 MB | 78.98 MB |
 
-The source JPEGs are local test images and are not tracked in the repository.
-See [the speed measurements](docs/performance.md) for the previous-versus-current
-comparison and a command to reproduce in-process benchmarks.
+Run `go test -run '^TestBenchmarkSummary$' -v` to refresh the comparison on a
+local machine. See [the speed measurements](docs/performance.md) for the
+smaller-image CLI measurement and the range-coder optimization comparison.
 
 ## License
 
