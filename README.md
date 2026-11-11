@@ -1,7 +1,7 @@
 # Babe — Bi-Level Adaptive Block Encoding
 
 **Babe** is an experimental dual‑tone block-based image codec designed for extremely lightweight compression with visually smooth output.
-The encoder uses byte-symbol range coding with local frequency tables, parallel processing and reusable buffers. Encoding is lossy; decoding restores the encoded image without further loss.
+The encoder uses byte-symbol range coding with local frequency tables, parallel processing and reusable buffers. Qualities 0–99 are lossy; quality 100 preserves opaque 8-bit RGB pixels exactly.
 
 ## Features
 
@@ -9,15 +9,15 @@ The encoder uses byte-symbol range coding with local frequency tables, parallel 
 - Quality-dependent quantization of YCbCr block levels
 - Delta-coded block levels
 - Byte-symbol range coding with parallel stream compression and decompression
-- Lossy encoder, PNG output on decode
+- Lossy qualities 0–99 and lossless 8-bit RGB at quality 100
 - Minimal API: `Encode(image, quality, bw)` and `Decode(data, postfilter)`
 
 ## How It Works
 
-At a high level, Babe works as a lossy, block-based codec with a dual-tone model per block and independent Y, Cb and Cr streams.
+At a high level, Babe is a block-based codec with a dual-tone model per block and three independent color streams.
 
 1. **Color space and input**
-   - The source image is converted to a YUV-like space.
+   - At qualities 0–99 the source image is converted to a YUV-like space. At quality 100, the channels are instead `G`, `B-G`, and `R-G`, using reversible byte arithmetic.
    - Luma and chroma are processed with different sensitivity so that most detail is preserved in brightness while color is simplified more aggressively.
 
 2. **Block partitioning**
@@ -26,15 +26,15 @@ At a high level, Babe works as a lossy, block-based codec with a dual-tone model
    - Very flat or low-contrast regions tend to keep larger blocks; detailed regions get smaller blocks.
 
 3. **Dual-tone model**
-   - For each block Babe tries to approximate all pixels using only **two representative colors** (a “dual-tone”).
+   - For each block Babe tries to represent its channel values using only **two levels** (a “dual-tone”). At quality 100 a 2×2 block is used only if the levels reproduce every sample exactly; otherwise it splits into 1×1 blocks.
    - A simple pattern (bit mask) inside the block tells, for each pixel, which of the two tones is used.
    - This creates a kind of ordered dither / posterization that looks smooth at a distance but is cheap to store.
 
 4. **Block-level quantization**
    - Each block's foreground and background levels are rounded according to quality.
    - Chroma uses coarser steps than luma. If both levels become equal, the block is stored as solid, without a pattern or background value.
-   - Quantization steps for Y / Cb,Cr: quality 0–19: 4 / 8; 20–59: 2 / 4; 60–89: 1 / 2; 90–100: 1 / 1.
-   - This adds loss compared with older builds at the same quality below 90. Quality 100 still uses the codec's lossy block approximation.
+   - Quantization steps for Y / Cb,Cr: quality 0–19: 4 / 8; 20–59: 2 / 4; 60–89: 1 / 2; 90–99: 1 / 1. Quality 100 uses no quantization or block approximation.
+   - At quality 100 opaque 8-bit RGB pixels are restored exactly. Transparency and 16-bit inputs are rejected in this mode. For JPEG input this means the decoded 8-bit RGB pixels, not the original JPEG bitstream or metadata. BW mode at quality 100 requires an already grayscale image.
 
 5. **Delta coding**
    - Foreground and background values are stored as byte differences from the preceding value in their respective streams.
@@ -50,13 +50,13 @@ At a high level, Babe works as a lossy, block-based codec with a dual-tone model
    - Each stream is split into blocks of up to 32 KiB, with one frequency table per block. The range coder processes a whole byte per step. Constant blocks store a single repeated byte; incompressible blocks or streams are stored raw when that is smaller.
    - New files always use the `BRC1` container with a checksum. There is no search across codecs or context models, and Zstd is not used for encoding.
    - Up to four entropy workers process independent streams. Small payloads run serially; `Encoder.Parallel` and `Decoder.Parallel` also control these workers.
-   - The decoder still accepts older binary-range and Zstd-based `.babe` files, including mixed range/Zstd `BRC1` files. Older programs do not support the new byte-range method (16).
+   - The decoder still accepts older binary-range and Zstd-based `.babe` files, including mixed range/Zstd `BRC1` files. Older programs do not support the new byte-range method (16) or the lossless color flag.
 
 9. **Decoding**
    - Decode reverses the process:
      - Decompress range-coded or Zstd streams and restore the block parameters.
      - Reconstruct each block’s two tones and pattern.
-     - Stitch all blocks into a full‑resolution image in YUV space and convert back to RGB.
+     - Stitch the blocks into a full-resolution image and restore RGB using the color transform indicated in the header.
    - PNG export uses standard lossless compression for faster writing. Compared with maximum PNG compression, files can be slightly larger; decoded pixels are identical.
 
 The format remains experimental. See [the BRC1 layout](docs/BRC1.md) for the container specification.
@@ -84,7 +84,8 @@ Produces:
 input.babe
 ```
 
-Default quality is **70**. Lower quality prioritizes smaller files.
+Default quality is **70**. Lower quality prioritizes smaller files; **100**
+uses lossless mode for opaque 8-bit RGB images.
 
 Specify a custom quality (0–100):
 
@@ -138,7 +139,8 @@ In-memory BABE encoder/decoder timings and size tradeoffs are recorded in [the s
 
 Measured on an Apple M3 with Go 1.27.3 using the local `benchmark.jpg`
 (5152×7728). Times are medians of three runs with two operations each, after
-warm-up. The same decoded RGBA image is fed to both encoders; image loading and
+warm-up. The BABE quality-100 measurements were refreshed after introducing
+lossless mode; other rows are from the earlier build. The same decoded RGBA image is fed to both encoders; image loading and
 file I/O are excluded. Encoder buffers and BABE decoder buffers are reused.
 JPEG decoding returns Go's native YCbCr image, while BABE returns RGBA. Results
 vary with the image and machine load; the source image is itself a JPEG.
@@ -159,14 +161,14 @@ conditions:
 
 | Quality | JPEG encode | BABE encode | JPEG decode | BABE decode | JPEG size | BABE size |
 |---:|---:|---:|---:|---:|---:|---:|
-| 100 | 0.961 s | 0.321 s | 0.799 s | 0.455 s | 37.66 MB | 37.14 MB |
+| 100 | 0.961 s | 0.426 s | 0.799 s | 0.449 s | 37.66 MB | 44.09 MB |
 | 80 | 0.786 s | 0.278 s | 0.420 s | 0.296 s | 13.98 MB | 22.69 MB |
 | 50 | 0.533 s | 0.354 s | 0.242 s | 0.336 s | 5.30 MB | 17.47 MB |
 | 10 | 0.417 s | 0.249 s | 0.155 s | 0.135 s | 0.97 MB | 7.47 MB |
 | 0 | 0.398 s | 0.280 s | 0.148 s | 0.217 s | 0.67 MB | 6.48 MB |
 
 Go's JPEG encoder clamps quality 0 to **1**. Equal quality numbers do not mean
-equal visual quality or equal file size; BABE quality 100 is still lossy. MB is
+equal visual quality or equal file size; BABE quality 100 is lossless. MB is
 1,000,000 bytes. This is one image, not a claim about every image or JPEG codec.
 
 CPU and memory were measured separately on the same image, with each codec and
@@ -177,7 +179,7 @@ core). Values are medians of three processes with two warmed operations each.
 | Quality | Codec | CPU encode s | CPU decode s | Encode cores | Decode cores |
 |---:|---|---:|---:|---:|---:|
 | 100 | JPEG | 0.918 | 0.778 | 1.00 | 0.95 |
-| 100 | BABE | 0.680 | 0.762 | 2.14 | 1.72 |
+| 100 | BABE | 0.857 | 0.813 | 1.94 | 1.87 |
 | 80 | JPEG | 0.765 | 0.454 | 0.98 | 0.95 |
 | 80 | BABE | 0.669 | 0.591 | 2.25 | 2.12 |
 | 50 | JPEG | 0.531 | 0.244 | 0.99 | 1.00 |
@@ -194,7 +196,7 @@ entire process, in MiB (1 MiB = 1,048,576 bytes):
 | Quality | Codec | Alloc encode MiB/op | Alloc decode MiB/op | Peak RSS encode MiB | Peak RSS decode MiB |
 |---:|---|---:|---:|---:|---:|
 | 100 | JPEG | 0.00 | 56.98 | 443.7 | 156.2 |
-| 100 | BABE | 0.03 | 0.00 | 730.8 | 376.4 |
+| 100 | BABE | 0.03 | 0.00 | 762.2 | 390.5 |
 | 80 | JPEG | 0.00 | 56.98 | 443.5 | 133.7 |
 | 80 | BABE | 0.03 | 0.00 | 660.6 | 345.3 |
 | 50 | JPEG | 0.00 | 56.97 | 443.4 | 125.4 |

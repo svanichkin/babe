@@ -20,7 +20,7 @@ func BenchmarkImageCodec(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		for _, q := range []int{10, 70, 80} {
+		for _, q := range []int{10, 70, 80, 99, 100} {
 			b.Run(fmt.Sprintf("%s/Q%d", file, q), func(b *testing.B) {
 				e, d := NewEncoder(), NewDecoder()
 				defer d.zdec.Close()

@@ -66,9 +66,10 @@ var encQuality int = 70
 
 // channel presence flags for the header; at least Y must be set.
 const (
-	channelFlagY  = 1 << 0
-	channelFlagCb = 1 << 1
-	channelFlagCr = 1 << 2
+	channelFlagY        = 1 << 0
+	channelFlagCb       = 1 << 1
+	channelFlagCr       = 1 << 2
+	channelFlagLossless = 1 << 3
 )
 
 // encodeBW toggles grayscale mode; when true, only the Y channel is stored.

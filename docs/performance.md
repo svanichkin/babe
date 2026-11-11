@@ -7,7 +7,8 @@ are warmed up. `Cycle` times an actual encode followed immediately by a decode;
 it is not the sum of two independently timed measurements. Postfilter is off.
 The local samples are 800x572 (`1.jpg`) and 1920x1080 (`3.jpg`).
 
-Before: commit `6978b1b`, adaptive binary order-0 range coding. After: byte-symbol
+These historical before/after results compare commit `6978b1b` and v0.2.1,
+before q100 lossless mode was introduced. Before: adaptive binary order-0 range coding. After: byte-symbol
 range coding with static 32 KiB models, constant/raw block handling, exact
 division-free quantization and 2x2 block classification, specialized structural
 validation, and separate decode planes with parallel RGB conversion at quality
@@ -67,6 +68,18 @@ Across these six cases, size changes range from -0.22% to +2.63%. Separate
 planes add up to three bytes of reusable decoder storage per pixel for the
 2x2 path, avoiding concurrent writes to shared RGBA cache lines.
 
+After adding lossless q100, the q80 path on `3.jpg` was checked separately in
+three alternating old/new runs of ten operations each. Median encode was
+13.57 → 13.64 ms and decode 13.67 → 13.63 ms; the file size remained 1,056,745
+bytes. These small differences are within run-to-run variation.
+
+The new lossless q100 on the same `3.jpg` produced 1,901,324 bytes. Median
+encode was 25.65 ms, decode 20.82 ms, and the measured encode/decode cycle
+46.00 ms, each across three runs of ten warmed operations. The lossy q99 file
+was 1,389,521 bytes; the lossless file is 36.8% larger in this example. Their
+decoded pixels differ: q100 matches the 8-bit RGB input exactly. These are
+measurements of the image codec only, not file I/O or source-image loading.
+
 ## Entropy coder alone
 
 The same uncompressed streams extracted from `3.jpg` are processed serially by
@@ -92,8 +105,9 @@ and codec. The input is the same local 5152×7728 `benchmark.jpg` used in the
 time comparison. Measurements were made on Apple M3, darwin/arm64, Go 1.27.3,
 `GOMAXPROCS=8`, using three separate processes per case with two timed, warmed
 operations in each. Execution order was shuffled. The tables use medians of
-the three process results; [all individual measurements](benchmarks/resources-apple-m3.json)
-are included.
+the three process results. The [original individual measurements](benchmarks/resources-apple-m3.json)
+are retained; the README's q100 BABE row uses the separate
+[lossless q100 measurements](benchmarks/resources-lossless100-apple-m3.json).
 
 CPU time is the change in process user plus system CPU time, including all Go
 threads and any GC work during the interval. Cores is CPU time divided by wall
@@ -144,7 +158,9 @@ alongside builds, tests or other benchmarks. Absolute timings depend on load.
 The README retains the JPEG/BABE/QOI comparison on `benchmark.jpg`, quality 80
 for JPEG and BABE, QOI lossless, and adds JPEG/BABE at qualities 0, 10, 50, 80
 and 100. Those numbers are medians of three runs with two operations per run
-using `BenchmarkQualityComparison`; JPEG quality 0 is clamped to 1. The table
+using `BenchmarkQualityComparison`; JPEG quality 0 is clamped to 1. The BABE
+q100 speed and resource numbers were remeasured separately with lossless mode;
+other rows are from v0.2.1. The table
 reports encode and decode medians separately. A previous single-run README
 measurement reported 8.638 s for JPEG encoding and 16.948 s for QOI encoding,
 despite neither codec receiving comparable optimization here. That run cannot

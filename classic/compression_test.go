@@ -65,6 +65,9 @@ func TestCompressionRoundTrip(t *testing.T) {
 	sawRange := false
 	for _, q := range []int{0, 10, 19, 20, 39, 40, 59, 60, 70, 79, 80, 89, 90, 100} {
 		for _, bw := range []bool{false, true} {
+			if q == 100 && bw {
+				continue // Converting this color image to grayscale would be lossy.
+			}
 			t.Run(fmt.Sprintf("q%d_bw%v", q, bw), func(t *testing.T) {
 				e.Parallel = true
 				encoded, err := e.Encode(img, q, bw)
@@ -262,6 +265,11 @@ func FuzzDecodeContainer(f *testing.F) {
 		f.Fatal(err)
 	}
 	f.Add(packed)
+	lossless, err := e.Encode(compressionTestImage(), 100, false)
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(bytes.Clone(lossless))
 	f.Add([]byte(packedMagic))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		// Keep mutation-driven memory use small while exercising actual decoding.

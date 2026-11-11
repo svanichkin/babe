@@ -11,8 +11,9 @@ encoder/decoder's `Parallel` field to false also disables entropy workers.
 
 The decoder recognizes both BRC1 and previous Zstd-based files, including mixed
 range/Zstd containers produced by the earlier exhaustive encoder. Earlier BRC1
-decoders do not support method 16; Zstd-only decoders cannot read BRC1 at all.
-The reconstructed block payload retains its previous layout and pixel values.
+decoders do not support method 16 or the new lossless color flag; Zstd-only
+decoders cannot read BRC1 at all. Files produced by earlier encoders remain
+readable, with their original decoded pixel values.
 
 Fixed-width multibyte integers are unsigned, big-endian. Block pattern streams
 are MSB-first. Method 16 uses unsigned varints and a bitmap as specified below.
@@ -24,7 +25,11 @@ are MSB-first. Method 16 uses unsigned varints and a bitmap as specified below.
 | Checksum | 4 | CRC32/IEEE of the complete reconstructed original payload |
 | Channel records | variable | Y, then Cb and Cr if their mask bits are set |
 
-Channel mask bits 0, 1, 2 indicate Y, Cb, Cr respectively. Y is required.
+Channel mask bits 0, 1, 2 indicate the three color streams respectively. The
+first is required. Bit 3 indicates the reversible lossless RGB transform below;
+without it the streams use the original Y/Cb/Cr interpretation. Other bits are
+invalid. Lossless mode requires small blocks of 1, macroblocks of 2, and either
+all three channels or the first channel alone (for an already grayscale input).
 Each channel record begins with a 4-byte block count, followed by five streams:
 
 1. Macro block size flags (one bit per macro group).
@@ -99,7 +104,7 @@ counts and truncated streams are errors. Image dimensions are limited to
 
 ## Quantization
 
-Quantization happens before entropy coding, so the decoder needs no quality or
+At qualities 0–99 quantization happens before entropy coding, so the decoder needs no quality or
 quantization setting. The encoder rounds each block's final levels to the nearest
 multiple of the step, with half steps rounded upward and values clamped to 255:
 
@@ -108,10 +113,28 @@ multiple of the step, with half steps rounded upward and values clamped to 255:
 | 0–19 | 4 | 8 |
 | 20–59 | 2 | 4 |
 | 60–89 | 1 | 2 |
-| 90–100 | 1 | 1 |
+| 90–99 | 1 | 1 |
 
 Thresholds and block subdivision decisions use the original input precision.
 If both rounded levels are equal, the block becomes solid; no pattern bits or
 background entry are emitted. BW stores only Y. At qualities below 90 the decoded
 image can differ from previous builds at the same numeric quality. Entropy coding
 and PNG compression add no further loss.
+
+## Lossless quality 100
+
+This mode uses the same BRC1 channel streams, block flags, masks, delta levels
+and entropy compression as the lossy modes. Channel mask bit 3 selects an
+invertible color transform: the three channels are `G`, `B-G+128` and
+`R-G+128`, with arithmetic modulo 256. Decode uses `G`, `B=G+Cb-128` and
+`R=G+Cr-128`, also modulo 256. For an already grayscale image, the single G
+channel can be stored and replicated to RGB.
+
+There is no level quantization. A 2×2 macroblock is encoded as one solid or
+two-tone block only if its channel samples contain at most two distinct byte
+values. Otherwise it is subdivided into four exact 1×1 blocks. Thus every
+decoded 8-bit RGB sample equals the input RGB sample. The alpha channel is not
+encoded: transparent images and 16-bit input images are rejected at q100. BW
+mode rejects a color image at q100 because converting it to grayscale is lossy.
+JPEG sources are compared after decoding to 8-bit RGB; original JPEG bytes,
+metadata and precision beyond those RGB bytes are not preserved.

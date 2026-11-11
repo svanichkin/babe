@@ -17,13 +17,23 @@ def main():
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--iterations", type=int, default=2)
     parser.add_argument("--output", help="write raw measurements as JSON")
+    parser.add_argument("--qualities", default="100,80,50,10,0", help="comma-separated JPEG/BABE qualities")
+    parser.add_argument("--codecs", default="jpeg,babe,qoi", help="comma-separated codec names")
     args = parser.parse_args()
     if args.runs < 1 or args.iterations < 1:
         parser.error("runs and iterations must be positive")
     binary = str(Path(args.binary).resolve())
     image = str(Path(args.input).resolve())
-    cases = [(codec, quality) for quality in (100, 80, 50, 10, 0) for codec in ("jpeg", "babe")]
-    cases.append(("qoi", 80))
+    try:
+        qualities = [int(q) for q in args.qualities.split(",")]
+    except ValueError:
+        parser.error("qualities must be comma-separated integers")
+    codecs = args.codecs.split(",")
+    if not qualities or any(q < 0 or q > 100 for q in qualities) or any(c not in ("jpeg", "babe", "qoi") for c in codecs):
+        parser.error("invalid quality or codec")
+    cases = [(codec, quality) for quality in qualities for codec in ("jpeg", "babe") if codec in codecs]
+    if "qoi" in codecs:
+        cases.append(("qoi", 80))
     measurements = []
     with tempfile.TemporaryDirectory(prefix="babe-resource-") as directory:
         bitstreams = {}

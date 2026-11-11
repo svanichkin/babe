@@ -127,7 +127,7 @@ func TestQuadPlanesMatchOriginalDecoder(t *testing.T) {
 				img.SetRGBA(x, y, color.RGBA{byte(x*7 + y*3), byte(x*3 + y*5), byte(x ^ y), 255})
 			}
 		}
-		for _, q := range []int{80, 99, 100} {
+		for _, q := range []int{80, 99} {
 			for _, bw := range []bool{false, true} {
 				encoded, err := e.Encode(img, q, bw)
 				if err != nil {

@@ -50,7 +50,7 @@ func decodeValidatedQuadPlane(data, plane []byte, w, h int) {
 	}
 }
 
-func (d *Decoder) decodeQuadImage(segments [3][]byte, w, h int) {
+func (d *Decoder) decodeQuadImage(segments [3][]byte, w, h int, lossless bool) {
 	n := w * h
 	scratch := [3]*decoderChannelScratch{&d.y, &d.cb, &d.cr}
 	var planes [3][]byte
@@ -81,6 +81,20 @@ func (d *Decoder) decodeQuadImage(segments [3][]byte, w, h int) {
 			cr = planes[2][start:end]
 		}
 		pix := d.dst.Pix[start*4 : end*4]
+		if lossless {
+			for j, value := range y {
+				r, b := value, value
+				if cb != nil {
+					b += cb[j] - 128
+				}
+				if cr != nil {
+					r += cr[j] - 128
+				}
+				p := pix[j*4 : j*4+4]
+				p[0], p[1], p[2], p[3] = r, value, b, 255
+			}
+			return
+		}
 		for j, value := range y {
 			Y, Cb, Cr := int32(value), int32(0), int32(0)
 			if cb != nil {

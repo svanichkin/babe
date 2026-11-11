@@ -15,9 +15,10 @@ type Encoder struct {
 	// Set to false to reduce goroutine overhead and allocations.
 	Parallel bool
 
-	yPlane  []uint8
-	cbPlane []uint8
-	crPlane []uint8
+	yPlane      []uint8
+	cbPlane     []uint8
+	crPlane     []uint8
+	losslessRGB *image.RGBA
 
 	raw  bytes.Buffer
 	bw   *bufio.Writer
@@ -148,6 +149,26 @@ func (e *Encoder) encodeChannelReuse(plane []uint8, stride, w4, h4, fullW, fullH
 				v1 := plane[idx0+1]
 				v2 := plane[idx2]
 				v3 := plane[idx2+1]
+
+				if encQuality == 100 {
+					fg, bg, bits, exact := exactQuad(v0, v1, v2, v3)
+					sizeW.writeBit(exact)
+					if exact {
+						pattern := fg != bg
+						scratch.fgVals = append(scratch.fgVals, fg)
+						if pattern {
+							patternW.writeBits(bits, 4)
+							scratch.bgVals = append(scratch.bgVals, bg)
+						}
+						typeW.writeBit(pattern)
+						blockCount++
+					} else {
+						scratch.fgVals = append(scratch.fgVals, v0, v1, v2, v3)
+						typeW.writeBits(0, 4)
+						blockCount += 4
+					}
+					continue
+				}
 
 				minV := min(v0, v1, v2, v3)
 				maxV := max(v0, v1, v2, v3)
@@ -312,7 +333,11 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 	e.ch[chCr].quantStep = cStep
 
 	e.ensurePlanes(w, h)
-	if e.Parallel {
+	if encQuality == 100 {
+		if err := e.extractLosslessPlanes(img, bwmode); err != nil {
+			return nil, err
+		}
+	} else if e.Parallel {
 		extractYCbCrPlanesInto(img, e.yPlane, e.cbPlane, e.crPlane)
 	} else {
 		extractYCbCrPlanesIntoSerial(img, e.yPlane, e.cbPlane, e.crPlane)
@@ -321,6 +346,9 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 	// Decide which channels will be stored. Y is always present; Cb/Cr
 	// may be omitted in grayscale mode.
 	channelsMask := byte(channelFlagY)
+	if encQuality == 100 {
+		channelsMask |= channelFlagLossless
+	}
 	if !encodeBW {
 		channelsMask |= channelFlagCb | channelFlagCr
 	}

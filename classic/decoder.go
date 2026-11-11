@@ -894,7 +894,7 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 		}
 	}
 	if smallBlock == 1 && macroBlock == 2 {
-		d.decodeQuadImage([3][]byte{ySeg, cbSeg, crSeg}, imgW, imgH)
+		d.decodeQuadImage([3][]byte{ySeg, cbSeg, crSeg}, imgW, imgH, channelsMask&channelFlagLossless != 0)
 		// The existing postfilter is a no-op for 1x1 small blocks.
 		return dst, nil
 	}

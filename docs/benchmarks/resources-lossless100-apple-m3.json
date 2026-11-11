@@ -1,0 +1,74 @@
+[
+  {
+    "codec": "babe",
+    "operation": "decode",
+    "quality": 100,
+    "iterations": 2,
+    "file_bytes": 44085837,
+    "wall_seconds_per_op": 0.4372011875,
+    "cpu_seconds_per_op": 0.819323,
+    "allocated_bytes_per_op": 3664,
+    "peak_rss_bytes": 409370624,
+    "run": 1
+  },
+  {
+    "codec": "babe",
+    "operation": "encode",
+    "quality": 100,
+    "iterations": 2,
+    "file_bytes": 44085837,
+    "wall_seconds_per_op": 0.475273792,
+    "cpu_seconds_per_op": 0.8934970000000001,
+    "allocated_bytes_per_op": 29056,
+    "peak_rss_bytes": 869580800,
+    "run": 1
+  },
+  {
+    "codec": "babe",
+    "operation": "encode",
+    "quality": 100,
+    "iterations": 2,
+    "file_bytes": 44085837,
+    "wall_seconds_per_op": 0.4368892085,
+    "cpu_seconds_per_op": 0.8537275,
+    "allocated_bytes_per_op": 28520,
+    "peak_rss_bytes": 799227904,
+    "run": 2
+  },
+  {
+    "codec": "babe",
+    "operation": "decode",
+    "quality": 100,
+    "iterations": 2,
+    "file_bytes": 44085837,
+    "wall_seconds_per_op": 0.4465818125,
+    "cpu_seconds_per_op": 0.8129500000000001,
+    "allocated_bytes_per_op": 7108,
+    "peak_rss_bytes": 409468928,
+    "run": 2
+  },
+  {
+    "codec": "babe",
+    "operation": "encode",
+    "quality": 100,
+    "iterations": 2,
+    "file_bytes": 44085837,
+    "wall_seconds_per_op": 0.440626271,
+    "cpu_seconds_per_op": 0.8565765000000001,
+    "allocated_bytes_per_op": 29240,
+    "peak_rss_bytes": 798605312,
+    "run": 3
+  },
+  {
+    "codec": "babe",
+    "operation": "decode",
+    "quality": 100,
+    "iterations": 2,
+    "file_bytes": 44085837,
+    "wall_seconds_per_op": 0.429670104,
+    "cpu_seconds_per_op": 0.8083674999999999,
+    "allocated_bytes_per_op": 4200,
+    "peak_rss_bytes": 409436160,
+    "run": 3
+  }
+]
