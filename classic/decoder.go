@@ -21,7 +21,7 @@ type decoderChannelScratch struct {
 // It is not safe for concurrent use. The returned *image.RGBA is reused and will
 // be overwritten on the next Decode call.
 type Decoder struct {
-	// Parallel enables internal goroutines (per-channel decode and RGB conversion).
+	// Parallel enables entropy workers, per-channel decoding and RGB conversion.
 	// Set to false to reduce goroutine overhead and allocations.
 	Parallel bool
 
@@ -789,11 +789,14 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	if d.zdec == nil {
 		d.zdec = mustNewZstdDecoder()
 	}
-	payload, err := d.zdec.DecodeAll(compData, d.payload[:0])
+	payload, err := decompressPayload(compData, d.payload[:0], d.zdec, d.Parallel)
 	if err != nil {
-		return nil, fmt.Errorf("zstd decode: %w", err)
+		return nil, fmt.Errorf("decode payload: %w", err)
 	}
 	d.payload = payload
+	if err := validatePayload(payload); err != nil {
+		return nil, err
+	}
 
 	if len(payload) < len(codec) {
 		return nil, fmt.Errorf("read header: short magic")
@@ -1549,7 +1552,7 @@ func mustNewZstdEncoder() *zstd.Encoder {
 	enc, err := zstd.NewWriter(
 		nil,
 		zstd.WithEncoderConcurrency(1),
-		zstd.WithEncoderLevel(zstd.SpeedBetterCompression),
+		zstd.WithEncoderLevel(zstd.SpeedBestCompression),
 		zstd.WithLowerEncoderMem(true),
 	)
 	if err != nil {
@@ -1563,6 +1566,7 @@ func mustNewZstdDecoder() *zstd.Decoder {
 		nil,
 		zstd.WithDecoderConcurrency(1),
 		zstd.WithDecoderLowmem(true),
+		zstd.WithDecoderMaxMemory(maxPayloadSize),
 	)
 	if err != nil {
 		panic(err)

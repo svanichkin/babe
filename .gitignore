@@ -2,6 +2,7 @@
 # https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
 #
 # Binaries for programs and plugins
+/Babe
 *.exe
 *.exe~
 *.dll
@@ -10,6 +11,8 @@
 *.jpg
 *.png
 *.babe
+!classic/testdata/*.babe
+!classic/testdata/*.png
 *.jpeg
 *._
 *.rsls

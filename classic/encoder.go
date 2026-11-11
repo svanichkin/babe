@@ -8,12 +8,10 @@ import (
 	"image"
 	"io"
 	"sync"
-
-	"github.com/klauspost/compress/zstd"
 )
 
 type Encoder struct {
-	// Parallel enables internal goroutines (plane extraction and per-channel encode).
+	// Parallel enables plane extraction, per-channel encoding and entropy workers.
 	// Set to false to reduce goroutine overhead and allocations.
 	Parallel bool
 
@@ -27,14 +25,13 @@ type Encoder struct {
 
 	ch [3]encoderChannelScratch
 
-	zenc *zstd.Encoder
+	packer payloadPacker
 }
 
 func NewEncoder() *Encoder {
 	e := &Encoder{}
 	e.Parallel = true
 	e.bw = bufio.NewWriter(&e.raw)
-	e.zenc = mustNewZstdEncoder()
 	return e
 }
 
@@ -52,6 +49,7 @@ func (e *Encoder) ensurePlanes(w, h int) {
 }
 
 func (e *Encoder) encodeChannelReuse(plane []uint8, stride, w4, h4, fullW, fullH int, useMacro bool, scratch *encoderChannelScratch) (uint32, []byte, []byte, []byte, []uint8, []uint8, error) {
+	step := scratch.quantStep
 	// macro-block decision bits (only for main fullW x fullH area)
 	// Precompute an upper bound on the total block count so we can
 	// preallocate FG/BG slices and avoid repeated growth.
@@ -225,11 +223,12 @@ func (e *Encoder) encodeChannelReuse(plane []uint8, stride, w4, h4, fullW, fullH
 						bgCnt++
 					}
 
-					fg, bg := avg, avg
+					fg := quantizeLevel(avg, step)
+					bg := fg
 					isPattern := false
 					if fgCnt != 0 && bgCnt != 0 {
-						fg = uint8(fgSum / uint64(fgCnt))
-						bg = uint8(bgSum / uint64(bgCnt))
+						fg = quantizeLevel(uint8(fgSum/uint64(fgCnt)), step)
+						bg = quantizeLevel(uint8(bgSum/uint64(bgCnt)), step)
 						isPattern = fg != bg
 					}
 
@@ -242,7 +241,7 @@ func (e *Encoder) encodeChannelReuse(plane []uint8, stride, w4, h4, fullW, fullH
 					blockCount++
 				} else {
 					// 4 solid 1x1 blocks, no pattern bits, type bits are all 0.
-					scratch.fgVals = append(scratch.fgVals, v0, v1, v2, v3)
+					scratch.fgVals = append(scratch.fgVals, quantizeLevel(v0, step), quantizeLevel(v1, step), quantizeLevel(v2, step), quantizeLevel(v3, step))
 					typeW.writeBits(0, 4)
 					blockCount += 4
 				}
@@ -253,7 +252,7 @@ func (e *Encoder) encodeChannelReuse(plane []uint8, stride, w4, h4, fullW, fullH
 		for my := 0; my < fullH; my++ {
 			for mx := fullW; mx < w4; mx++ {
 				v := plane[my*stride+mx]
-				scratch.fgVals = append(scratch.fgVals, v)
+				scratch.fgVals = append(scratch.fgVals, quantizeLevel(v, step))
 				typeW.writeBit(false)
 				blockCount++
 			}
@@ -264,7 +263,7 @@ func (e *Encoder) encodeChannelReuse(plane []uint8, stride, w4, h4, fullW, fullH
 			row := my * stride
 			for mx := 0; mx < w4; mx++ {
 				v := plane[row+mx]
-				scratch.fgVals = append(scratch.fgVals, v)
+				scratch.fgVals = append(scratch.fgVals, quantizeLevel(v, step))
 				typeW.writeBit(false)
 				blockCount++
 			}
@@ -283,7 +282,7 @@ func (e *Encoder) encodeChannelReuse(plane []uint8, stride, w4, h4, fullW, fullH
 			useBig := useMacro && canUseBigBlockChannel(plane, stride, height, mx, my, spread)
 			sizeW.writeBit(useBig)
 			if useBig {
-				fg, bg, isPattern, err := encodeBlockPlane(plane, stride, height, mx, my, macroBlock, macroBlock, &patternW)
+				fg, bg, isPattern, err := encodeBlockPlane(plane, stride, height, mx, my, macroBlock, macroBlock, step, &patternW)
 				if err != nil {
 					return 0, nil, nil, nil, nil, nil, err
 				}
@@ -303,7 +302,7 @@ func (e *Encoder) encodeChannelReuse(plane []uint8, stride, w4, h4, fullW, fullH
 						if smallBlock > 1 {
 							pw = &patternW
 						}
-						fg, bg, isPattern, err := encodeBlockPlane(plane, stride, height, xx, yy, smallBlock, smallBlock, pw)
+						fg, bg, isPattern, err := encodeBlockPlane(plane, stride, height, xx, yy, smallBlock, smallBlock, step, pw)
 						if err != nil {
 							return 0, nil, nil, nil, nil, nil, err
 						}
@@ -326,7 +325,7 @@ func (e *Encoder) encodeChannelReuse(plane []uint8, stride, w4, h4, fullW, fullH
 			if smallBlock > 1 {
 				pw = &patternW
 			}
-			fg, bg, isPattern, err := encodeBlockPlane(plane, stride, height, mx, my, smallBlock, smallBlock, pw)
+			fg, bg, isPattern, err := encodeBlockPlane(plane, stride, height, mx, my, smallBlock, smallBlock, step, pw)
 			if err != nil {
 				return 0, nil, nil, nil, nil, nil, err
 			}
@@ -345,7 +344,7 @@ func (e *Encoder) encodeChannelReuse(plane []uint8, stride, w4, h4, fullW, fullH
 			if smallBlock > 1 {
 				pw = &patternW
 			}
-			fg, bg, isPattern, err := encodeBlockPlane(plane, stride, height, mx, my, smallBlock, smallBlock, pw)
+			fg, bg, isPattern, err := encodeBlockPlane(plane, stride, height, mx, my, smallBlock, smallBlock, step, pw)
 			if err != nil {
 				return 0, nil, nil, nil, nil, nil, err
 			}
@@ -374,13 +373,16 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 	if err := setBlocksForQuality(quality); err != nil {
 		return nil, err
 	}
-	if e.zenc == nil {
-		e.zenc = mustNewZstdEncoder()
+	b := img.Bounds()
+	w, h := b.Dx(), b.Dy()
+	if err := checkImageSize(w, h); err != nil {
+		return nil, err
 	}
 
-	b := img.Bounds()
-	w := b.Dx()
-	h := b.Dy()
+	yStep, cStep := quantStepsForQuality(encQuality)
+	e.ch[chY].quantStep = yStep
+	e.ch[chCb].quantStep = cStep
+	e.ch[chCr].quantStep = cStep
 
 	e.ensurePlanes(w, h)
 	if e.Parallel {
@@ -552,7 +554,11 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 		return nil, err
 	}
 
-	e.comp = e.zenc.EncodeAll(e.raw.Bytes(), e.comp[:0])
+	comp, err := e.packer.compress(e.raw.Bytes(), e.comp[:0], e.Parallel)
+	if err != nil {
+		return nil, err
+	}
+	e.comp = comp
 	return e.comp, nil
 }
 

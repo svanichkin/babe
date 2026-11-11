@@ -1021,7 +1021,7 @@ func writePatternComposite(pw *bitWriter, bits uint64, bw, bh int) {
 	pw.writeBits(bits, uint8(bw*bh))
 }
 
-func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh int, pw *bitWriter) (uint8, uint8, bool, error) {
+func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh, quantStep int, pw *bitWriter) (uint8, uint8, bool, error) {
 	total := bw * bh
 	if total <= 0 {
 		return 0, 0, false, fmt.Errorf("invalid block size")
@@ -1035,7 +1035,7 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh int, pw *bit
 		if idx < 0 || idx >= len(plane) {
 			return 0, 0, false, fmt.Errorf("encodeBlockPlane: index out of range")
 		}
-		v := plane[idx]
+		v := quantizeLevel(plane[idx], quantStep)
 		return v, v, false, nil
 	}
 
@@ -1108,10 +1108,11 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh int, pw *bit
 		}
 
 		if fgCnt == 0 || bgCnt == 0 {
-			return avg, avg, false, nil
+			v := quantizeLevel(avg, quantStep)
+			return v, v, false, nil
 		}
-		fg := uint8(fgSum / uint64(fgCnt))
-		bg := uint8(bgSum / uint64(bgCnt))
+		fg := quantizeLevel(uint8(fgSum/uint64(fgCnt)), quantStep)
+		bg := quantizeLevel(uint8(bgSum/uint64(bgCnt)), quantStep)
 		if fg == bg {
 			return fg, bg, false, nil
 		}
@@ -1158,10 +1159,11 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh int, pw *bit
 
 	avg := uint8(sum / uint64(total))
 	if fgCnt == 0 || bgCnt == 0 {
-		return avg, avg, false, nil
+		v := quantizeLevel(avg, quantStep)
+		return v, v, false, nil
 	}
-	fg := uint8(fgSum / uint64(fgCnt))
-	bg := uint8(bgSum / uint64(bgCnt))
+	fg := quantizeLevel(uint8(fgSum/uint64(fgCnt)), quantStep)
+	bg := quantizeLevel(uint8(bgSum/uint64(bgCnt)), quantStep)
 	if fg == bg {
 		return fg, bg, false, nil
 	}
@@ -1170,6 +1172,7 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh int, pw *bit
 }
 
 type encoderChannelScratch struct {
+	quantStep  int
 	sizeBuf    bytes.Buffer
 	typeBuf    bytes.Buffer
 	patternBuf bytes.Buffer

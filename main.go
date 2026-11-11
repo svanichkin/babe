@@ -144,6 +144,7 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool) error {
 }
 
 func decodeBabe(inPath, outPath string, splitChannels, postfilter bool) error {
+	pngEncoder := png.Encoder{CompressionLevel: png.DefaultCompression}
 
 	in, err := os.Open(inPath)
 	if err != nil {
@@ -179,7 +180,7 @@ func decodeBabe(inPath, outPath string, splitChannels, postfilter bool) error {
 		}
 		defer out.Close()
 
-		if err := png.Encode(out, dec); err != nil {
+		if err := pngEncoder.Encode(out, dec); err != nil {
 			return err
 		}
 
@@ -224,7 +225,7 @@ func decodeBabe(inPath, outPath string, splitChannels, postfilter bool) error {
 	if err != nil {
 		return err
 	}
-	if err := png.Encode(yFile, yImg); err != nil {
+	if err := pngEncoder.Encode(yFile, yImg); err != nil {
 		yFile.Close()
 		return err
 	}
@@ -234,7 +235,7 @@ func decodeBabe(inPath, outPath string, splitChannels, postfilter bool) error {
 	if err != nil {
 		return err
 	}
-	if err := png.Encode(cbFile, cbImg); err != nil {
+	if err := pngEncoder.Encode(cbFile, cbImg); err != nil {
 		cbFile.Close()
 		return err
 	}
@@ -244,7 +245,7 @@ func decodeBabe(inPath, outPath string, splitChannels, postfilter bool) error {
 	if err != nil {
 		return err
 	}
-	if err := png.Encode(crFile, crImg); err != nil {
+	if err := pngEncoder.Encode(crFile, crImg); err != nil {
 		crFile.Close()
 		return err
 	}
