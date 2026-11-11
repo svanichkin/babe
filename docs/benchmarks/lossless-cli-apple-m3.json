@@ -1,0 +1,175 @@
+{
+  "source_dimensions": [
+    5152,
+    7728
+  ],
+  "rgb_sha256": "ead8f20ca8c77be96ece5ba93b760b18f0875bece9ef2b29598b90f7d5b0d20a",
+  "rounds": 3,
+  "threads": 8,
+  "versions": {
+    "cjxl": "cjxl v0.12.0 0.12.0 [_NEON_BF16_,NEON] {AppleClang 21.0.0.21000334}",
+    "djxl": "djxl v0.12.0 0.12.0 [_NEON_BF16_,NEON] {AppleClang 21.0.0.21000334}",
+    "cwebp": "1.6.0",
+    "dwebp": "1.6.0",
+    "oxipng": "oxipng 10.2.1"
+  },
+  "settings": {
+    "BABE": "quality 100, opaque RGB",
+    "QOI": "lossless",
+    "JPEG XL": "distance 0, effort 5",
+    "PNG + OxiPNG": "Go PNG default + oxipng -o2 --strip safe",
+    "WebP": "lossless, quality 75, method 4, multithreaded"
+  },
+  "measurements": [
+    {
+      "round": 1,
+      "codec": "QOI",
+      "encoded_bytes": 78982121,
+      "encode_wall_seconds": 1.3492363329860382,
+      "decode_wall_seconds": 0.46668758301530033,
+      "cycle_wall_seconds": 1.815999999991618,
+      "cycle_cpu_seconds": 1.7202009999999999,
+      "peak_process_rss_bytes": 332054528
+    },
+    {
+      "round": 1,
+      "codec": "JPEG XL",
+      "encoded_bytes": 42055905,
+      "encode_wall_seconds": 3.392025749955792,
+      "decode_wall_seconds": 1.1916033750167117,
+      "cycle_wall_seconds": 4.583706457982771,
+      "cycle_cpu_seconds": 27.497128999999997,
+      "peak_process_rss_bytes": 766083072
+    },
+    {
+      "round": 1,
+      "codec": "BABE",
+      "encoded_bytes": 44085837,
+      "encode_wall_seconds": 0.607508749992121,
+      "decode_wall_seconds": 1.0698566670180298,
+      "cycle_wall_seconds": 1.6774504170170985,
+      "cycle_cpu_seconds": 1.977838,
+      "peak_process_rss_bytes": 707608576
+    },
+    {
+      "round": 1,
+      "codec": "PNG + OxiPNG",
+      "encoded_bytes": 64767767,
+      "encode_wall_seconds": 12.46424408297753,
+      "decode_wall_seconds": 1.2312282499624416,
+      "cycle_wall_seconds": 13.695640042016748,
+      "cycle_cpu_seconds": 17.683554,
+      "peak_process_rss_bytes": 841400320
+    },
+    {
+      "round": 1,
+      "codec": "WebP",
+      "encoded_bytes": 47928424,
+      "encode_wall_seconds": 17.48362808400998,
+      "decode_wall_seconds": 0.669389582995791,
+      "cycle_wall_seconds": 18.153197332983837,
+      "cycle_cpu_seconds": 17.346385,
+      "peak_process_rss_bytes": 1075232768
+    },
+    {
+      "round": 2,
+      "codec": "PNG + OxiPNG",
+      "encoded_bytes": 64767767,
+      "encode_wall_seconds": 12.184808957972564,
+      "decode_wall_seconds": 1.2633196249953471,
+      "cycle_wall_seconds": 13.448347208031919,
+      "cycle_cpu_seconds": 17.604879,
+      "peak_process_rss_bytes": 970211328
+    },
+    {
+      "round": 2,
+      "codec": "WebP",
+      "encoded_bytes": 47928424,
+      "encode_wall_seconds": 15.480558208015282,
+      "decode_wall_seconds": 0.6440281249815598,
+      "cycle_wall_seconds": 16.1247574579902,
+      "cycle_cpu_seconds": 15.974677999999999,
+      "peak_process_rss_bytes": 1036926976
+    },
+    {
+      "round": 2,
+      "codec": "JPEG XL",
+      "encoded_bytes": 42055905,
+      "encode_wall_seconds": 3.472716042015236,
+      "decode_wall_seconds": 1.4497092500096187,
+      "cycle_wall_seconds": 4.922516874969006,
+      "cycle_cpu_seconds": 27.318548,
+      "peak_process_rss_bytes": 754106368
+    },
+    {
+      "round": 2,
+      "codec": "BABE",
+      "encoded_bytes": 44085837,
+      "encode_wall_seconds": 0.6360421670251526,
+      "decode_wall_seconds": 0.6544616669998504,
+      "cycle_wall_seconds": 1.2906057499931194,
+      "cycle_cpu_seconds": 2.027661,
+      "peak_process_rss_bytes": 739328000
+    },
+    {
+      "round": 2,
+      "codec": "QOI",
+      "encoded_bytes": 78982121,
+      "encode_wall_seconds": 1.2423555830027908,
+      "decode_wall_seconds": 0.47254566702758893,
+      "cycle_wall_seconds": 1.714987832994666,
+      "cycle_cpu_seconds": 1.663078,
+      "peak_process_rss_bytes": 331923456
+    },
+    {
+      "round": 3,
+      "codec": "BABE",
+      "encoded_bytes": 44085837,
+      "encode_wall_seconds": 0.5858515840373002,
+      "decode_wall_seconds": 0.6118521660100669,
+      "cycle_wall_seconds": 1.197802166978363,
+      "cycle_cpu_seconds": 1.96209,
+      "peak_process_rss_bytes": 785268736
+    },
+    {
+      "round": 3,
+      "codec": "JPEG XL",
+      "encoded_bytes": 42055905,
+      "encode_wall_seconds": 4.38897354202345,
+      "decode_wall_seconds": 1.8871215829858556,
+      "cycle_wall_seconds": 6.276278125005774,
+      "cycle_cpu_seconds": 28.404288,
+      "peak_process_rss_bytes": 650215424
+    },
+    {
+      "round": 3,
+      "codec": "PNG + OxiPNG",
+      "encoded_bytes": 64767767,
+      "encode_wall_seconds": 13.004134084039833,
+      "decode_wall_seconds": 1.1140711670159362,
+      "cycle_wall_seconds": 14.118411333009135,
+      "cycle_cpu_seconds": 18.206493000000002,
+      "peak_process_rss_bytes": 794771456
+    },
+    {
+      "round": 3,
+      "codec": "QOI",
+      "encoded_bytes": 78982121,
+      "encode_wall_seconds": 1.2848469580058008,
+      "decode_wall_seconds": 0.4922445000265725,
+      "cycle_wall_seconds": 1.777168000000529,
+      "cycle_cpu_seconds": 1.708356,
+      "peak_process_rss_bytes": 331874304
+    },
+    {
+      "round": 3,
+      "codec": "WebP",
+      "encoded_bytes": 47928424,
+      "encode_wall_seconds": 17.313139499980025,
+      "decode_wall_seconds": 0.6472337909508497,
+      "cycle_wall_seconds": 17.96052891697036,
+      "cycle_cpu_seconds": 16.986559999999997,
+      "peak_process_rss_bytes": 1066942464
+    }
+  ]
+}

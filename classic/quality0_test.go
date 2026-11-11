@@ -30,8 +30,8 @@ func TestQualityZeroSmallerOnExample(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(atZero)*2 >= sizeOne {
-		t.Fatalf("q0 = %d bytes, q1 = %d bytes: q0 did not achieve the expected reduction on the example", len(atZero), sizeOne)
+	if len(atZero) >= sizeOne || sizeOne > len(atZero)*2 {
+		t.Fatalf("q0 = %d bytes, q1 = %d bytes: unexpected jump on the example", len(atZero), sizeOne)
 	}
 	decoded, err := d.Decode(atZero, false)
 	if err != nil {

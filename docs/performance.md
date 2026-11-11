@@ -112,6 +112,50 @@ they do not represent the full image codec. Both paths allocate zero bytes per
 iteration after warm-up. Faster entropy coding exposes the remaining cost of
 block processing, validation and color conversion.
 
+## Lossless CLI comparison
+
+The [README table](../README.md#lossless-complete-encodedecode-cycle) uses the
+same 5152×7728 local `benchmark.jpg`, decoded once into an opaque 8-bit RGB PPM.
+BABE q100, QOI, JPEG XL, PNG + OxiPNG and WebP each encode this same PPM and
+then decode their output to RGB PPM. A SHA-256 comparison of dimensions and
+pixel bytes verifies every warm-up and measured cycle. JPEG source metadata and
+the original JPEG bitstream are not part of the comparison.
+
+There is one warm-up per format, followed by three complete measured rounds,
+each containing all five formats in a shuffled order. Each cycle starts new
+processes and includes reading and writing the files, process startup and RGB
+conversion. PNG encoding includes both the initial Go PNG encoding and the
+subsequent OxiPNG optimization. Full-cycle wall time is measured directly.
+CPU time is the sum of user and system time for all stages and threads; peak
+RSS is the highest individual process high-water mark among those sequential
+stages. The table gives medians across the three cycles, not a sum of medians.
+Unlike the earlier in-memory measurements, buffers are not reused across
+processes, and disk I/O is included.
+
+Apple M3, macOS, Go 1.27.3, GOMAXPROCS=8; libjxl 0.12.0 (`-d 0 -e 5`,
+8 threads), libwebp 1.6.0 (`-lossless -q 75 -m 4 -mt`), OxiPNG 10.2.1
+(`-o2 -t 8 --strip safe`). Encoder settings are not equivalent optimization
+levels. These are results for one image and machine; three runs reduce reliance
+on one timing but do not eliminate effects of system load.
+
+| Format | Full-cycle wall time, three rounds | CPU time, three rounds |
+|---|---|---|
+| BABE | 1.677, 1.291, 1.198 s | 1.978, 2.028, 1.962 s |
+| QOI | 1.816, 1.715, 1.777 s | 1.720, 1.663, 1.708 s |
+| JPEG XL | 4.584, 4.923, 6.276 s | 27.497, 27.319, 28.404 s |
+| PNG + OxiPNG | 13.696, 13.448, 14.118 s | 17.684, 17.605, 18.206 s |
+| WebP | 18.153, 16.125, 17.961 s | 17.346, 15.975, 16.987 s |
+
+The [individual results and exact settings](benchmarks/lossless-cli-apple-m3.json)
+include wall time, CPU, process peak RSS and encoded size for all 15 cycles.
+To reproduce on macOS or Linux with `cjxl`, `djxl`, `cwebp`, `dwebp` and
+`oxipng` installed:
+
+```sh
+go build -o /tmp/babe-losslessbench ./cmd/losslessbench
+python3 scripts/compare-lossless.py --input benchmark.jpg --helper /tmp/babe-losslessbench --rounds 3 --threads 8 --output /tmp/lossless-results.json
+```
+
 ## CPU and memory
 
 The [README](../README.md#benchmark-comparison) lists CPU time, average core
@@ -121,9 +165,9 @@ time comparison. Measurements were made on Apple M3, darwin/arm64, Go 1.27.3,
 `GOMAXPROCS=8`, using three separate processes per case with two timed, warmed
 operations in each. Execution order was shuffled. The tables use medians of
 the three process results. The [original individual measurements](benchmarks/resources-apple-m3.json)
-are retained; the README's BABE rows use the separate
-[lossless q100](benchmarks/resources-lossless100-apple-m3.json) and
-[retuned q0](benchmarks/resources-quality0-apple-m3.json) measurements.
+are retained; the README's BABE rows use the updated
+[quality-curve measurements](benchmarks/resources-qualitycurve-apple-m3.json),
+collected in separate sessions from JPEG and QOI.
 
 CPU time is the change in process user plus system CPU time, including all Go
 threads and any GC work during the interval. Cores is CPU time divided by wall
@@ -155,6 +199,53 @@ temporary directory, shuffles execution order and prints both tables. A JPEG
 quality of 0 is clamped to 1 by Go's encoder. Sample images are local and may
 be replaced, but results for different images are not directly comparable.
 
+## Quality scale
+
+The quality curve is an empirical encoder profile, not a per-image size target.
+It interpolates quantization, chroma simplification, luma smoothing and block
+thresholds. Fractional block thresholds are distributed deterministically by
+block position to avoid a whole image changing at one integer threshold. It
+does not repeatedly encode the image to seek a target size. The block and
+range-coded BRC1 format is unchanged, so the previous decoder can read files
+from the new scale. Opaque 8-bit RGB at quality 100 remains lossless.
+
+Four local input images were decoded to RGBA before measuring all 101 quality
+levels. Each image's straight-line reference runs from its actual q0 size to its
+actual q100 size. The mean and maximum errors below are absolute deviations
+from that reference divided by the q100–q0 size range, expressed in percentage
+points. They measure file-size progression, not visual quality. The included
+`samples/source.jpg` is the same file as `1.jpg`.
+
+| Image | Mean deviation before → after | Max deviation before → after | Largest adjacent size decrease before → after |
+|---|---:|---:|---:|
+| `1.jpg` | 10.70 → 3.72 pp | 30.44 → 9.66 pp | 34.10% → 0.27% |
+| `2.jpg` | 16.74 → 4.66 pp | 34.73 → 15.66 pp | 19.49% → none |
+| `3.jpg` | 12.04 → 2.34 pp | 28.98 → 7.38 pp | 26.29% → 0.22% |
+| `4.jpg` | 12.88 → 3.38 pp | 32.61 → 13.62 pp | 31.26% → 0.58% |
+
+The q0 size of `2.jpg` changed from 13,019 to 20,419 bytes: its 990×660
+dimensions are not multiples of four, and the new encoder retains edge pixels
+that the previous block layout omitted. `1.jpg`, `3.jpg` and `4.jpg` have
+dimensions divisible by four; their q0 files and all four q100 files matched the
+previous size and decoded output. Endpoints were also verified byte-for-byte
+for `1.jpg` q0 and both `1.jpg` and `2.jpg` q100.
+
+On these four images the largest decrease in adjacent lossy RGB PSNR was
+0.27 dB; the earlier scale had decreases of up to 11.77 dB, including an
+edge-cropping artifact. This is not proof of monotonic visual quality: PSNR is
+not perception, quantization is discrete, and different input content changes
+both compression and distortion. In a synthetic gradient test, lossless q100
+was 14,018 bytes while q99 was 35,159 bytes. Thus neither monotonic size nor a
+linear size/quality curve is guaranteed, especially at the lossless endpoint.
+
+Raw results: [previous scale](benchmarks/quality-curve-previous.csv) and
+[current scale](benchmarks/quality-curve-current.csv). The other three photos
+are local examples; replace them with your own to evaluate other content.
+
+```sh
+go run ./cmd/qualitycurve -input samples/source.jpg > /tmp/babe-quality.csv
+```
+
 ## Reproduction
 
 Sample JPEGs are local and are not tracked. Run from the repository root:
@@ -175,8 +266,8 @@ The README retains the JPEG/BABE/QOI comparison on `benchmark.jpg`, quality 80
 for JPEG and BABE, QOI lossless, and adds JPEG/BABE at qualities 0, 10, 50, 80
 and 100. Those numbers are medians of three runs with two operations per run
 using `BenchmarkQualityComparison`; JPEG quality 0 is clamped to 1. The BABE
-q100 and q0 speed and resource numbers were remeasured separately after their
-respective changes; other rows are from v0.2.1. The table
+speed and resource numbers were remeasured after the quality-curve changes;
+JPEG and QOI rows are from earlier sessions. The table
 reports encode and decode medians separately. A previous single-run README
 measurement reported 8.638 s for JPEG encoding and 16.948 s for QOI encoding,
 despite neither codec receiving comparable optimization here. That run cannot

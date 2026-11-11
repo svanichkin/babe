@@ -108,19 +108,15 @@ At qualities 0–99 quantization happens before entropy coding, so the decoder n
 quantization setting. The encoder rounds each block's final levels to the nearest
 multiple of the step, with half steps rounded upward and values clamped to 255:
 
-| Quality | Y step | Cb/Cr step |
-|---|---:|---:|
-| 0 | 32 | 16 |
-| 1–19 | 4 | 8 |
-| 20–59 | 2 | 4 |
-| 60–89 | 1 | 2 |
-| 90–99 | 1 | 1 |
-
-At quality 0 the encoder averages complete 2×2 groups in the luma plane,
-always selects the 8×8 macroblock in the main image area, and stores each
-chroma block as its quantized average. Image edges use the existing 4×4 blocks.
-These are encoder choices within the existing block format. For qualities
-1–99, thresholds and block subdivision decisions use the original input precision.
+At quality 0 the steps are 32 for luma and 16 for chroma. For qualities 1–99,
+the encoder interpolates integer steps and block thresholds through an
+empirical quality profile. Low-contrast 2×2 luma groups may be averaged and
+low-contrast chroma blocks may be stored as solid colors; these effects diminish
+at higher qualities. At quality 0, complete 2×2 luma groups are averaged and
+8×8 macroblocks are used where they fit. If either image dimension is not a
+multiple of four, 1×1 edge blocks preserve pixels that older encoders omitted.
+These are encoder choices within the existing block format. Exact file size,
+visual quality and their ordering between adjacent levels are not guaranteed.
 If both rounded levels are equal, the block becomes solid; no pattern bits or
 background entry are emitted. BW stores only Y. At qualities below 90 the decoded
 image can differ from previous builds at the same numeric quality. Entropy coding

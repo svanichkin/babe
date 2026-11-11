@@ -72,11 +72,10 @@ func TestEncodeDecode_RoundTrip(t *testing.T) {
 	}
 }
 
-func TestEncode_ImageTooSmall(t *testing.T) {
-	// At quality=0, smallBlock becomes 4, so a 1x1 image cannot be encoded.
-	img := makeTestImage(1, 1)
+func TestEncode_EmptyImage(t *testing.T) {
+	img := makeTestImage(0, 0)
 	if _, err := Encode(img, 0, false); err == nil {
-		t.Fatalf("expected error for too-small image, got nil")
+		t.Fatalf("expected error for empty image, got nil")
 	}
 }
 

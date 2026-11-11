@@ -61,8 +61,10 @@ var (
 	codecStateMu sync.Mutex
 )
 
-// current encode quality in [0..100]; used to drive macro/small decisions.
+// Current encode quality and its fixed-point profile. Access is serialized by
+// codecStateMu, including the per-channel workers started by an encode.
 var encQuality int = 70
+var qualityProfileFP int = 70 * 256
 
 // channel presence flags for the header; at least Y must be set.
 const (
@@ -80,8 +82,7 @@ var encodeBW bool
 // - smallBlock/macroBlock are chosen from a small set of presets
 //   to trade off quality vs. compression.
 
-// setBlocksForQuality configures global smallBlock/macroBlock based on a quality in [0..100].
-// It uses a small set of discrete presets to keep the behavior stable and predictable.
+// setBlocksForQuality configures the block sizes from the calibrated quality profile.
 func setBlocksForQuality(quality int) error {
 	// clamp quality to [0..100]
 	if quality < 0 {
@@ -93,25 +94,15 @@ func setBlocksForQuality(quality int) error {
 
 	// remember quality globally so heuristics (macro vs small) can use it directly
 	encQuality = quality
+	qualityProfileFP = profileForQuality(quality)
 
 	switch {
-	case quality >= 80:
-		// highest quality: smallest macro-blocks
-		smallBlock = 1
-		macroBlock = 2
-	case quality >= 60:
-		smallBlock = 1
-		macroBlock = 3
-	case quality >= 40:
-		smallBlock = 2
-		macroBlock = 4
-	case quality >= 20:
-		smallBlock = 3
-		macroBlock = 6
+	case qualityProfileFP >= 75*256:
+		smallBlock, macroBlock = 1, 2
+	case qualityProfileFP >= 40*256:
+		smallBlock, macroBlock = 2, 4
 	default:
-		// lowest quality / highest compression
-		smallBlock = 4
-		macroBlock = 8
+		smallBlock, macroBlock = 4, 8
 	}
 
 	return nil
@@ -856,57 +847,45 @@ func extractYCbCrFromGraySequential(src *image.Gray, yPlane, cbPlane, crPlane []
 	}
 }
 
-// canUseBigBlockChannel decides whether a macroBlock region can be encoded as a single block
-// for the given channel plane. It uses a quality-dependent spread threshold: lower quality
-// allows larger spread (more macroBlocks), higher quality reduces spread (more small blocks).
+// allowedMacroSpreadForQuality returns the maximum spread as an 8.8 fixed-point
+// value. The threshold is interpolated within each compatible block geometry.
 func allowedMacroSpreadForQuality(quality int) int32 {
-	// quality-dependent spread:
-	// in each quality band (0–19, 20–39, 40–59, 60–79, 80–100) that we use
-	// for smallBlock/macroBlock selection, the allowed spread changes linearly
-	// from 64 (bottom of the band) down to 8 (top of the band).
-	q := quality
-	if q < 0 {
-		q = 0
+	fp := profileForQuality(quality)
+	if fp >= 100*256 {
+		fp = 100*256 - 1
 	}
-	if q > 100 {
-		q = 100
-	}
-
-	// Use the same quality bands as setBlocksForQuality:
-	//   [0–19]  → 4/8
-	//   [20–39] → 3/6
-	//   [40–59] → 2/4
-	//   [60–79] → 1/3
-	//   [80–100]→ 1/2
-	var groupStart, groupEnd int
 	switch {
-	case q < 20:
-		groupStart, groupEnd = 0, 19
-	case q < 40:
-		groupStart, groupEnd = 20, 39
-	case q < 60:
-		groupStart, groupEnd = 40, 59
-	case q < 80:
-		groupStart, groupEnd = 60, 79
+	case fp >= 75*256:
+		rem := 100*256 - fp
+		return 256 + int32(int64(rem)*int64(rem)*63/(25*25*256))
+	case fp >= 40*256:
+		return 256*256 - int32((fp-40*256)*255/35)
 	default:
-		groupStart, groupEnd = 80, 100
+		return 256*256 - int32(fp*255/40)
 	}
-
-	// Linear interpolation of the allowed spread from 64 down to 8 within the band.
-	const spreadMax int32 = 64
-	const spreadMin int32 = 8
-	span := groupEnd - groupStart
-	var spread int32
-	if span <= 0 {
-		spread = (spreadMax + spreadMin) / 2
-	} else {
-		offset := q - groupStart
-		spread = spreadMax - int32(offset)*(spreadMax-spreadMin)/int32(span)
-	}
-
-	return spread
 }
 
+// blockSpread distributes the fractional part of a threshold across blocks
+// using their position. This avoids changing a large number of blocks at once
+// when a threshold crosses an integer; it is deterministic across worker counts.
+func blockSpread(spread int32, x, y int) int32 {
+	whole, frac := spread>>8, uint32(spread&255)
+	if frac == 0 {
+		return whole
+	}
+	v := uint32(x)*0x1f123bb5 ^ uint32(y)*0x5f356495
+	v ^= v >> 16
+	v *= 0x7feb352d
+	v ^= v >> 15
+	v *= 0x846ca68b
+	v ^= v >> 16
+	if v&255 < frac {
+		whole++
+	}
+	return whole
+}
+
+// canUseBigBlockChannel reports whether a macroblock's spread fits its threshold.
 func canUseBigBlockChannel(plane []uint8, stride, height, x0, y0 int, spread int32) bool {
 	if spread <= 0 {
 		return false
@@ -1172,35 +1151,50 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh, quantStep i
 	return fg, bg, true, nil
 }
 
-// encodeChannelBlock optionally replaces a block with its quantized average.
-// Quality 0 uses this for chroma: color detail is reduced without affecting
-// the existing block layout or the entropy coder.
-func encodeChannelBlock(plane []uint8, stride, height, x0, y0, bw, bh, step int, solid bool, pw *bitWriter) (uint8, uint8, bool, error) {
-	if !solid {
+// encodeChannelBlock optionally replaces a low-contrast block with its
+// quantized average. This reduces chroma detail at the lower quality levels.
+func encodeChannelBlock(plane []uint8, stride, height, x0, y0, bw, bh, step int, solidThreshold int, pw *bitWriter) (uint8, uint8, bool, error) {
+	if solidThreshold <= 0 {
 		return encodeBlockPlane(plane, stride, height, x0, y0, bw, bh, step, pw)
 	}
 	if x0 < 0 || y0 < 0 || bw <= 0 || bh <= 0 || stride <= 0 || height <= 0 || x0+bw > stride || y0+bh > height || (y0+bh-1)*stride+x0+bw > len(plane) {
 		return 0, 0, false, fmt.Errorf("encodeChannelBlock: index out of range")
 	}
 	var sum int
-	for y := 0; y < bh; y++ {
-		row := (y0+y)*stride + x0
-		for x := 0; x < bw; x++ {
-			sum += int(plane[row+x])
+	minV, maxV := byte(255), byte(0)
+	if solidThreshold >= 256 {
+		for y := 0; y < bh; y++ {
+			row := (y0+y)*stride + x0
+			for x := 0; x < bw; x++ {
+				sum += int(plane[row+x])
+			}
 		}
+	} else {
+		for y := 0; y < bh; y++ {
+			row := (y0+y)*stride + x0
+			for x := 0; x < bw; x++ {
+				v := plane[row+x]
+				sum += int(v)
+				minV = min(minV, v)
+				maxV = max(maxV, v)
+			}
+		}
+	}
+	if solidThreshold < 256 && int(maxV)-int(minV) >= solidThreshold {
+		return encodeBlockPlane(plane, stride, height, x0, y0, bw, bh, step, pw)
 	}
 	v := quantizeLevel(uint8(sum/(bw*bh)), step)
 	return v, v, false, nil
 }
 
 type encoderChannelScratch struct {
-	quantStep  int
-	solid      bool
-	sizeBuf    bytes.Buffer
-	typeBuf    bytes.Buffer
-	patternBuf bytes.Buffer
-	fgVals     []uint8
-	bgVals     []uint8
+	quantStep      int
+	solidThreshold int
+	sizeBuf        bytes.Buffer
+	typeBuf        bytes.Buffer
+	patternBuf     bytes.Buffer
+	fgVals         []uint8
+	bgVals         []uint8
 }
 
 type encodeChannelSpec struct {

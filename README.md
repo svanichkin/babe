@@ -33,8 +33,8 @@ At a high level, Babe is a block-based codec with a dual-tone model per block an
 4. **Block-level quantization**
    - Each block's foreground and background levels are rounded according to quality.
    - Chroma uses coarser steps than luma. If both levels become equal, the block is stored as solid, without a pattern or background value.
-   - Quantization steps for Y / Cb,Cr: quality 0: 32 / 16; 1–19: 4 / 8; 20–59: 2 / 4; 60–89: 1 / 2; 90–99: 1 / 1. Quality 100 uses no quantization or block approximation.
-   - At quality 0, 2×2 luma samples are averaged, 8×8 macroblocks are used wherever they fit, and chroma blocks are stored as solid colors. This produces much smaller files at the cost of visible detail and color precision.
+   - Quantization steps and block decisions follow an empirical quality curve; they change gradually through qualities 0–99. Quality 100 uses no quantization or block approximation.
+   - At quality 0, 2×2 luma samples are averaged, 8×8 macroblocks are used wherever they fit, and chroma blocks are stored as solid colors. At higher qualities, less smoothing is applied and more blocks retain color detail.
    - At quality 100 opaque 8-bit RGB pixels are restored exactly. Transparency and 16-bit inputs are rejected in this mode. For JPEG input this means the decoded 8-bit RGB pixels, not the original JPEG bitstream or metadata. BW mode at quality 100 requires an already grayscale image.
 
 5. **Delta coding**
@@ -86,7 +86,12 @@ input.babe
 ```
 
 Default quality is **70**. Lower quality prioritizes smaller files; **100**
-uses lossless mode for opaque 8-bit RGB images.
+uses lossless mode for opaque 8-bit RGB images. The scale is calibrated for a
+more even size progression on several photos, but it is not a target file size:
+content, block boundaries and entropy coding can make individual steps uneven.
+Perceptual quality cannot be guaranteed to progress linearly, and q100 uses a
+different lossless color transform. Numeric qualities 1–99 produce different
+results than earlier versions.
 
 Specify a custom quality (0–100):
 
@@ -136,12 +141,71 @@ Format details, quality tuning, and performance optimizations are still evolving
 
 In-memory BABE encoder/decoder timings and size tradeoffs are recorded in [the speed measurements](docs/performance.md).
 
+## Quality scale
+
+The size curve below uses the decoded 800×572 [source image](samples/source.jpg)
+as 8-bit RGB input. PSNR measures RGB differences from that decoded source; it
+is not a complete measure of perceived quality. The encoder does not perform
+multiple passes to hit a target size.
+
+| Quality | BABE size | RGB PSNR |
+|---:|---:|---:|
+| 0 | 8,843 B | 23.91 dB |
+| 10 | 48,130 B | 29.41 dB |
+| 20 | 92,740 B | 31.37 dB |
+| 30 | 140,555 B | 33.44 dB |
+| 40 | 176,233 B | 35.74 dB |
+| 50 | 202,171 B | 36.42 dB |
+| 60 | 241,253 B | 40.32 dB |
+| 70 | 269,296 B | 42.51 dB |
+| 80 | 286,827 B | 43.19 dB |
+| 90 | 320,337 B | 43.89 dB |
+| 100 | 374,884 B | lossless |
+
+On four local photos the mean deviation from a straight line between each
+image's q0 and q100 sizes was 2.3–4.7 percentage points. The maximum individual
+deviation reached 15.7 points. Other images, particularly flat colors, noise,
+gradients or images whose lossless representation compresses unusually well,
+can behave very differently; a higher quality can even produce a smaller file.
+See [the full measurements](docs/benchmarks/quality-curve-current.csv) and
+[methodology](docs/performance.md#quality-scale) for the limits of this result.
+
+```sh
+go run ./cmd/qualitycurve -input samples/source.jpg > /tmp/babe-quality.csv
+```
+
 ## Benchmark comparison
+
+### Lossless: complete encode/decode cycle
+
+All five codecs received the same decoded 5152×7728 opaque 8-bit RGB image.
+Each measurement is a complete encode followed by a decode, with separate
+processes and disk I/O included. After warm-up, three rounds were run in
+shuffled order and every decoded image was checked pixel-for-pixel. The table
+shows medians; the full-cycle time is measured directly, not added from the
+separate encode and decode medians. CPU time sums all process threads, and
+peak RSS is the largest individual process peak in the cycle.
+
+| Lossless format | Encode | Decode | Full cycle | CPU / cycle | Peak RSS | Size |
+|---|---:|---:|---:|---:|---:|---:|
+| BABE q100 | 0.608 s | 0.654 s | 1.291 s | 1.978 s | 705.1 MiB | 44.09 MB |
+| QOI | 1.285 s | 0.473 s | 1.777 s | 1.708 s | 316.5 MiB | 78.98 MB |
+| JPEG XL | 3.473 s | 1.450 s | 4.923 s | 27.497 s | 719.2 MiB | 42.06 MB |
+| PNG + OxiPNG | 12.464 s | 1.231 s | 13.696 s | 17.684 s | 802.4 MiB | 64.77 MB |
+| WebP | 17.313 s | 0.647 s | 17.961 s | 16.987 s | 1017.5 MiB | 47.93 MB |
+
+JPEG XL used distance 0, effort 5; WebP used lossless mode, quality 75,
+method 4; PNG used Go's PNG encoder followed by OxiPNG `-o2`. These settings
+affect both size and speed. Times include process startup and PPM input/output;
+they are not directly comparable to the in-memory measurements below. See
+[methodology and per-round results](docs/performance.md#lossless-cli-comparison).
+
+### In-memory JPEG / BABE / QOI comparison
 
 Measured on an Apple M3 with Go 1.27.3 using the local `benchmark.jpg`
 (5152×7728). Times are medians of three runs with two operations each, after
-warm-up. The BABE quality-100 and quality-0 measurements were refreshed after
-their respective changes; other rows are from the earlier build. The same decoded RGBA image is fed to both encoders; image loading and
+warm-up. BABE rows were measured after the quality-curve update; JPEG and QOI
+rows are from an earlier session. The same decoded RGBA image is fed to the encoders; image loading and
 file I/O are excluded. Encoder buffers and BABE decoder buffers are reused.
 JPEG decoding returns Go's native YCbCr image, while BABE returns RGBA. Results
 vary with the image and machine load; the source image is itself a JPEG.
@@ -150,10 +214,10 @@ JPEG and BABE at quality 80, with lossless QOI for reference:
 
 | Metric | JPEG (q=80, lossy) | BABE (q=80, lossy) | QOI (lossless) |
 |---|---:|---:|---:|
-| Encode time | 0.786 s | 0.278 s | 1.096 s |
-| Decode time | 0.420 s | 0.296 s | 0.300 s |
-| Total | 1.206 s | 0.574 s | 1.396 s |
-| Output size | 13.98 MB | 22.69 MB | 78.98 MB |
+| Encode time | 0.786 s | 0.351 s | 1.096 s |
+| Decode time | 0.420 s | 0.491 s | 0.300 s |
+| Total | 1.206 s | 0.842 s | 1.396 s |
+| Output size | 13.98 MB | 37.20 MB | 78.98 MB |
 
 Total is the sum of the separately measured encode and decode medians.
 
@@ -162,14 +226,14 @@ exactly. JPEG quality 100 is included for reference but is still lossy:
 
 | Metric | JPEG (q=100, lossy) | BABE (q=100, lossless) | QOI (lossless) |
 |---|---:|---:|---:|
-| Encode time | 0.961 s | 0.426 s | 1.096 s |
-| Decode time | 0.799 s | 0.449 s | 0.300 s |
-| Total | 1.760 s | 0.875 s | 1.396 s |
+| Encode time | 0.961 s | 0.446 s | 1.096 s |
+| Decode time | 0.799 s | 0.483 s | 0.300 s |
+| Total | 1.760 s | 0.929 s | 1.396 s |
 | Output size | 37.66 MB | 44.09 MB | 78.98 MB |
 
 These compare opaque RGB input: BABE q100 does not support transparency or
 16-bit images. QOI also supports an alpha channel, which this input does not
-use. BABE q100 was remeasured in a separate session after the lossless change;
+use. BABE q100 was remeasured in a separate session after the quality-curve change;
 the JPEG and QOI figures are from the earlier measurements described above.
 
 JPEG and BABE at each requested quality, on the same image and under the same
@@ -177,11 +241,11 @@ conditions:
 
 | Quality | JPEG encode | BABE encode | JPEG decode | BABE decode | JPEG size | BABE size |
 |---:|---:|---:|---:|---:|---:|---:|
-| 100 (BABE lossless) | 0.961 s | 0.426 s | 0.799 s | 0.449 s | 37.66 MB | 44.09 MB |
-| 80 | 0.786 s | 0.278 s | 0.420 s | 0.296 s | 13.98 MB | 22.69 MB |
-| 50 | 0.533 s | 0.354 s | 0.242 s | 0.336 s | 5.30 MB | 17.47 MB |
-| 10 | 0.417 s | 0.249 s | 0.155 s | 0.135 s | 0.97 MB | 7.47 MB |
-| 0 | 0.398 s | 0.200 s | 0.148 s | 0.112 s | 0.67 MB | 0.78 MB |
+| 100 (BABE lossless) | 0.961 s | 0.446 s | 0.799 s | 0.483 s | 37.66 MB | 44.09 MB |
+| 80 | 0.786 s | 0.351 s | 0.420 s | 0.491 s | 13.98 MB | 37.20 MB |
+| 50 | 0.533 s | 0.392 s | 0.242 s | 0.374 s | 5.30 MB | 22.11 MB |
+| 10 | 0.417 s | 0.303 s | 0.155 s | 0.196 s | 0.97 MB | 6.75 MB |
+| 0 | 0.398 s | 0.194 s | 0.148 s | 0.108 s | 0.67 MB | 0.78 MB |
 
 Go's JPEG encoder clamps quality 0 to **1**. Equal quality numbers do not mean
 equal visual quality or equal file size; BABE quality 100 is lossless. MB is
@@ -195,15 +259,15 @@ core). Values are medians of three processes with two warmed operations each.
 | Quality | Codec | CPU encode s | CPU decode s | Encode cores | Decode cores |
 |---:|---|---:|---:|---:|---:|
 | 100 | JPEG (lossy) | 0.918 | 0.778 | 1.00 | 0.95 |
-| 100 | BABE (lossless) | 0.857 | 0.813 | 1.94 | 1.87 |
+| 100 | BABE (lossless) | 0.908 | 0.861 | 1.94 | 1.84 |
 | 80 | JPEG | 0.765 | 0.454 | 0.98 | 0.95 |
-| 80 | BABE | 0.669 | 0.591 | 2.25 | 2.12 |
+| 80 | BABE | 0.757 | 0.761 | 2.15 | 1.72 |
 | 50 | JPEG | 0.531 | 0.244 | 0.99 | 1.00 |
-| 50 | BABE | 0.829 | 0.656 | 2.04 | 1.88 |
+| 50 | BABE | 0.889 | 0.707 | 2.20 | 1.93 |
 | 10 | JPEG | 0.416 | 0.159 | 0.99 | 1.00 |
-| 10 | BABE | 0.574 | 0.333 | 2.19 | 2.37 |
+| 10 | BABE | 0.551 | 0.363 | 1.86 | 1.73 |
 | 0 | JPEG | 0.469 | 0.154 | 0.83 | 0.98 |
-| 0 | BABE | 0.396 | 0.256 | 2.14 | 2.39 |
+| 0 | BABE | 0.388 | 0.255 | 2.15 | 2.35 |
 | Lossless | QOI (lossless) | 1.038 | 0.279 | 0.99 | 0.98 |
 
 Memory allocated during a warmed operation and peak resident memory of its
@@ -212,15 +276,15 @@ entire process, in MiB (1 MiB = 1,048,576 bytes):
 | Quality | Codec | Alloc encode MiB/op | Alloc decode MiB/op | Peak RSS encode MiB | Peak RSS decode MiB |
 |---:|---|---:|---:|---:|---:|
 | 100 | JPEG (lossy) | 0.00 | 56.98 | 443.7 | 156.2 |
-| 100 | BABE (lossless) | 0.03 | 0.00 | 762.2 | 390.5 |
+| 100 | BABE (lossless) | 0.03 | 0.00 | 801.2 | 390.6 |
 | 80 | JPEG | 0.00 | 56.98 | 443.5 | 133.7 |
-| 80 | BABE | 0.03 | 0.00 | 660.6 | 345.3 |
+| 80 | BABE | 0.03 | 0.00 | 739.8 | 377.5 |
 | 50 | JPEG | 0.00 | 56.97 | 443.4 | 125.4 |
-| 50 | BABE | 0.03 | 0.01 | 554.3 | 207.1 |
+| 50 | BABE | 0.03 | 0.01 | 583.1 | 213.7 |
 | 10 | JPEG | 0.00 | 56.98 | 443.7 | 121.3 |
-| 10 | BABE | 0.03 | 0.01 | 444.6 | 178.7 |
+| 10 | BABE | 0.03 | 0.01 | 444.2 | 175.0 |
 | 0 | JPEG | 0.00 | 56.98 | 443.4 | 120.9 |
-| 0 | BABE | 0.02 | 0.01 | 444.0 | 164.4 |
+| 0 | BABE | 0.02 | 0.01 | 444.1 | 164.4 |
 | Lossless | QOI (lossless) | 303.77 | 151.89 | 656.2 | 385.9 |
 
 Allocation counts do **not** include retained buffers created during warm-up:
@@ -249,7 +313,7 @@ each codec. Click an image to inspect it at full resolution.
 
 Quality 80:
 
-| JPEG q80 — 71,042 bytes | BABE q80 — 211,612 bytes |
+| JPEG q80 — 71,042 bytes | BABE q80 — 286,827 bytes |
 |:---:|:---:|
 | [![JPEG q80](samples/jpeg-q80.jpg)](samples/jpeg-q80.jpg) | [![BABE q80](samples/babe-q80.png)](samples/babe-q80.png) |
 
@@ -264,8 +328,8 @@ can produce a different image:
 The JPEG images are the encoded JPEGs themselves. The BABE images are its
 decoded pixels saved losslessly for display; the stated BABE sizes are the
 `.babe` bitstreams, not the previews. RGB PSNR against the decoded source is
-35.40 / 40.18 dB for JPEG / BABE at q80, and 21.73 / 23.91 dB at minimum
-quality. On this source, BABE uses 2.98× as many bytes at q80 and 4.5% fewer at
+35.40 / 43.19 dB for JPEG / BABE at q80, and 21.73 / 23.91 dB at minimum
+quality. On this source, BABE uses 4.04× as many bytes at q80 and 4.5% fewer at
 q0. PSNR is one measure and is not a complete measure of perceived quality. Equal
 numeric quality does not mean equal bitrate or perceived quality. The source
 was already JPEG-compressed.

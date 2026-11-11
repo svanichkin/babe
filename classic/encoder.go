@@ -131,9 +131,15 @@ func (e *Encoder) encodeChannelReuse(plane []uint8, stride, w4, h4, fullW, fullH
 	var blockCount uint32
 	height := h4
 	spread := allowedMacroSpreadForQuality(encQuality)
+	if encQuality != 100 && smallBlock == 1 && macroBlock == 8 && (stride%4 != 0 || height%4 != 0) {
+		// The fallback geometry is constant across qualities, so its threshold
+		// must vary continuously rather than reset at the usual block bands.
+		rem := 100*256 - qualityProfileFP
+		spread = 256 + int32(int64(rem)*int64(rem)*255/(100*100*256))
+	}
 	if encQuality == 0 {
 		// Every possible 8-bit spread fits; q0 uses the existing 8x8 blocks.
-		spread = 256
+		spread = 256 * 256
 	}
 
 	if useMacro && smallBlock == 1 && macroBlock == 2 {
@@ -177,7 +183,7 @@ func (e *Encoder) encodeChannelReuse(plane []uint8, stride, w4, h4, fullW, fullH
 				minV := min(v0, v1, v2, v3)
 				maxV := max(v0, v1, v2, v3)
 
-				useBig := int32(maxV)-int32(minV) < spread
+				useBig := int32(maxV)-int32(minV) < blockSpread(spread, mx, my)
 				sizeW.writeBit(useBig)
 
 				if useBig {
@@ -231,10 +237,10 @@ func (e *Encoder) encodeChannelReuse(plane []uint8, stride, w4, h4, fullW, fullH
 	// main macroBlock x macroBlock area
 	for my := 0; my < fullH; my += macroBlock {
 		for mx := 0; mx < fullW; mx += macroBlock {
-			useBig := useMacro && canUseBigBlockChannel(plane, stride, height, mx, my, spread)
+			useBig := useMacro && canUseBigBlockChannel(plane, stride, height, mx, my, blockSpread(spread, mx, my))
 			sizeW.writeBit(useBig)
 			if useBig {
-				fg, bg, isPattern, err := encodeChannelBlock(plane, stride, height, mx, my, macroBlock, macroBlock, step, scratch.solid, &patternW)
+				fg, bg, isPattern, err := encodeChannelBlock(plane, stride, height, mx, my, macroBlock, macroBlock, step, scratch.solidThreshold, &patternW)
 				if err != nil {
 					return 0, nil, nil, nil, nil, nil, err
 				}
@@ -254,7 +260,7 @@ func (e *Encoder) encodeChannelReuse(plane []uint8, stride, w4, h4, fullW, fullH
 						if smallBlock > 1 {
 							pw = &patternW
 						}
-						fg, bg, isPattern, err := encodeChannelBlock(plane, stride, height, xx, yy, smallBlock, smallBlock, step, scratch.solid, pw)
+						fg, bg, isPattern, err := encodeChannelBlock(plane, stride, height, xx, yy, smallBlock, smallBlock, step, scratch.solidThreshold, pw)
 						if err != nil {
 							return 0, nil, nil, nil, nil, nil, err
 						}
@@ -277,7 +283,7 @@ func (e *Encoder) encodeChannelReuse(plane []uint8, stride, w4, h4, fullW, fullH
 			if smallBlock > 1 {
 				pw = &patternW
 			}
-			fg, bg, isPattern, err := encodeChannelBlock(plane, stride, height, mx, my, smallBlock, smallBlock, step, scratch.solid, pw)
+			fg, bg, isPattern, err := encodeChannelBlock(plane, stride, height, mx, my, smallBlock, smallBlock, step, scratch.solidThreshold, pw)
 			if err != nil {
 				return 0, nil, nil, nil, nil, nil, err
 			}
@@ -296,7 +302,7 @@ func (e *Encoder) encodeChannelReuse(plane []uint8, stride, w4, h4, fullW, fullH
 			if smallBlock > 1 {
 				pw = &patternW
 			}
-			fg, bg, isPattern, err := encodeChannelBlock(plane, stride, height, mx, my, smallBlock, smallBlock, step, scratch.solid, pw)
+			fg, bg, isPattern, err := encodeChannelBlock(plane, stride, height, mx, my, smallBlock, smallBlock, step, scratch.solidThreshold, pw)
 			if err != nil {
 				return 0, nil, nil, nil, nil, nil, err
 			}
@@ -330,14 +336,19 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 	if err := checkImageSize(w, h); err != nil {
 		return nil, err
 	}
+	if encQuality != 100 && (w%4 != 0 || h%4 != 0) {
+		// Whole-pixel edge blocks prevent black strips at image dimensions that
+		// are not divisible by the coarser block sizes.
+		smallBlock, macroBlock = 1, 8
+	}
 
 	yStep, cStep := quantStepsForQuality(encQuality)
 	e.ch[chY].quantStep = yStep
 	e.ch[chCb].quantStep = cStep
 	e.ch[chCr].quantStep = cStep
-	e.ch[chY].solid = false
-	e.ch[chCb].solid = encQuality == 0
-	e.ch[chCr].solid = encQuality == 0
+	e.ch[chY].solidThreshold = 0
+	e.ch[chCb].solidThreshold = max(0, (40*256-qualityProfileFP)/40)
+	e.ch[chCr].solidThreshold = e.ch[chCb].solidThreshold
 
 	e.ensurePlanes(w, h)
 	if encQuality == 100 {
@@ -349,8 +360,10 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 	} else {
 		extractYCbCrPlanesIntoSerial(img, e.yPlane, e.cbPlane, e.crPlane)
 	}
-	if encQuality == 0 {
-		smoothLowQualityLuma(e.yPlane, w, h)
+	if qualityProfileFP < 35*256 {
+		remaining := 35*256 - qualityProfileFP
+		threshold := int(int64(remaining) * int64(remaining) * 255 / (35 * 35 * 256 * 256))
+		smoothLowQualityLuma(e.yPlane, w, h, threshold)
 	}
 
 	// Decide which channels will be stored. Y is always present; Cb/Cr
