@@ -42,6 +42,7 @@ func TestCornerContainerRoundTrip(t *testing.T) {
 				}
 				serial, parallel := NewDecoder(), NewDecoder()
 				serial.Parallel = false
+				serial.GlyphBlend, parallel.GlyphBlend = true, true
 				a, err := serial.Decode(data, false)
 				if err != nil {
 					t.Fatalf("%v q%d: %v", dims, q, err)

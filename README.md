@@ -89,6 +89,33 @@ uses the earlier decoder-only estimate, which has no source corner data. The
 Go API exposes the two options as `Encoder.CornerData` and
 `Decoder.CornerGradient`. See [measurements and details](docs/performance.md#experimental-corner-reconstruction).
 
+An additional experiment blends small luma discontinuities between neighbouring
+glyph blocks while retaining larger edges:
+
+```sh
+./Babe 1.jpg 10 -glyphs 1-glyphs.png
+```
+
+`-glyphs` also enables encoded corners. It changes decoding only and is not
+recorded in the file: use `./Babe 1.babe -glyphs` to apply it again to an
+existing BGC1 file. Larger differences are left untouched, but the threshold
+cannot reliably distinguish every real edge from a compression artifact. Use
+`Decoder.GlyphBlend` for this option in Go. Neither experiment changes q100.
+
+To inspect the stored glyphs without color, render the first channel as
+grayscale:
+
+```sh
+./Babe 1.jpg 10 -glyphs-only 1-glyphs-only.png
+./Babe 1.babe -glyphs-only
+```
+
+This displays the raw reconstructed luma channel before the experimental
+corner gradient and glyph blending. It retains the glyphs' brightness levels;
+it is not a binary mask. For lossless q100, the first channel is green rather
+than luma, so this diagnostic view intentionally does not reproduce RGB.
+In Go use `Decoder.GlyphsOnly`.
+
 ### Encode an image → `.babe`
 
 ```

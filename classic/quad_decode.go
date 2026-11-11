@@ -70,6 +70,16 @@ func (d *Decoder) decodeQuadImage(segments [3][]byte, w, h int, lossless bool, s
 			decodeValidatedQuadPlane(segments[i], planes[i], w, h)
 		}
 	})
+	if d.GlyphsOnly {
+		processStreams(4, n, d.Parallel, func(i int) {
+			start, end := n*i/4, n*(i+1)/4
+			for j := start; j < end; j++ {
+				v, p := planes[0][j], d.dst.Pix[j*4:j*4+4]
+				p[0], p[1], p[2], p[3] = v, v, v, 255
+			}
+		})
+		return
+	}
 	if (d.CornerGradient || storedCorners != nil) && !lossless {
 		step := 2
 		if storedCorners != nil {
@@ -87,7 +97,7 @@ func (d *Decoder) decodeQuadImage(segments [3][]byte, w, h int, lossless bool, s
 			return v
 		})
 		if storedCorners != nil {
-			d.writeStoredCorners(*storedCorners, grid, func(x, y int) byte { return planes[0][y*w+x] })
+			d.writeStoredCorners(*storedCorners, grid, func(x, y int) byte { return planes[0][y*w+x] }, d.GlyphBlend, 2)
 		} else {
 			d.writeCornerGradient(grid)
 		}

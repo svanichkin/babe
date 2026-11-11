@@ -16,8 +16,8 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 || len(os.Args) > 6 {
-		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [-corners] [decoded.png]\n  babe <input.babe> [-postfilter] [-corners]\n  (options and decoded.png can appear after quality)\n")
+	if len(os.Args) < 2 || len(os.Args) > 8 {
+		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [-corners] [-glyphs] [-glyphs-only] [decoded.png]\n  babe <input.babe> [-postfilter] [-corners] [-glyphs] [-glyphs-only]\n  (options and decoded.png can appear after quality)\n")
 		os.Exit(1)
 	}
 
@@ -29,6 +29,8 @@ func main() {
 	if ext == ".babe" {
 		postfilter := false
 		corners := false
+		glyphs := false
+		glyphsOnly := false
 		for _, a := range os.Args[2:] {
 			if a == "-postfilter" {
 				postfilter = true
@@ -36,8 +38,14 @@ func main() {
 			if a == "-corners" {
 				corners = true
 			}
+			if a == "-glyphs" {
+				glyphs = true
+			}
+			if a == "-glyphs-only" {
+				glyphsOnly = true
+			}
 		}
-		if err := decodeBabe(inputPath, base+".png", false, postfilter, corners); err != nil {
+		if err := decodeBabe(inputPath, base+".png", false, postfilter, corners, glyphs, glyphsOnly); err != nil {
 			fmt.Fprintln(os.Stderr, "decode error:", err)
 			os.Exit(1)
 		}
@@ -63,8 +71,18 @@ func main() {
 
 	bwmode := false
 	corners := false
+	glyphs := false
+	glyphsOnly := false
 	decodeOutPath := ""
 	for _, a := range encodeArgs {
+		if a == "-glyphs-only" {
+			glyphsOnly = true
+			continue
+		}
+		if a == "-glyphs" {
+			glyphs = true
+			continue
+		}
 		if a == "-corners" {
 			corners = true
 			continue
@@ -77,6 +95,9 @@ func main() {
 			decodeOutPath = a
 		}
 	}
+	if glyphs {
+		corners = true
+	}
 
 	outPath := base + ".babe"
 	if err := encodeToBabe(inputPath, outPath, quality, bwmode, corners); err != nil {
@@ -84,7 +105,7 @@ func main() {
 		os.Exit(1)
 	}
 	if decodeOutPath != "" {
-		if err := decodeBabe(outPath, decodeOutPath, false, false, corners); err != nil {
+		if err := decodeBabe(outPath, decodeOutPath, false, false, corners, glyphs, glyphsOnly); err != nil {
 			fmt.Fprintln(os.Stderr, "decode error:", err)
 			os.Exit(1)
 		}
@@ -153,7 +174,7 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode, corners bool) err
 	return nil
 }
 
-func decodeBabe(inPath, outPath string, splitChannels, postfilter, corners bool) error {
+func decodeBabe(inPath, outPath string, splitChannels, postfilter, corners, glyphs, glyphsOnly bool) error {
 	pngEncoder := png.Encoder{CompressionLevel: png.DefaultCompression}
 
 	in, err := os.Open(inPath)
@@ -172,6 +193,8 @@ func decodeBabe(inPath, outPath string, splitChannels, postfilter, corners bool)
 	start := time.Now()
 	decoder := NewDecoder()
 	decoder.CornerGradient = corners
+	decoder.GlyphBlend = glyphs
+	decoder.GlyphsOnly = glyphsOnly
 	dec, err := decoder.Decode(compData, postfilter)
 	if err != nil {
 		return err

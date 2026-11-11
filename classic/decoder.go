@@ -29,6 +29,14 @@ type Decoder struct {
 	// block corners. It changes decoded pixels; lossless images are unaffected.
 	CornerGradient bool
 
+	// GlyphBlend experimentally blends small luma-residual discontinuities at
+	// block edges in images that contain stored source corners.
+	GlyphBlend bool
+
+	// GlyphsOnly renders the stored first channel as grayscale for inspection.
+	// In lossless mode the first channel is G, not luminance.
+	GlyphsOnly bool
+
 	payload []byte
 	zdec    *zstd.Decoder
 
@@ -36,8 +44,9 @@ type Decoder struct {
 	cb decoderChannelScratch
 	cr decoderChannelScratch
 
-	neutral []uint8
-	dst     *image.RGBA
+	neutral   []uint8
+	dst       *image.RGBA
+	glyphLuma []byte
 }
 
 func NewDecoder() *Decoder {
@@ -960,6 +969,16 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	if errCr != nil {
 		return nil, errCr
 	}
+	if d.GlyphsOnly {
+		for y := 0; y < imgH; y++ {
+			for x := 0; x < imgW; x++ {
+				o := y*stride + x*4
+				v := pix[o]
+				pix[o], pix[o+1], pix[o+2], pix[o+3] = v, v, v, 255
+			}
+		}
+		return dst, nil
+	}
 	if (d.CornerGradient || storedCorners != nil) && channelsMask&channelFlagLossless == 0 {
 		step := smallBlock
 		if step == 1 {
@@ -980,7 +999,26 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 			return v
 		})
 		if storedCorners != nil {
-			d.writeStoredCorners(*storedCorners, grid, func(x, y int) byte { return pix[y*stride+x*4] })
+			readLuma := func(x, y int) byte { return pix[y*stride+x*4] }
+			if d.GlyphBlend {
+				n := imgW * imgH
+				if cap(d.glyphLuma) < n {
+					d.glyphLuma = make([]byte, n)
+				} else {
+					d.glyphLuma = d.glyphLuma[:n]
+				}
+				for y := 0; y < imgH; y++ {
+					for x := 0; x < imgW; x++ {
+						d.glyphLuma[y*imgW+x] = pix[y*stride+x*4]
+					}
+				}
+				readLuma = func(x, y int) byte { return d.glyphLuma[y*imgW+x] }
+			}
+			step := smallBlock
+			if step == 1 {
+				step = macroBlock
+			}
+			d.writeStoredCorners(*storedCorners, grid, readLuma, d.GlyphBlend, step)
 		} else {
 			d.writeCornerGradient(grid)
 		}

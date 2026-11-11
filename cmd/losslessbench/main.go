@@ -76,6 +76,14 @@ func run(op, codec, input, output string) error {
 				decoder.CornerGradient = true
 				img, err = decoder.Decode(data, false)
 			}
+		case "babe-glyphs":
+			var data []byte
+			data, err = io.ReadAll(f)
+			if err == nil {
+				decoder := classic.NewDecoder()
+				decoder.GlyphBlend = true
+				img, err = decoder.Decode(data, false)
+			}
 		case "qoi":
 			img, err = qoi.Decode(f)
 		case "png":

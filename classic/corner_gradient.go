@@ -82,12 +82,49 @@ func (d *Decoder) writeCornerGradient(g cornerGrid) {
 // writeStoredCorners retains the original block's luma residual around its
 // estimated ramp while reconstructing the low-frequency color from source
 // corners. This preserves more detail than replacing every pixel with a ramp.
-func (d *Decoder) writeStoredCorners(g, baseline cornerGrid, luma func(x, y int) byte) {
+// blendGlyphResidual interpolates across a cell boundary when the luma step is
+// small enough to be a plausible coding seam. High-contrast edges are kept.
+func blendGlyphResidual(x, y, width, height, step int, residual int, luma func(int, int) byte, baseline cornerGrid) int {
+	if step <= 1 {
+		return residual
+	}
+	value := int(luma(x, y))
+	delta := 0
+	adjust := func(nx, ny int) {
+		if nx < 0 || nx >= width || ny < 0 || ny >= height {
+			return
+		}
+		n := int(luma(nx, ny))
+		diff := value - n
+		if diff < -24 || diff > 24 {
+			return
+		}
+		other := n - int(baseline.at(nx, ny)[0])
+		delta += (other - residual) * 3 / 8
+	}
+	if x%step == 0 {
+		adjust(x-1, y)
+	} else if x%step == step-1 {
+		adjust(x+1, y)
+	}
+	if y%step == 0 {
+		adjust(x, y-1)
+	} else if y%step == step-1 {
+		adjust(x, y+1)
+	}
+	return residual + delta
+}
+
+func (d *Decoder) writeStoredCorners(g, baseline cornerGrid, luma func(x, y int) byte, glyphBlend bool, blockStep int) {
 	write := func(y0, y1 int) {
 		for y := y0; y < y1; y++ {
 			for x := 0; x < g.width; x++ {
 				v, old := g.at(x, y), baseline.at(x, y)
-				Y := int32(max(0, min(255, int(luma(x, y))+int(v[0])-int(old[0]))))
+				residual := int(luma(x, y)) - int(old[0])
+				if glyphBlend {
+					residual = blendGlyphResidual(x, y, g.width, g.height, blockStep, residual, luma, baseline)
+				}
+				Y := int32(max(0, min(255, residual+int(v[0]))))
 				Cb, Cr := int32(v[1])-128, int32(v[2])-128
 				R := Y + ((91881 * Cr) >> 16)
 				G := Y - ((22554*Cb + 46802*Cr) >> 16)

@@ -181,6 +181,42 @@ input. [Individual cycles](benchmarks/cornerdata-apple-m3.json) are retained.
 python3 scripts/compare-corners.py --input benchmark.jpg --helper /tmp/babe-cornerbench --rounds 3 --qualities 10,15 --encoded-corners --output /tmp/cornerdata-results.json
 ```
 
+### Experimental glyph boundaries
+
+For BGC1 images, `-glyphs` / `Decoder.GlyphBlend` interpolates small differences
+between the reconstructed luma residuals on opposite sides of a regular
+small-block boundary. It does so while restoring the RGB pixels from the source
+corner gradient, using a snapshot of decoded luma so parallel workers see the
+same neighbours. Differences above 24 luma levels are left intact. The grid is
+based on the small-block size (or the macroblock size if the small block is 1),
+so it also includes boundaries inside larger adaptive blocks; the threshold is
+only a heuristic and can smooth a real edge or miss a coding artifact. It adds
+no bits and is off by default. The setting is not stored in BGC1 and q100 is
+unaffected.
+
+On `samples/source.jpg` at q10, both BGC1 variants were 60,637 bytes. RGB PSNR
+against the decoded source was 29.63 dB without glyph blending and 29.61 dB
+with it. This does not establish a visual improvement; inspect the images at
+the same size.
+
+On Apple M3, Go 1.27.3 and GOMAXPROCS=8, three complete CLI cycles after
+warm-up used the same RGB input and byte-identical BGC1 files. Process startup,
+PPM conversion and disk I/O are included. CPU sums both stages, and RSS is the
+largest individual process peak. Individual results are in
+[the raw data](benchmarks/glyphs-apple-m3.json).
+
+| Quality | Decode mode | Decode | Full cycle | CPU / cycle | Peak RSS | Encoded size |
+|---:|---|---:|---:|---:|---:|---:|
+| 0 | Corners | 0.575 s | 0.874 s | 2.099 s | 299.5 MiB | 1,774,890 B |
+| 0 | Corners + glyphs | 0.782 s | 1.096 s | 2.825 s | 299.2 MiB | 1,774,890 B |
+| 10 | Corners | 0.734 s | 1.162 s | 2.258 s | 299.7 MiB | 7,745,569 B |
+| 10 | Corners + glyphs | 1.000 s | 1.496 s | 3.097 s | 299.5 MiB | 7,745,569 B |
+
+```sh
+go build -o /tmp/babe-glyphbench ./cmd/losslessbench
+python3 scripts/compare-corners.py --input benchmark.jpg --helper /tmp/babe-glyphbench --rounds 3 --qualities 0,10 --glyph-blend --output /tmp/glyph-results.json
+```
+
 ## Lossless CLI comparison
 
 The [README table](../README.md#lossless-complete-encodedecode-cycle) uses the
