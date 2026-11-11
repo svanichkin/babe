@@ -16,8 +16,8 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 || len(os.Args) > 5 {
-		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [decoded.png]\n  babe <input.babe> [-postfilter]\n  (bw flag and decoded.png can appear anywhere after quality)\n")
+	if len(os.Args) < 2 || len(os.Args) > 6 {
+		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [-corners] [decoded.png]\n  babe <input.babe> [-postfilter] [-corners]\n  (options and decoded.png can appear after quality)\n")
 		os.Exit(1)
 	}
 
@@ -28,13 +28,16 @@ func main() {
 	// If input is .babe → decode to PNG
 	if ext == ".babe" {
 		postfilter := false
+		corners := false
 		for _, a := range os.Args[2:] {
 			if a == "-postfilter" {
 				postfilter = true
-				break
+			}
+			if a == "-corners" {
+				corners = true
 			}
 		}
-		if err := decodeBabe(inputPath, base+".png", false, postfilter); err != nil {
+		if err := decodeBabe(inputPath, base+".png", false, postfilter, corners); err != nil {
 			fmt.Fprintln(os.Stderr, "decode error:", err)
 			os.Exit(1)
 		}
@@ -59,8 +62,13 @@ func main() {
 	}
 
 	bwmode := false
+	corners := false
 	decodeOutPath := ""
 	for _, a := range encodeArgs {
+		if a == "-corners" {
+			corners = true
+			continue
+		}
 		if a == "bw" {
 			bwmode = true
 			continue
@@ -76,7 +84,7 @@ func main() {
 		os.Exit(1)
 	}
 	if decodeOutPath != "" {
-		if err := decodeBabe(outPath, decodeOutPath, false, false); err != nil {
+		if err := decodeBabe(outPath, decodeOutPath, false, false, corners); err != nil {
 			fmt.Fprintln(os.Stderr, "decode error:", err)
 			os.Exit(1)
 		}
@@ -143,7 +151,7 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool) error {
 	return nil
 }
 
-func decodeBabe(inPath, outPath string, splitChannels, postfilter bool) error {
+func decodeBabe(inPath, outPath string, splitChannels, postfilter, corners bool) error {
 	pngEncoder := png.Encoder{CompressionLevel: png.DefaultCompression}
 
 	in, err := os.Open(inPath)
@@ -160,7 +168,9 @@ func decodeBabe(inPath, outPath string, splitChannels, postfilter bool) error {
 	compSize := len(compData)
 
 	start := time.Now()
-	dec, err := Decode(compData, postfilter)
+	decoder := NewDecoder()
+	decoder.CornerGradient = corners
+	dec, err := decoder.Decode(compData, postfilter)
 	if err != nil {
 		return err
 	}

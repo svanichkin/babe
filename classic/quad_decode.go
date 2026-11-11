@@ -70,6 +70,21 @@ func (d *Decoder) decodeQuadImage(segments [3][]byte, w, h int, lossless bool) {
 			decodeValidatedQuadPlane(segments[i], planes[i], w, h)
 		}
 	})
+	if d.CornerGradient && !lossless {
+		grid := makeCornerGrid(w, h, 2, func(x, y int) [3]byte {
+			o := y*w + x
+			v := [3]byte{planes[0][o], 128, 128}
+			if planes[1] != nil {
+				v[1] = planes[1][o]
+			}
+			if planes[2] != nil {
+				v[2] = planes[2][o]
+			}
+			return v
+		})
+		d.writeCornerGradient(grid)
+		return
+	}
 	processStreams(4, n, d.Parallel, func(i int) {
 		start, end := n*i/4, n*(i+1)/4
 		y := planes[0][start:end]

@@ -25,6 +25,10 @@ type Decoder struct {
 	// Set to false to reduce goroutine overhead and allocations.
 	Parallel bool
 
+	// CornerGradient experimentally reconstructs lossy colors from shared
+	// block corners. It changes decoded pixels; lossless images are unaffected.
+	CornerGradient bool
+
 	payload []byte
 	zdec    *zstd.Decoder
 
@@ -942,6 +946,28 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	}
 	if errCr != nil {
 		return nil, errCr
+	}
+	if d.CornerGradient && channelsMask&channelFlagLossless == 0 {
+		step := smallBlock
+		if step == 1 {
+			step = macroBlock
+		}
+		grid := makeCornerGrid(imgW, imgH, step, func(x, y int) [3]byte {
+			o := y*stride + x*4
+			v := [3]byte{pix[o], 128, 128}
+			if hasCb {
+				v[1] = pix[o+1]
+			}
+			if hasCr {
+				v[2] = pix[o+2]
+			}
+			return v
+		})
+		d.writeCornerGradient(grid)
+		if postfilter {
+			return smoothBlocks(dst), nil
+		}
+		return dst, nil
 	}
 
 	if d.Parallel {

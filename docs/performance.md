@@ -112,6 +112,43 @@ they do not represent the full image codec. Both paths allocate zero bytes per
 iteration after warm-up. Faster entropy coding exposes the remaining cost of
 block processing, validation and color conversion.
 
+## Experimental corner reconstruction
+
+With `-corners` or `Decoder.CornerGradient`, the lossy decoder estimates each
+grid corner by averaging the reconstructed samples touching it, then derives
+each pixel's Y/Cb/Cr from the four shared corners using bilinear interpolation
+as it writes RGB. The grid uses the header's small-block size, or the macroblock
+size when the small block is 1×1; it is a regular grid, not the precise adaptive
+block partition. All three channels are interpolated, so small features and
+edges may blur or change color. The experiment is disabled by default and does
+not run for lossless q100. It does not change encoded bytes or the BRC1 format;
+ordinary decoding remains available for existing files.
+
+On Apple M3 with Go 1.27.3 and `GOMAXPROCS=8`, these are medians of three
+complete encode/decode cycles after warm-up, using the same 5152×7728 JPEG
+decoded to RGB. Each cycle starts fresh processes and includes file I/O and
+PPM conversion. All six cases were shuffled in each round. CPU sums the stages;
+RSS is the largest single process peak. The encoded bitstream was verified to
+be byte-identical between modes. This is an initial speed and size comparison,
+not a guarantee of improved perceived quality.
+
+| Quality | Decoding | Decode | Full cycle | CPU / cycle | Peak RSS | Encoded size |
+|---:|---|---:|---:|---:|---:|---:|
+| 0 | Normal | 0.236 s | 0.501 s | 0.877 s | 297.4 MiB | 780,855 B |
+| 0 | Corners | 0.458 s | 0.754 s | 1.486 s | 297.7 MiB | 780,855 B |
+| 17 | Normal | 0.259 s | 0.613 s | 1.058 s | 299.7 MiB | 8,309,362 B |
+| 17 | Corners | 0.433 s | 0.779 s | 1.566 s | 299.9 MiB | 8,309,362 B |
+| 80 | Normal | 0.607 s | 1.105 s | 1.843 s | 744.7 MiB | 37,200,272 B |
+| 80 | Corners | 0.950 s | 1.456 s | 2.557 s | 707.2 MiB | 37,200,272 B |
+
+Individual cycles are in [the raw data](benchmarks/corners-apple-m3.json).
+Reproduce with:
+
+```sh
+go build -o /tmp/babe-cornerbench ./cmd/losslessbench
+python3 scripts/compare-corners.py --input benchmark.jpg --helper /tmp/babe-cornerbench --rounds 3 --output /tmp/corners-results.json
+```
+
 ## Lossless CLI comparison
 
 The [README table](../README.md#lossless-complete-encodedecode-cycle) uses the

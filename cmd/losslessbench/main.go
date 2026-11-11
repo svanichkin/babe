@@ -68,6 +68,14 @@ func run(op, codec, input, output string) error {
 			if err == nil {
 				img, err = classic.NewDecoder().Decode(data, false)
 			}
+		case "babe-corners":
+			var data []byte
+			data, err = io.ReadAll(f)
+			if err == nil {
+				decoder := classic.NewDecoder()
+				decoder.CornerGradient = true
+				img, err = decoder.Decode(data, false)
+			}
 		case "qoi":
 			img, err = qoi.Decode(f)
 		case "png":
