@@ -1,0 +1,143 @@
+{
+  "source_dimensions": [
+    5152,
+    7728
+  ],
+  "rgb_sha256": "ead8f20ca8c77be96ece5ba93b760b18f0875bece9ef2b29598b90f7d5b0d20a",
+  "rounds": 3,
+  "threads": 8,
+  "measurements": [
+    {
+      "round": 1,
+      "quality": 10,
+      "mode": "babe",
+      "encoded_bytes": 6751534,
+      "encode_wall_seconds": 0.3901959169888869,
+      "decode_wall_seconds": 0.44075533299474046,
+      "cycle_wall_seconds": 0.8310800000326708,
+      "cycle_cpu_seconds": 1.132918,
+      "peak_process_rss_bytes": 312033280
+    },
+    {
+      "round": 1,
+      "quality": 10,
+      "mode": "babe-cornerdata",
+      "encoded_bytes": 7745569,
+      "encode_wall_seconds": 0.39527320896741003,
+      "decode_wall_seconds": 0.6356461250106804,
+      "cycle_wall_seconds": 1.0310507499962114,
+      "cycle_cpu_seconds": 2.1950469999999997,
+      "peak_process_rss_bytes": 314277888
+    },
+    {
+      "round": 1,
+      "quality": 15,
+      "mode": "babe",
+      "encoded_bytes": 7648513,
+      "encode_wall_seconds": 0.3540686249616556,
+      "decode_wall_seconds": 0.28457045898539945,
+      "cycle_wall_seconds": 0.6387832499458455,
+      "cycle_cpu_seconds": 1.090577,
+      "peak_process_rss_bytes": 314507264
+    },
+    {
+      "round": 1,
+      "quality": 15,
+      "mode": "babe-cornerdata",
+      "encoded_bytes": 8642548,
+      "encode_wall_seconds": 0.3788555419887416,
+      "decode_wall_seconds": 0.8719446659670211,
+      "cycle_wall_seconds": 1.2509353339555673,
+      "cycle_cpu_seconds": 2.522602,
+      "peak_process_rss_bytes": 316440576
+    },
+    {
+      "round": 2,
+      "quality": 15,
+      "mode": "babe",
+      "encoded_bytes": 7648513,
+      "encode_wall_seconds": 0.37633408402325585,
+      "decode_wall_seconds": 0.2696409579948522,
+      "cycle_wall_seconds": 0.6461026659817435,
+      "cycle_cpu_seconds": 1.138057,
+      "peak_process_rss_bytes": 314195968
+    },
+    {
+      "round": 2,
+      "quality": 10,
+      "mode": "babe-cornerdata",
+      "encoded_bytes": 7745569,
+      "encode_wall_seconds": 0.40538187499623746,
+      "decode_wall_seconds": 0.6153064160025679,
+      "cycle_wall_seconds": 1.020798040961381,
+      "cycle_cpu_seconds": 2.1802449999999998,
+      "peak_process_rss_bytes": 313851904
+    },
+    {
+      "round": 2,
+      "quality": 15,
+      "mode": "babe-cornerdata",
+      "encoded_bytes": 8642548,
+      "encode_wall_seconds": 0.38077104202238843,
+      "decode_wall_seconds": 0.5570867080241442,
+      "cycle_wall_seconds": 0.9379561669775285,
+      "cycle_cpu_seconds": 2.149419,
+      "peak_process_rss_bytes": 316489728
+    },
+    {
+      "round": 2,
+      "quality": 10,
+      "mode": "babe",
+      "encoded_bytes": 6751534,
+      "encode_wall_seconds": 0.3803919169586152,
+      "decode_wall_seconds": 0.32562779099680483,
+      "cycle_wall_seconds": 0.7061396660283208,
+      "cycle_cpu_seconds": 1.1193499999999998,
+      "peak_process_rss_bytes": 312082432
+    },
+    {
+      "round": 3,
+      "quality": 10,
+      "mode": "babe",
+      "encoded_bytes": 6751534,
+      "encode_wall_seconds": 0.3848992909770459,
+      "decode_wall_seconds": 0.31245970801683143,
+      "cycle_wall_seconds": 0.6974853330175392,
+      "cycle_cpu_seconds": 1.140256,
+      "peak_process_rss_bytes": 311918592
+    },
+    {
+      "round": 3,
+      "quality": 15,
+      "mode": "babe-cornerdata",
+      "encoded_bytes": 8642548,
+      "encode_wall_seconds": 0.3626905829878524,
+      "decode_wall_seconds": 0.5764370000106283,
+      "cycle_wall_seconds": 0.9392412090091966,
+      "cycle_cpu_seconds": 2.1100630000000002,
+      "peak_process_rss_bytes": 316424192
+    },
+    {
+      "round": 3,
+      "quality": 15,
+      "mode": "babe",
+      "encoded_bytes": 7648513,
+      "encode_wall_seconds": 0.6609315830282867,
+      "decode_wall_seconds": 0.26783845794852823,
+      "cycle_wall_seconds": 0.9289324590354227,
+      "cycle_cpu_seconds": 1.126212,
+      "peak_process_rss_bytes": 313901056
+    },
+    {
+      "round": 3,
+      "quality": 10,
+      "mode": "babe-cornerdata",
+      "encoded_bytes": 7745569,
+      "encode_wall_seconds": 0.4161097499891184,
+      "decode_wall_seconds": 0.6243781250086613,
+      "cycle_wall_seconds": 1.040631499956362,
+      "cycle_cpu_seconds": 2.214555,
+      "peak_process_rss_bytes": 314015744
+    }
+  ]
+}

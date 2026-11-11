@@ -35,7 +35,7 @@ func run(op, codec, input, output string) error {
 	if name, value, ok := strings.Cut(codec, ":"); ok {
 		var err error
 		quality, err = strconv.Atoi(value)
-		if err != nil || quality < 0 || quality > 100 || (name != "babe" && name != "jpeg") {
+		if err != nil || quality < 0 || quality > 100 || (name != "babe" && name != "babe-cornerdata" && name != "jpeg") {
 			return fmt.Errorf("invalid codec quality %q", codec)
 		}
 		codec = name
@@ -102,6 +102,10 @@ func run(op, codec, input, output string) error {
 		switch codec {
 		case "babe":
 			err = classic.NewEncoder().EncodeTo(out, img, quality, false)
+		case "babe-cornerdata":
+			encoder := classic.NewEncoder()
+			encoder.CornerData = true
+			err = encoder.EncodeTo(out, img, quality, false)
 		case "jpeg":
 			err = jpeg.Encode(out, img, &jpeg.Options{Quality: quality})
 		case "qoi":

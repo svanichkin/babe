@@ -79,7 +79,7 @@ func main() {
 	}
 
 	outPath := base + ".babe"
-	if err := encodeToBabe(inputPath, outPath, quality, bwmode); err != nil {
+	if err := encodeToBabe(inputPath, outPath, quality, bwmode, corners); err != nil {
 		fmt.Fprintln(os.Stderr, "encode error:", err)
 		os.Exit(1)
 	}
@@ -91,7 +91,7 @@ func main() {
 	}
 }
 
-func encodeToBabe(inPath, outPath string, quality int, bwmode bool) error {
+func encodeToBabe(inPath, outPath string, quality int, bwmode, corners bool) error {
 	info, err := os.Stat(inPath)
 	if err != nil {
 		return err
@@ -110,7 +110,9 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode bool) error {
 	}
 
 	start := time.Now()
-	enc, err := Encode(img, quality, bwmode)
+	encoder := NewEncoder()
+	encoder.CornerData = corners
+	enc, err := encoder.Encode(img, quality, bwmode)
 	if err != nil {
 		return err
 	}

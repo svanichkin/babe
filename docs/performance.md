@@ -114,7 +114,8 @@ block processing, validation and color conversion.
 
 ## Experimental corner reconstruction
 
-With `-corners` or `Decoder.CornerGradient`, the lossy decoder estimates each
+For an existing ordinary BRC1 file, `-corners` or `Decoder.CornerGradient`
+enables the earlier decoder-only experiment: the lossy decoder estimates each
 grid corner by averaging the reconstructed samples touching it, then derives
 each pixel's Y/Cb/Cr from the four shared corners using bilinear interpolation
 as it writes RGB. The grid uses the header's small-block size, or the macroblock
@@ -147,6 +148,37 @@ Reproduce with:
 ```sh
 go build -o /tmp/babe-cornerbench ./cmd/losslessbench
 python3 scripts/compare-corners.py --input benchmark.jpg --helper /tmp/babe-cornerbench --rounds 3 --output /tmp/corners-results.json
+```
+
+The newer encoder experiment stores corner values sampled from the source
+image in a BGC1 wrapper. It interpolates those values and retains the luma
+residual of the BABE blocks, rather than deriving every corner from already
+quantized blocks. `-corners` while encoding or `Encoder.CornerData` enables it.
+See [the format description](BRC1.md#experimental-bgc1-corner-wrapper). Older
+decoders cannot read BGC1; q100 remains ordinary lossless BRC1. It is opt-in:
+source corners add bytes, and the approach can still blur or change colors.
+
+On the 800×572 `samples/source.jpg`, with JPEG decoded directly as CLI input,
+q10 was 47,940 B and 29.52 dB RGB PSNR normally, versus 60,637 B and 29.63 dB
+with stored corners. At a comparable size ordinary q15 was 60,011 B and
+30.43 dB. PSNR does not fully describe perceived block artifacts, but these
+results do not demonstrate a quality advantage at equal size. The decoded
+source JPEG was the reference.
+
+On the 5152×7728 input, using the same complete-cycle CLI methodology as
+above, three shuffled rounds gave these medians. Input was converted to RGB
+PPM before the measurements, so sizes can differ slightly from direct JPEG
+input. [Individual cycles](benchmarks/cornerdata-apple-m3.json) are retained.
+
+| Quality | Encoding | Decode | Full cycle | CPU / cycle | Peak RSS | Encoded size |
+|---:|---|---:|---:|---:|---:|---:|
+| 10 | Normal | 0.326 s | 0.706 s | 1.133 s | 297.6 MiB | 6,751,534 B |
+| 10 | Source corners | 0.624 s | 1.031 s | 2.195 s | 299.5 MiB | 7,745,569 B |
+| 15 | Normal | 0.270 s | 0.646 s | 1.126 s | 299.6 MiB | 7,648,513 B |
+| 15 | Source corners | 0.576 s | 0.939 s | 2.149 s | 301.8 MiB | 8,642,548 B |
+
+```sh
+python3 scripts/compare-corners.py --input benchmark.jpg --helper /tmp/babe-cornerbench --rounds 3 --qualities 10,15 --encoded-corners --output /tmp/cornerdata-results.json
 ```
 
 ## Lossless CLI comparison

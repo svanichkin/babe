@@ -102,6 +102,30 @@ before block decoding. Trailing bytes, unknown methods, inconsistent block/mask
 counts and truncated streams are errors. Image dimensions are limited to
 67,108,864 pixels, and decompressed payloads to 1 GiB.
 
+## Experimental BGC1 corner wrapper
+
+An opt-in lossy encoder can wrap a normal BRC1 image with corner data. BGC1
+is a separate experimental container; an older decoder rejects it. All fields
+are big-endian. The wrapper contains magic `BGC1` (4 bytes), grid step (1 byte,
+currently 8), width and height (4 bytes each), BRC1 byte length (4), encoded
+corner-stream byte length (4), CRC32/IEEE (4), followed by the BRC1 bytes and
+the corner stream. The checksum covers the BRC1 bytes followed by the decoded
+corner stream. Sizes and dimensions must match exactly, and the base must be a
+lossy BRC1 image of the same dimensions.
+
+The corner grid has `ceil((width-1)/8)+1` columns and
+`ceil((height-1)/8)+1` rows. The encoder estimates each source Y/Cb/Cr corner
+from the source pixels immediately touching it. In row-major order, each byte
+stores a channel's modulo-256 difference from the preceding corner in that row,
+or from zero at the start of a row. Each corner contributes Y, Cb, Cr in that
+order. The resulting bytes are encoded using BRC1 method 16, with their raw
+length determined by the grid dimensions. BW uses neutral chroma.
+
+During decoding, these source corner values provide bilinear gradients. The
+decoder also retains a luma residual from the base block representation to
+help preserve details. The same q100 input always produces ordinary lossless
+BRC1, with no corner wrapper.
+
 ## Quantization
 
 At qualities 0–99 quantization happens before entropy coding, so the decoder needs no quality or

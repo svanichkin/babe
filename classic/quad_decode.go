@@ -50,7 +50,7 @@ func decodeValidatedQuadPlane(data, plane []byte, w, h int) {
 	}
 }
 
-func (d *Decoder) decodeQuadImage(segments [3][]byte, w, h int, lossless bool) {
+func (d *Decoder) decodeQuadImage(segments [3][]byte, w, h int, lossless bool, storedCorners *cornerGrid) {
 	n := w * h
 	scratch := [3]*decoderChannelScratch{&d.y, &d.cb, &d.cr}
 	var planes [3][]byte
@@ -70,8 +70,12 @@ func (d *Decoder) decodeQuadImage(segments [3][]byte, w, h int, lossless bool) {
 			decodeValidatedQuadPlane(segments[i], planes[i], w, h)
 		}
 	})
-	if d.CornerGradient && !lossless {
-		grid := makeCornerGrid(w, h, 2, func(x, y int) [3]byte {
+	if (d.CornerGradient || storedCorners != nil) && !lossless {
+		step := 2
+		if storedCorners != nil {
+			step = storedCorners.step
+		}
+		grid := makeCornerGrid(w, h, step, func(x, y int) [3]byte {
 			o := y*w + x
 			v := [3]byte{planes[0][o], 128, 128}
 			if planes[1] != nil {
@@ -82,7 +86,11 @@ func (d *Decoder) decodeQuadImage(segments [3][]byte, w, h int, lossless bool) {
 			}
 			return v
 		})
-		d.writeCornerGradient(grid)
+		if storedCorners != nil {
+			d.writeStoredCorners(*storedCorners, grid, func(x, y int) byte { return planes[0][y*w+x] })
+		} else {
+			d.writeCornerGradient(grid)
+		}
 		return
 	}
 	processStreams(4, n, d.Parallel, func(i int) {

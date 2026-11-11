@@ -15,6 +15,10 @@ type Encoder struct {
 	// Set to false to reduce goroutine overhead and allocations.
 	Parallel bool
 
+	// CornerData adds experimental source corner values for lossy decoding.
+	// It produces BGC1 files, which require a decoder supporting this feature.
+	CornerData bool
+
 	yPlane      []uint8
 	cbPlane     []uint8
 	crPlane     []uint8
@@ -360,6 +364,18 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 	} else {
 		extractYCbCrPlanesIntoSerial(img, e.yPlane, e.cbPlane, e.crPlane)
 	}
+	var sourceCorners cornerGrid
+	if e.CornerData && encQuality != 100 {
+		const step = 8
+		sourceCorners = makeCornerGrid(w, h, step, func(x, y int) [3]byte {
+			i := y*w + x
+			v := [3]byte{e.yPlane[i], 128, 128}
+			if !bwmode {
+				v[1], v[2] = e.cbPlane[i], e.crPlane[i]
+			}
+			return v
+		})
+	}
 	if qualityProfileFP < 35*256 {
 		remaining := 35*256 - qualityProfileFP
 		threshold := int(int64(remaining) * int64(remaining) * 255 / (35 * 35 * 256 * 256))
@@ -535,6 +551,9 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 	comp, err := e.packer.compress(e.raw.Bytes(), e.comp[:0], e.Parallel)
 	if err != nil {
 		return nil, err
+	}
+	if e.CornerData && encQuality != 100 {
+		comp = packCornerImage(comp, sourceCorners)
 	}
 	e.comp = comp
 	return e.comp, nil

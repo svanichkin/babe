@@ -20,6 +20,7 @@ parser.add_argument("--helper", required=True)
 parser.add_argument("--output", required=True)
 parser.add_argument("--rounds", type=int, default=3)
 parser.add_argument("--qualities", default="0,17,80")
+parser.add_argument("--encoded-corners", action="store_true", help="compare regular encoding with encoded source corners")
 args = parser.parse_args()
 if args.rounds < 1:
     parser.error("rounds must be positive")
@@ -29,7 +30,8 @@ if not qualities or any(q < 0 or q > 100 for q in qualities):
 helper = str(Path(args.helper).resolve())
 env = os.environ.copy()
 env["GOMAXPROCS"] = "8"
-cases = [(quality, mode) for quality in qualities for mode in ("babe", "babe-corners")]
+cases = [(quality, mode) for quality in qualities for mode in
+         (("babe", "babe-cornerdata") if args.encoded_corners else ("babe", "babe-corners"))]
 measurements, bitstreams = [], {}
 with tempfile.TemporaryDirectory(prefix="babe-corners-bench-") as directory:
     root = Path(directory)
@@ -40,17 +42,20 @@ with tempfile.TemporaryDirectory(prefix="babe-corners-bench-") as directory:
     def cycle(quality, mode, run):
         print(f"{'Warm-up' if run == 0 else f'Round {run}/{args.rounds}'}: q{quality} {mode}", flush=True)
         start = time.perf_counter()
-        enc = timed([helper, "encode", f"babe:{quality}", str(source), str(encoded)], env)
+        encoder = "babe-cornerdata" if mode == "babe-cornerdata" else "babe"
+        decoder = "babe" if mode == "babe-cornerdata" else mode
+        enc = timed([helper, "encode", f"{encoder}:{quality}", str(source), str(encoded)], env)
         size = encoded.stat().st_size
-        dec = timed([helper, "decode", mode, str(encoded), str(decoded)], env)
+        dec = timed([helper, "decode", decoder, str(encoded), str(decoded)], env)
         elapsed = time.perf_counter() - start
         output = ppm_hash(decoded)
         if output[:2] != reference[:2] or (quality == 100 and output != reference):
             raise ValueError("invalid decoded dimensions or lossless pixels")
         digest = hashlib.sha256(encoded.read_bytes()).hexdigest()
-        if quality in bitstreams and bitstreams[quality] != digest:
+        key = (quality, encoder)
+        if key in bitstreams and bitstreams[key] != digest:
             raise ValueError("encoded bitstream changed between cycles")
-        bitstreams[quality] = digest
+        bitstreams[key] = digest
         if run:
             measurements.append({"round": run, "quality": quality, "mode": mode,
                                  "encoded_bytes": size, "encode_wall_seconds": enc["wall"],

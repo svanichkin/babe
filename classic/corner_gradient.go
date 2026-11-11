@@ -78,3 +78,28 @@ func (d *Decoder) writeCornerGradient(g cornerGrid) {
 		g.writeRGB(d.dst.Pix, d.dst.Stride, 0, g.height)
 	}
 }
+
+// writeStoredCorners retains the original block's luma residual around its
+// estimated ramp while reconstructing the low-frequency color from source
+// corners. This preserves more detail than replacing every pixel with a ramp.
+func (d *Decoder) writeStoredCorners(g, baseline cornerGrid, luma func(x, y int) byte) {
+	write := func(y0, y1 int) {
+		for y := y0; y < y1; y++ {
+			for x := 0; x < g.width; x++ {
+				v, old := g.at(x, y), baseline.at(x, y)
+				Y := int32(max(0, min(255, int(luma(x, y))+int(v[0])-int(old[0]))))
+				Cb, Cr := int32(v[1])-128, int32(v[2])-128
+				R := Y + ((91881 * Cr) >> 16)
+				G := Y - ((22554*Cb + 46802*Cr) >> 16)
+				B := Y + ((116130 * Cb) >> 16)
+				o := y*d.dst.Stride + x*4
+				d.dst.Pix[o], d.dst.Pix[o+1], d.dst.Pix[o+2], d.dst.Pix[o+3] = byte(max(0, min(255, R))), byte(max(0, min(255, G))), byte(max(0, min(255, B))), 255
+			}
+		}
+	}
+	if d.Parallel {
+		processStreams(4, g.width*g.height, true, func(i int) { write(g.height*i/4, g.height*(i+1)/4) })
+	} else {
+		write(0, g.height)
+	}
+}

@@ -73,19 +73,21 @@ go build -o Babe .
 
 This writes `1.babe` and immediately decodes it into `1.png`. Range coding is enabled by default; no compression flag is needed. Use `./Babe 1.jpg 10 bw 1.png` for grayscale.
 
-To experiment with reconstructing lossy blocks as gradients between shared
-corners, add `-corners` when requesting decoded output:
+To experiment with gradients between source-image block corners, add `-corners`
+when encoding and requesting decoded output:
 
 ```sh
 ./Babe 1.jpg 0 -corners 1-corners.png
 ```
 
-The option only changes decoding: the `.babe` file and its size are identical
-to ordinary encoding. It can soften block boundaries, but can also blur detail
-and alter colors. It has no effect on lossless q100. To decode an existing
-file using the option, run `./Babe 1.babe -corners` (writes `1.png`). The Go
-API exposes the same experiment as `Decoder.CornerGradient`. See [measurements
-and details](docs/performance.md#experimental-corner-reconstruction).
+For lossy images this stores source corner values in an experimental `BGC1`
+wrapper around the BABE image; the file is larger and older decoders cannot
+read it. The new decoder recognizes it automatically. The experiment may
+reduce color blocking but can blur or alter details; lossless q100 remains
+unchanged. For an existing ordinary `.babe`, `./Babe 1.babe -corners` instead
+uses the earlier decoder-only estimate, which has no source corner data. The
+Go API exposes the two options as `Encoder.CornerData` and
+`Decoder.CornerGradient`. See [measurements and details](docs/performance.md#experimental-corner-reconstruction).
 
 ### Encode an image → `.babe`
 

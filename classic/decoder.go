@@ -789,6 +789,14 @@ func (d *Decoder) decodeChannelInto(data []byte, imgW, imgH int, scratch *decode
 func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) {
 	codecStateMu.Lock()
 	defer codecStateMu.Unlock()
+	var storedCorners *cornerGrid
+	if len(compData) >= 4 && string(compData[:4]) == cornerMagic {
+		var err error
+		compData, storedCorners, err = unpackCornerImage(compData)
+		if err != nil {
+			return nil, fmt.Errorf("decode corners: %w", err)
+		}
+	}
 
 	if d.zdec == nil {
 		d.zdec = mustNewZstdDecoder()
@@ -864,6 +872,11 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	}
 	imgW := int(imgW32)
 	imgH := int(imgH32)
+	if storedCorners != nil {
+		if channelsMask&channelFlagLossless != 0 || storedCorners.width != imgW || storedCorners.height != imgH || storedCorners.step != 8 {
+			return nil, fmt.Errorf("corner grid does not match lossy base image")
+		}
+	}
 
 	if macroBlock < smallBlock || macroBlock%smallBlock != 0 {
 		return nil, fmt.Errorf("macroBlock (%d) must be >= smallBlock (%d) and a multiple of it",
@@ -898,7 +911,7 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 		}
 	}
 	if smallBlock == 1 && macroBlock == 2 {
-		d.decodeQuadImage([3][]byte{ySeg, cbSeg, crSeg}, imgW, imgH, channelsMask&channelFlagLossless != 0)
+		d.decodeQuadImage([3][]byte{ySeg, cbSeg, crSeg}, imgW, imgH, channelsMask&channelFlagLossless != 0, storedCorners)
 		// The existing postfilter is a no-op for 1x1 small blocks.
 		return dst, nil
 	}
@@ -947,10 +960,13 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	if errCr != nil {
 		return nil, errCr
 	}
-	if d.CornerGradient && channelsMask&channelFlagLossless == 0 {
+	if (d.CornerGradient || storedCorners != nil) && channelsMask&channelFlagLossless == 0 {
 		step := smallBlock
 		if step == 1 {
 			step = macroBlock
+		}
+		if storedCorners != nil {
+			step = storedCorners.step
 		}
 		grid := makeCornerGrid(imgW, imgH, step, func(x, y int) [3]byte {
 			o := y*stride + x*4
@@ -963,7 +979,11 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 			}
 			return v
 		})
-		d.writeCornerGradient(grid)
+		if storedCorners != nil {
+			d.writeStoredCorners(*storedCorners, grid, func(x, y int) byte { return pix[y*stride+x*4] })
+		} else {
+			d.writeCornerGradient(grid)
+		}
 		if postfilter {
 			return smoothBlocks(dst), nil
 		}
