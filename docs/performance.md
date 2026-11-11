@@ -156,16 +156,40 @@ go build -o /tmp/babe-losslessbench ./cmd/losslessbench
 python3 scripts/compare-lossless.py --input benchmark.jpg --helper /tmp/babe-losslessbench --rounds 3 --threads 8 --output /tmp/lossless-results.json
 ```
 
+## JPEG at comparable sizes
+
+The [README comparison](../README.md#jpeg-and-babe-at-comparable-sizes) uses
+the decoded opaque RGB pixels of `samples/source.jpg` (800×572). JPEG q1 and
+BABE q0, and JPEG q80 and BABE q17, were selected for close encoded sizes on
+this image. The lossless PNG previews show the BABE decoder output and do not
+represent BABE file sizes. RGB PSNR was measured against the decoded source;
+it is not a complete perceptual quality metric.
+
+After one warm-up per case, three shuffled rounds each ran a complete encode
+and decode for every setting. The measurements use separate processes and PPM
+input/output, including startup and disk I/O. Unlike the lossless test, lossy
+pixels cannot be required to match the source; the benchmark checks the output
+dimensions and PPM structure, while `compareimages` calculates PSNR separately.
+CPU sums user and system times of both stages; RSS is the highest single
+process peak. This small image makes startup and file overhead significant.
+The [raw JSON](benchmarks/jpeg-matched-size-apple-m3.json) contains all 12
+cycles, and results use their medians. Apple M3, Go 1.27.3, GOMAXPROCS=8.
+
+```sh
+go build -o /tmp/babe-losslessbench ./cmd/losslessbench
+python3 scripts/compare-jpeg.py --input samples/source.jpg --helper /tmp/babe-losslessbench --rounds 3 --output /tmp/jpeg-results.json
+```
+
 ## CPU and memory
 
-The [README](../README.md#benchmark-comparison) lists CPU time, average core
-use, Go heap allocations per operation, and peak process RSS for each quality
-and codec. The input is the same local 5152×7728 `benchmark.jpg` used in the
+The historical in-memory measurements cover CPU time, average core use, Go
+heap allocations per operation, and peak process RSS for each quality and
+codec. The input is the same local 5152×7728 `benchmark.jpg` used in the
 time comparison. Measurements were made on Apple M3, darwin/arm64, Go 1.27.3,
 `GOMAXPROCS=8`, using three separate processes per case with two timed, warmed
 operations in each. Execution order was shuffled. The tables use medians of
 the three process results. The [original individual measurements](benchmarks/resources-apple-m3.json)
-are retained; the README's BABE rows use the updated
+are retained alongside the updated BABE
 [quality-curve measurements](benchmarks/resources-qualitycurve-apple-m3.json),
 collected in separate sessions from JPEG and QOI.
 
@@ -262,13 +286,11 @@ For a before/after comparison, build each revision's test binary with the same
 sequentially from `classic/`, alternating their order. Do not run benchmarks
 alongside builds, tests or other benchmarks. Absolute timings depend on load.
 
-The README retains the JPEG/BABE/QOI comparison on `benchmark.jpg`, quality 80
-for JPEG and BABE, QOI lossless, and adds JPEG/BABE at qualities 0, 10, 50, 80
-and 100. Those numbers are medians of three runs with two operations per run
-using `BenchmarkQualityComparison`; JPEG quality 0 is clamped to 1. The BABE
-speed and resource numbers were remeasured after the quality-curve changes;
-JPEG and QOI rows are from earlier sessions. The table
-reports encode and decode medians separately. A previous single-run README
+The earlier in-memory JPEG/BABE/QOI comparison used `benchmark.jpg` and
+`BenchmarkQualityComparison`, with three runs of two operations each. JPEG
+quality 0 is clamped to 1. BABE speed and resource numbers were remeasured
+after the quality-curve changes; JPEG and QOI rows are from earlier sessions.
+A previous single-run README
 measurement reported 8.638 s for JPEG encoding and 16.948 s for QOI encoding,
 despite neither codec receiving comparable optimization here. That run cannot
 be reliably compared with the current one: machine load or the measurement

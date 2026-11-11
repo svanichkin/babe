@@ -7,11 +7,12 @@ import (
 	"fmt"
 	"image"
 	"image/draw"
-	_ "image/jpeg"
+	"image/jpeg"
 	"image/png"
 	"io"
 	"os"
 	"strconv"
+	"strings"
 	"unicode"
 
 	"github.com/svanichkin/Babe/classic"
@@ -20,7 +21,7 @@ import (
 
 func main() {
 	if len(os.Args) != 5 {
-		fmt.Fprintln(os.Stderr, "usage: losslessbench prepare|encode|decode babe|qoi|png|source input output")
+		fmt.Fprintln(os.Stderr, "usage: losslessbench prepare|encode|decode babe[:quality]|jpeg[:quality]|qoi|png|source input output")
 		os.Exit(2)
 	}
 	if err := run(os.Args[1], os.Args[2], os.Args[3], os.Args[4]); err != nil {
@@ -30,6 +31,15 @@ func main() {
 }
 
 func run(op, codec, input, output string) error {
+	quality := 100
+	if name, value, ok := strings.Cut(codec, ":"); ok {
+		var err error
+		quality, err = strconv.Atoi(value)
+		if err != nil || quality < 0 || quality > 100 || (name != "babe" && name != "jpeg") {
+			return fmt.Errorf("invalid codec quality %q", codec)
+		}
+		codec = name
+	}
 	f, err := os.Open(input)
 	if err != nil {
 		return err
@@ -62,6 +72,8 @@ func run(op, codec, input, output string) error {
 			img, err = qoi.Decode(f)
 		case "png":
 			img, err = png.Decode(f)
+		case "jpeg":
+			img, err = jpeg.Decode(f)
 		default:
 			return fmt.Errorf("unsupported decoder %q", codec)
 		}
@@ -81,7 +93,9 @@ func run(op, codec, input, output string) error {
 	} else {
 		switch codec {
 		case "babe":
-			err = classic.NewEncoder().EncodeTo(out, img, 100, false)
+			err = classic.NewEncoder().EncodeTo(out, img, quality, false)
+		case "jpeg":
+			err = jpeg.Encode(out, img, &jpeg.Options{Quality: quality})
 		case "qoi":
 			err = qoi.Encode(out, img)
 		case "png":
