@@ -147,7 +147,7 @@ vary with the image and machine load; the source image is itself a JPEG.
 
 JPEG and BABE at quality 80, with lossless QOI for reference:
 
-| Metric | JPEG (q=80) | BABE (q=80) | QOI |
+| Metric | JPEG (q=80, lossy) | BABE (q=80, lossy) | QOI (lossless) |
 |---|---:|---:|---:|
 | Encode time | 0.786 s | 0.278 s | 1.096 s |
 | Decode time | 0.420 s | 0.296 s | 0.300 s |
@@ -156,12 +156,27 @@ JPEG and BABE at quality 80, with lossless QOI for reference:
 
 Total is the sum of the separately measured encode and decode medians.
 
+At maximum quality, BABE and QOI both reproduce the decoded 8-bit RGB input
+exactly. JPEG quality 100 is included for reference but is still lossy:
+
+| Metric | JPEG (q=100, lossy) | BABE (q=100, lossless) | QOI (lossless) |
+|---|---:|---:|---:|
+| Encode time | 0.961 s | 0.426 s | 1.096 s |
+| Decode time | 0.799 s | 0.449 s | 0.300 s |
+| Total | 1.760 s | 0.875 s | 1.396 s |
+| Output size | 37.66 MB | 44.09 MB | 78.98 MB |
+
+These compare opaque RGB input: BABE q100 does not support transparency or
+16-bit images. QOI also supports an alpha channel, which this input does not
+use. BABE q100 was remeasured in a separate session after the lossless change;
+the JPEG and QOI figures are from the earlier measurements described above.
+
 JPEG and BABE at each requested quality, on the same image and under the same
 conditions:
 
 | Quality | JPEG encode | BABE encode | JPEG decode | BABE decode | JPEG size | BABE size |
 |---:|---:|---:|---:|---:|---:|---:|
-| 100 | 0.961 s | 0.426 s | 0.799 s | 0.449 s | 37.66 MB | 44.09 MB |
+| 100 (BABE lossless) | 0.961 s | 0.426 s | 0.799 s | 0.449 s | 37.66 MB | 44.09 MB |
 | 80 | 0.786 s | 0.278 s | 0.420 s | 0.296 s | 13.98 MB | 22.69 MB |
 | 50 | 0.533 s | 0.354 s | 0.242 s | 0.336 s | 5.30 MB | 17.47 MB |
 | 10 | 0.417 s | 0.249 s | 0.155 s | 0.135 s | 0.97 MB | 7.47 MB |
@@ -178,8 +193,8 @@ core). Values are medians of three processes with two warmed operations each.
 
 | Quality | Codec | CPU encode s | CPU decode s | Encode cores | Decode cores |
 |---:|---|---:|---:|---:|---:|
-| 100 | JPEG | 0.918 | 0.778 | 1.00 | 0.95 |
-| 100 | BABE | 0.857 | 0.813 | 1.94 | 1.87 |
+| 100 | JPEG (lossy) | 0.918 | 0.778 | 1.00 | 0.95 |
+| 100 | BABE (lossless) | 0.857 | 0.813 | 1.94 | 1.87 |
 | 80 | JPEG | 0.765 | 0.454 | 0.98 | 0.95 |
 | 80 | BABE | 0.669 | 0.591 | 2.25 | 2.12 |
 | 50 | JPEG | 0.531 | 0.244 | 0.99 | 1.00 |
@@ -188,15 +203,15 @@ core). Values are medians of three processes with two warmed operations each.
 | 10 | BABE | 0.574 | 0.333 | 2.19 | 2.37 |
 | 0 | JPEG | 0.469 | 0.154 | 0.83 | 0.98 |
 | 0 | BABE | 0.613 | 0.409 | 2.00 | 1.77 |
-| Lossless | QOI | 1.038 | 0.279 | 0.99 | 0.98 |
+| Lossless | QOI (lossless) | 1.038 | 0.279 | 0.99 | 0.98 |
 
 Memory allocated during a warmed operation and peak resident memory of its
 entire process, in MiB (1 MiB = 1,048,576 bytes):
 
 | Quality | Codec | Alloc encode MiB/op | Alloc decode MiB/op | Peak RSS encode MiB | Peak RSS decode MiB |
 |---:|---|---:|---:|---:|---:|
-| 100 | JPEG | 0.00 | 56.98 | 443.7 | 156.2 |
-| 100 | BABE | 0.03 | 0.00 | 762.2 | 390.5 |
+| 100 | JPEG (lossy) | 0.00 | 56.98 | 443.7 | 156.2 |
+| 100 | BABE (lossless) | 0.03 | 0.00 | 762.2 | 390.5 |
 | 80 | JPEG | 0.00 | 56.98 | 443.5 | 133.7 |
 | 80 | BABE | 0.03 | 0.00 | 660.6 | 345.3 |
 | 50 | JPEG | 0.00 | 56.97 | 443.4 | 125.4 |
@@ -205,7 +220,7 @@ entire process, in MiB (1 MiB = 1,048,576 bytes):
 | 10 | BABE | 0.03 | 0.01 | 444.6 | 178.7 |
 | 0 | JPEG | 0.00 | 56.98 | 443.4 | 120.9 |
 | 0 | BABE | 0.03 | 0.01 | 443.9 | 174.9 |
-| Lossless | QOI | 303.77 | 151.89 | 656.2 | 385.9 |
+| Lossless | QOI (lossless) | 303.77 | 151.89 | 656.2 | 385.9 |
 
 Allocation counts do **not** include retained buffers created during warm-up:
 near-zero allocations do not mean near-zero memory use. Peak RSS includes
