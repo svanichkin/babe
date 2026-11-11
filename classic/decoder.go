@@ -33,6 +33,9 @@ type Decoder struct {
 	// block edges in images that contain stored source corners.
 	GlyphBlend bool
 
+	// GlyphMinSize is the minimum side length of blocks to blend. Zero means 1.
+	GlyphMinSize int
+
 	// GlyphsOnly renders the stored first channel as grayscale for inspection.
 	// In lossless mode the first channel is G, not luminance.
 	GlyphsOnly bool
@@ -44,9 +47,10 @@ type Decoder struct {
 	cb decoderChannelScratch
 	cr decoderChannelScratch
 
-	neutral   []uint8
-	dst       *image.RGBA
-	glyphLuma []byte
+	neutral     []uint8
+	dst         *image.RGBA
+	glyphLuma   []byte
+	glyphBlocks []byte
 }
 
 func NewDecoder() *Decoder {
@@ -870,6 +874,9 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	if channelsMask&channelFlagY == 0 {
 		return nil, fmt.Errorf("decode: Y channel missing in header")
 	}
+	if d.GlyphBlend && d.GlyphMinSize > 0 && storedCorners == nil && channelsMask&channelFlagLossless == 0 {
+		return nil, fmt.Errorf("minimum glyph size requires an image encoded with -corners")
+	}
 
 	imgW32, err := readU32("image width")
 	if err != nil {
@@ -1000,7 +1007,10 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 		})
 		if storedCorners != nil {
 			readLuma := func(x, y int) byte { return pix[y*stride+x*4] }
-			if d.GlyphBlend {
+			blend := d.GlyphBlend && macroBlock >= max(d.GlyphMinSize, 1)
+			var sizes []byte
+			if blend {
+				sizes = d.glyphBlockSizes(ySeg, imgW, imgH)
 				n := imgW * imgH
 				if cap(d.glyphLuma) < n {
 					d.glyphLuma = make([]byte, n)
@@ -1014,11 +1024,7 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 				}
 				readLuma = func(x, y int) byte { return d.glyphLuma[y*imgW+x] }
 			}
-			step := smallBlock
-			if step == 1 {
-				step = macroBlock
-			}
-			d.writeStoredCorners(*storedCorners, grid, readLuma, d.GlyphBlend, step)
+			d.writeStoredCorners(*storedCorners, grid, readLuma, sizes, max(d.GlyphMinSize, 1))
 		} else {
 			d.writeCornerGradient(grid)
 		}

@@ -32,11 +32,15 @@ func main() {
 
 func run(op, codec, input, output string) error {
 	quality := 100
+	glyphMinSize := 0
 	if name, value, ok := strings.Cut(codec, ":"); ok {
 		var err error
 		quality, err = strconv.Atoi(value)
-		if err != nil || quality < 0 || quality > 100 || (name != "babe" && name != "babe-cornerdata" && name != "jpeg") {
+		if err != nil || quality < 0 || quality > 100 || (name != "babe" && name != "babe-cornerdata" && name != "babe-glyphs" && name != "jpeg") {
 			return fmt.Errorf("invalid codec quality %q", codec)
+		}
+		if name == "babe-glyphs" {
+			glyphMinSize = quality
 		}
 		codec = name
 	}
@@ -82,6 +86,7 @@ func run(op, codec, input, output string) error {
 			if err == nil {
 				decoder := classic.NewDecoder()
 				decoder.GlyphBlend = true
+				decoder.GlyphMinSize = glyphMinSize
 				img, err = decoder.Decode(data, false)
 			}
 		case "qoi":

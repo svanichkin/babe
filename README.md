@@ -102,6 +102,20 @@ existing BGC1 file. Larger differences are left untouched, but the threshold
 cannot reliably distinguish every real edge from a compression artifact. Use
 `Decoder.GlyphBlend` for this option in Go. Neither experiment changes q100.
 
+Use `-s` to set the minimum side length of blocks whose edges are blended:
+
+```sh
+./Babe 1.jpg 10 -s 4 1-s4.png
+./Babe 1.babe -s 4
+```
+
+`-s 4` blends eligible 4×4 and larger blocks; smaller blocks remain unchanged,
+including where they touch a larger block. It enables `-glyphs` and encoded
+corners when encoding, and requires an existing BGC1 file when decoding. The
+current encoder uses blocks up to 8×8, so 16×16 blocks are not present yet.
+The threshold is a decoding option and is not stored in the file. In Go, set
+`Decoder.GlyphBlend = true` and `Decoder.GlyphMinSize = 4`.
+
 To inspect the stored glyphs without color, render the first channel as
 grayscale:
 

@@ -16,8 +16,13 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 || len(os.Args) > 8 {
-		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [-corners] [-glyphs] [-glyphs-only] [decoded.png]\n  babe <input.babe> [-postfilter] [-corners] [-glyphs] [-glyphs-only]\n  (options and decoded.png can appear after quality)\n")
+	if len(os.Args) < 2 {
+		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [-corners] [-glyphs] [-glyphs-only] [-s size] [decoded.png]\n  babe <input.babe> [-postfilter] [-corners] [-glyphs] [-glyphs-only] [-s size]\n")
+		os.Exit(1)
+	}
+	options, minSize, err := parseMinBlockSize(os.Args[2:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 
@@ -29,9 +34,9 @@ func main() {
 	if ext == ".babe" {
 		postfilter := false
 		corners := false
-		glyphs := false
+		glyphs := minSize > 0
 		glyphsOnly := false
-		for _, a := range os.Args[2:] {
+		for _, a := range options {
 			if a == "-postfilter" {
 				postfilter = true
 			}
@@ -45,7 +50,7 @@ func main() {
 				glyphsOnly = true
 			}
 		}
-		if err := decodeBabe(inputPath, base+".png", false, postfilter, corners, glyphs, glyphsOnly); err != nil {
+		if err := decodeBabe(inputPath, base+".png", false, postfilter, corners, glyphs, glyphsOnly, minSize); err != nil {
 			fmt.Fprintln(os.Stderr, "decode error:", err)
 			os.Exit(1)
 		}
@@ -54,24 +59,26 @@ func main() {
 
 	// Otherwise: encode image → .babe with default or provided quality
 	quality := defaultEncodeQuality
-	encodeArgs := os.Args[2:]
-	if len(os.Args) >= 3 {
-		q, err := strconv.Atoi(os.Args[2])
-		if err != nil {
+	encodeArgs := options
+	if len(encodeArgs) > 0 {
+		q, err := strconv.Atoi(encodeArgs[0])
+		if err != nil && !strings.HasPrefix(encodeArgs[0], "-") && encodeArgs[0] != "bw" && !strings.EqualFold(filepath.Ext(encodeArgs[0]), ".png") {
 			fmt.Fprintln(os.Stderr, "quality must be an integer between 0 and 100")
 			os.Exit(1)
 		}
-		if q < 0 || q > 100 {
-			fmt.Fprintln(os.Stderr, "quality must be between 0 and 100")
-			os.Exit(1)
+		if err == nil {
+			if q < 0 || q > 100 {
+				fmt.Fprintln(os.Stderr, "quality must be between 0 and 100")
+				os.Exit(1)
+			}
+			quality = q
+			encodeArgs = encodeArgs[1:]
 		}
-		quality = q
-		encodeArgs = os.Args[3:]
 	}
 
 	bwmode := false
 	corners := false
-	glyphs := false
+	glyphs := minSize > 0
 	glyphsOnly := false
 	decodeOutPath := ""
 	for _, a := range encodeArgs {
@@ -105,11 +112,32 @@ func main() {
 		os.Exit(1)
 	}
 	if decodeOutPath != "" {
-		if err := decodeBabe(outPath, decodeOutPath, false, false, corners, glyphs, glyphsOnly); err != nil {
+		if err := decodeBabe(outPath, decodeOutPath, false, false, corners, glyphs, glyphsOnly, minSize); err != nil {
 			fmt.Fprintln(os.Stderr, "decode error:", err)
 			os.Exit(1)
 		}
 	}
+}
+
+func parseMinBlockSize(args []string) ([]string, int, error) {
+	remaining := make([]string, 0, len(args))
+	minSize := 0
+	for i := 0; i < len(args); i++ {
+		if args[i] != "-s" {
+			remaining = append(remaining, args[i])
+			continue
+		}
+		if minSize != 0 || i+1 >= len(args) {
+			return nil, 0, fmt.Errorf("-s requires one positive integer")
+		}
+		i++
+		value, err := strconv.Atoi(args[i])
+		if err != nil || value < 1 || value > 65535 {
+			return nil, 0, fmt.Errorf("-s requires a positive integer between 1 and 65535")
+		}
+		minSize = value
+	}
+	return remaining, minSize, nil
 }
 
 func encodeToBabe(inPath, outPath string, quality int, bwmode, corners bool) error {
@@ -174,7 +202,7 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode, corners bool) err
 	return nil
 }
 
-func decodeBabe(inPath, outPath string, splitChannels, postfilter, corners, glyphs, glyphsOnly bool) error {
+func decodeBabe(inPath, outPath string, splitChannels, postfilter, corners, glyphs, glyphsOnly bool, minSize int) error {
 	pngEncoder := png.Encoder{CompressionLevel: png.DefaultCompression}
 
 	in, err := os.Open(inPath)
@@ -195,6 +223,7 @@ func decodeBabe(inPath, outPath string, splitChannels, postfilter, corners, glyp
 	decoder.CornerGradient = corners
 	decoder.GlyphBlend = glyphs
 	decoder.GlyphsOnly = glyphsOnly
+	decoder.GlyphMinSize = minSize
 	dec, err := decoder.Decode(compData, postfilter)
 	if err != nil {
 		return err

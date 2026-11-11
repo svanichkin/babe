@@ -84,14 +84,18 @@ func (d *Decoder) writeCornerGradient(g cornerGrid) {
 // corners. This preserves more detail than replacing every pixel with a ramp.
 // blendGlyphResidual interpolates across a cell boundary when the luma step is
 // small enough to be a plausible coding seam. High-contrast edges are kept.
-func blendGlyphResidual(x, y, width, height, step int, residual int, luma func(int, int) byte, baseline cornerGrid) int {
-	if step <= 1 {
+func blendGlyphResidual(x, y, width, height, minSize int, sizes []byte, residual int, luma func(int, int) byte, baseline cornerGrid) int {
+	step := int(sizes[y*width+x])
+	if step < minSize || step <= 1 {
 		return residual
 	}
 	value := int(luma(x, y))
 	delta := 0
 	adjust := func(nx, ny int) {
 		if nx < 0 || nx >= width || ny < 0 || ny >= height {
+			return
+		}
+		if sizes[ny*width+nx] == 0 {
 			return
 		}
 		n := int(luma(nx, ny))
@@ -115,14 +119,14 @@ func blendGlyphResidual(x, y, width, height, step int, residual int, luma func(i
 	return residual + delta
 }
 
-func (d *Decoder) writeStoredCorners(g, baseline cornerGrid, luma func(x, y int) byte, glyphBlend bool, blockStep int) {
+func (d *Decoder) writeStoredCorners(g, baseline cornerGrid, luma func(x, y int) byte, sizes []byte, minSize int) {
 	write := func(y0, y1 int) {
 		for y := y0; y < y1; y++ {
 			for x := 0; x < g.width; x++ {
 				v, old := g.at(x, y), baseline.at(x, y)
 				residual := int(luma(x, y)) - int(old[0])
-				if glyphBlend {
-					residual = blendGlyphResidual(x, y, g.width, g.height, blockStep, residual, luma, baseline)
+				if sizes != nil {
+					residual = blendGlyphResidual(x, y, g.width, g.height, minSize, sizes, residual, luma, baseline)
 				}
 				Y := int32(max(0, min(255, residual+int(v[0]))))
 				Cb, Cr := int32(v[1])-128, int32(v[2])-128

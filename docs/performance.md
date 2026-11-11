@@ -184,13 +184,15 @@ python3 scripts/compare-corners.py --input benchmark.jpg --helper /tmp/babe-corn
 ### Experimental glyph boundaries
 
 For BGC1 images, `-glyphs` / `Decoder.GlyphBlend` interpolates small differences
-between the reconstructed luma residuals on opposite sides of a regular
-small-block boundary. It does so while restoring the RGB pixels from the source
+between the reconstructed luma residuals on opposite sides of an actual
+block boundary. It does so while restoring the RGB pixels from the source
 corner gradient, using a snapshot of decoded luma so parallel workers see the
-same neighbours. Differences above 24 luma levels are left intact. The grid is
-based on the small-block size (or the macroblock size if the small block is 1),
-so it also includes boundaries inside larger adaptive blocks; the threshold is
-only a heuristic and can smooth a real edge or miss a coding artifact. It adds
+same neighbours. Differences above 24 luma levels are left intact. The luma
+partition is reconstructed from its block-size flags, so a large macroblock is
+not split artificially into smaller cells. `-s N` enables glyph blending with
+minimum block side length N; the eligible side may use its smaller neighbour's
+value, but the smaller block itself is not modified. The threshold is only a
+heuristic and can smooth a real edge or miss a coding artifact. It adds
 no bits and is off by default. The setting is not stored in BGC1 and q100 is
 unaffected.
 
@@ -199,7 +201,9 @@ against the decoded source was 29.63 dB without glyph blending and 29.61 dB
 with it. This does not establish a visual improvement; inspect the images at
 the same size.
 
-On Apple M3, Go 1.27.3 and GOMAXPROCS=8, three complete CLI cycles after
+The following historical measurements used the original regular-grid boundary
+selection before the actual block partition and `-s` were added. On Apple M3,
+Go 1.27.3 and GOMAXPROCS=8, three complete CLI cycles after
 warm-up used the same RGB input and byte-identical BGC1 files. Process startup,
 PPM conversion and disk I/O are included. CPU sums both stages, and RSS is the
 largest individual process peak. Individual results are in
@@ -215,6 +219,25 @@ largest individual process peak. Individual results are in
 ```sh
 go build -o /tmp/babe-glyphbench ./cmd/losslessbench
 python3 scripts/compare-corners.py --input benchmark.jpg --helper /tmp/babe-glyphbench --rounds 3 --qualities 0,10 --glyph-blend --output /tmp/glyph-results.json
+```
+
+After switching to actual block boundaries, three full shuffled cycles on the
+same machine and image gave these medians. Both modes used identical BGC1
+bitstreams; times include process startup, PPM I/O and encoding. At q80 the
+largest block is 2×2, so a minimum of 4 changes no pixels; the timing variation
+in that row reflects independent measurements rather than a processing effect.
+
+| Quality | Decode mode | Decode | Full cycle | CPU / cycle | Peak RSS | Encoded size |
+|---:|---|---:|---:|---:|---:|---:|
+| 10 | Corners | 0.690 s | 1.127 s | 2.461 s | 299.5 MiB | 7,745,569 B |
+| 10 | `-s 4` | 1.093 s | 1.507 s | 3.517 s | 299.6 MiB | 7,745,569 B |
+| 80 | Corners | 0.955 s | 1.506 s | 3.113 s | 680.8 MiB | 38,194,307 B |
+| 80 | `-s 4` | 0.985 s | 1.592 s | 3.301 s | 746.4 MiB | 38,194,307 B |
+
+Per-cycle data: [glyph minimum 4](benchmarks/glyph-min4-apple-m3.json).
+
+```sh
+python3 scripts/compare-corners.py --input benchmark.jpg --helper /tmp/babe-glyphbench --rounds 3 --qualities 10,80 --glyph-blend --glyph-min-size 4 --output /tmp/glyph-min4-results.json
 ```
 
 ## Lossless CLI comparison

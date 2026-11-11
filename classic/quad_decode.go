@@ -97,7 +97,11 @@ func (d *Decoder) decodeQuadImage(segments [3][]byte, w, h int, lossless bool, s
 			return v
 		})
 		if storedCorners != nil {
-			d.writeStoredCorners(*storedCorners, grid, func(x, y int) byte { return planes[0][y*w+x] }, d.GlyphBlend, 2)
+			var sizes []byte
+			if d.GlyphBlend && 2 >= max(d.GlyphMinSize, 1) {
+				sizes = d.glyphBlockSizes(segments[0], w, h)
+			}
+			d.writeStoredCorners(*storedCorners, grid, func(x, y int) byte { return planes[0][y*w+x] }, sizes, max(d.GlyphMinSize, 1))
 		} else {
 			d.writeCornerGradient(grid)
 		}
