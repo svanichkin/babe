@@ -629,6 +629,38 @@ to 506 bytes and PSNR from 37.15 to 37.43 dB; this is a single example, not a
 general compression claim. The original 800×572 `samples/source.jpg` used
 three 128×128 blocks at q0 and q10, two at q50, and no 256×256 blocks.
 
+## Smooth encode/decode optimization
+
+Three complete shuffled rounds compared commit `5434321` with the optimized
+implementation on `samples/source.jpg` (800×572). Each run encoded and decoded
+in a fresh process. Times below are medians in milliseconds, excluding JPEG
+input and PNG output; cycle is the median of each run's encode-plus-decode
+time. "Plain" is the codec without `-smooth` and is shown for context.
+
+| Q | Mode | Encode | Decode | Complete cycle | BABE bytes |
+|---:|---|---:|---:|---:|---:|
+| 0 | Plain | 1.989 | 1.450 | 3.440 | 8,837 |
+| 0 | Smooth before | 10.622 | 30.205 | 40.826 | 16,763 |
+| 0 | Smooth after | 9.500 | 17.296 | 26.795 | 16,763 |
+| 10 | Plain | 3.094 | 1.957 | 5.191 | 47,943 |
+| 10 | Smooth before | 10.814 | 25.050 | 35.690 | 47,524 |
+| 10 | Smooth after | 9.678 | 15.067 | 24.841 | 47,524 |
+| 50 | Plain | 3.724 | 2.965 | 6.689 | 183,862 |
+| 50 | Smooth before | 12.440 | 6.559 | 18.975 | 177,998 |
+| 50 | Smooth after | 9.976 | 6.544 | 16.488 | 177,998 |
+
+The before and after BABE bitstreams and RGB pixels were compared byte for byte
+at all three qualities. A separate three-round fresh-process measurement on
+the same photo showed q10 median peak RSS rising from 13.8 to 15.5 MiB as the
+corner channels are processed in parallel; images over 2,097,152 pixels keep
+the serial corner preparation to avoid multiplying large plane buffers.
+
+The same three-round comparison on `benchmark.jpg` (5152×7728) showed q10
+median encode 0.688→0.678 s, decode 2.510→1.156 s, complete cycle
+3.198→1.824 s, and peak RSS 623.7→623.9 MiB. The `.babe` file was 6,923,569
+bytes in both versions and PSNR was 28.993 dB. These are approximate results
+from one machine; one q0 baseline decode was a large timing outlier.
+
 ## Reproduction
 
 Sample JPEGs are local and are not tracked. Run from the repository root:

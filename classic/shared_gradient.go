@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+	"math/bits"
 )
 
 // BGG2 stores each 16-pixel boundary vertex once, even when blocks of
@@ -61,15 +62,16 @@ func (m *sharedGradientMesh) vertical(x, y2 int) int {
 func (m *sharedGradientMesh) at(b largeGradient, x, y int) byte {
 	u, v := 2*(x-b.x)+1, 2*(y-b.y)+1
 	den := 2 * b.size
+	shift := uint(bits.TrailingZeros(uint(b.size)) + 1)
 	top := m.horizontal(2*x+1, b.y)
 	bottom := m.horizontal(2*x+1, b.y+b.size)
 	left := m.vertical(b.x, 2*y+1)
 	right := m.vertical(b.x+b.size, 2*y+1)
 	a, bb := m.node(b.x, b.y), m.node(b.x+b.size, b.y)
 	c, d := m.node(b.x, b.y+b.size), m.node(b.x+b.size, b.y+b.size)
-	lr := (left*(den-u) + right*u + den/2) / den
-	tb := (top*(den-v) + bottom*v + den/2) / den
-	corner := (a*(den-u)*(den-v) + bb*u*(den-v) + c*(den-u)*v + d*u*v + den*den/2) / (den * den)
+	lr := (left*(den-u) + right*u + den/2) >> shift
+	tb := (top*(den-v) + bottom*v + den/2) >> shift
+	corner := (a*(den-u)*(den-v) + bb*u*(den-v) + c*(den-u)*v + d*u*v + den*den/2) >> (2 * shift)
 	return byte(max(0, min(255, lr+tb-corner)))
 }
 
@@ -251,7 +253,9 @@ func unpackSharedGradients(data []byte) ([]byte, []largeGradient, *sharedGradien
 		} else {
 			p := raw[pos : pos+sharedGradientRecordSize]
 			x, y := binary.BigEndian.Uint32(p), binary.BigEndian.Uint32(p[4:])
-			if uint64(x) > uint64(w) || uint64(y) > uint64(h) { return nil,nil,nil,fmt.Errorf("invalid shared gradient coordinates") }
+			if uint64(x) > uint64(w) || uint64(y) > uint64(h) {
+				return nil, nil, nil, fmt.Errorf("invalid shared gradient coordinates")
+			}
 			b.x = int(x)
 			b.y = int(y)
 			b.size = int(p[8])

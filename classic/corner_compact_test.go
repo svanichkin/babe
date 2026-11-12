@@ -104,8 +104,8 @@ func TestGradientCornerElisionPreservesPixels(t *testing.T) {
 			codecStateMu.Lock()
 			oldSmall, oldMacro := smallBlock, macroBlock
 			smallBlock, macroBlock = header.small, header.macro
-			full, err1 := packSparseCorners(base, payload, grid, 5, nil)
-			elided, err2 := packSparseCorners(base, payload, grid, 5, blocks)
+			full, err1 := packSparseCorners(base, payload, grid, 5, nil, false)
+			elided, err2 := packSparseCorners(base, payload, grid, 5, blocks, false)
 			smallBlock, macroBlock = oldSmall, oldMacro
 			codecStateMu.Unlock()
 			if err1 != nil || err2 != nil {
@@ -165,6 +165,37 @@ func TestSplitAndLegacyCornersDecodeIdentically(t *testing.T) {
 			ib, eb := b.Decode(old, false)
 			if ea != nil || eb != nil || !bytes.Equal(ia.Pix, ib.Pix) {
 				t.Fatalf("bw=%v smooth=%v: different pixels %v %v", bw, smooth, ea, eb)
+			}
+		}
+	}
+}
+
+func TestSparseCornersParallelEncoderMatchesSerial(t *testing.T) {
+	for _, dims := range []image.Point{{128, 128}, {161, 129}} {
+		img := image.NewRGBA(image.Rectangle{Max: dims})
+		for y := 0; y < dims.Y; y++ {
+			for x := 0; x < dims.X; x++ {
+				img.SetRGBA(x, y, color.RGBA{uint8(x*7 + y), uint8(y*5 + x/3), uint8(x * y), 255})
+			}
+		}
+		for _, q := range []int{0, 10, 50, 80} {
+			for _, grad := range []bool{false, true} {
+				serial, parallel := NewEncoder(), NewEncoder()
+				serial.Parallel = false
+				serial.SparseCorners, parallel.SparseCorners = true, true
+				serial.CornerMinSize, parallel.CornerMinSize = 5, 5
+				serial.LargeGradients, parallel.LargeGradients = grad, grad
+				a, err := serial.Encode(img, q, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				b, err := parallel.Encode(img, q, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(a, b) {
+					t.Fatalf("%v q%d gradients=%v: serial and parallel bitstreams differ", dims, q, grad)
+				}
 			}
 		}
 	}

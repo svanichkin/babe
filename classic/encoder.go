@@ -590,7 +590,7 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 		if minSize <= 0 {
 			minSize = 4
 		}
-		comp, err = packSparseCorners(comp, e.raw.Bytes(), sourceCorners, minSize, gradients)
+		comp, err = packSparseCorners(comp, e.raw.Bytes(), sourceCorners, minSize, gradients, e.Parallel)
 		if err != nil {
 			return nil, err
 		}

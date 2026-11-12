@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+	"runtime"
 )
 
 // BGC2 stores a channel mask and only the selected source corner values.
@@ -152,7 +153,7 @@ func redundantGradientCorners(w, h int, source cornerGrid, gradients []largeGrad
 	return redundant
 }
 
-func packSparseCorners(base, raw []byte, source cornerGrid, minSize int, gradients []largeGradient) ([]byte, error) {
+func packSparseCorners(base, raw []byte, source cornerGrid, minSize int, gradients []largeGradient, parallel bool) ([]byte, error) {
 	w, h := source.width, source.height
 	mask := raw[9]
 	pos := payloadHeaderSize
@@ -173,11 +174,9 @@ func packSparseCorners(base, raw []byte, source cornerGrid, minSize int, gradien
 	}
 	flags := make([]byte, len(source.values))
 	redundantLuma := redundantGradientCorners(w, h, source, gradients)
-	scratch := &Decoder{}
-	var channelScratch decoderChannelScratch
-	for c := range 3 {
+	decodeChannel := func(c int, scratch *Decoder, channelScratch *decoderChannelScratch, channelFlags []byte) error {
 		if segments[c] == nil {
-			continue
+			return nil
 		}
 		var plane []byte
 		if smallBlock == 1 && macroBlock == 2 {
@@ -190,9 +189,9 @@ func packSparseCorners(base, raw []byte, source cornerGrid, minSize int, gradien
 			decodeValidatedQuadPlane(segments[c], plane, w, h)
 		} else {
 			var err error
-			plane, err = scratch.decodeChannelInto(segments[c], w, h, &channelScratch)
+			plane, err = scratch.decodeChannelInto(segments[c], w, h, channelScratch)
 			if err != nil {
-				return nil, err
+				return err
 			}
 		}
 		sizes := scratch.glyphBlockSizes(segments[c], w, h)
@@ -215,7 +214,42 @@ func packSparseCorners(base, raw []byte, source cornerGrid, minSize int, gradien
 			baseline.values[i][c] = byte((sum + count/2) / count)
 			diff := int(v[c]) - int(baseline.values[i][c])
 			if eligible && (diff < -3 || diff > 3) {
-				flags[i] |= 1 << c
+				if channelFlags != nil {
+					channelFlags[i] = 1
+				} else {
+					flags[i] |= 1 << c
+				}
+			}
+		}
+		return nil
+	}
+	// Keep the small-image workers independent. On larger images reuse one
+	// plane buffer to avoid multiplying peak memory by the channel count.
+	if parallel && runtime.GOMAXPROCS(0) > 1 && w*h >= 16<<10 && w*h <= 2<<20 && segments[1] != nil && segments[2] != nil {
+		var results [3][]byte
+		var errors [3]error
+		for c := range 3 {
+			results[c] = make([]byte, len(flags))
+		}
+		processStreams(3, w*h, true, func(c int) {
+			var scratch Decoder
+			var channelScratch decoderChannelScratch
+			errors[c] = decodeChannel(c, &scratch, &channelScratch, results[c])
+		})
+		for c := range 3 {
+			if errors[c] != nil {
+				return nil, errors[c]
+			}
+			for i, bit := range results[c] {
+				flags[i] |= bit << c
+			}
+		}
+	} else {
+		var scratch Decoder
+		var channelScratch decoderChannelScratch
+		for c := range 3 {
+			if err := decodeChannel(c, &scratch, &channelScratch, nil); err != nil {
+				return nil, err
 			}
 		}
 	}

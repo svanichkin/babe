@@ -53,6 +53,21 @@ func makeCornerGrid(w, h, step int, sample func(x, y int) [3]byte) cornerGrid {
 }
 
 func (g cornerGrid) at(x, y int) [3]byte {
+	// Most stored corner grids use complete 8×8 cells. Their interpolation
+	// denominator is 64, avoiding per-pixel integer divisions.
+	if g.step == 8 {
+		gx, gy := x>>3, y>>3
+		if (gx+1)*8 < g.width && (gy+1)*8 < g.height {
+			i := gy*g.cols + gx
+			a, b, c, d := g.values[i], g.values[i+1], g.values[i+g.cols], g.values[i+g.cols+1]
+			px, py := x&7, y&7
+			var out [3]byte
+			for k := range 3 {
+				out[k] = byte((int(a[k])*(8-px)*(8-py) + int(b[k])*px*(8-py) + int(c[k])*(8-px)*py + int(d[k])*px*py + 32) >> 6)
+			}
+			return out
+		}
+	}
 	rows := len(g.values) / g.cols
 	gx, gy := min(x/g.step, max(g.cols-2, 0)), min(y/g.step, max(rows-2, 0))
 	x0, y0 := gx*g.step, gy*g.step
@@ -69,6 +84,30 @@ func (g cornerGrid) at(x, y int) [3]byte {
 		out[i] = byte((value + den/2) / den)
 	}
 	return out
+}
+
+// lumaAt uses the same interpolation as at without computing unused chroma.
+func (g cornerGrid) lumaAt(x, y int) byte {
+	if g.step == 8 {
+		gx, gy := x>>3, y>>3
+		if (gx+1)*8 < g.width && (gy+1)*8 < g.height {
+			i := gy*g.cols + gx
+			a, b, c, d := int(g.values[i][0]), int(g.values[i+1][0]), int(g.values[i+g.cols][0]), int(g.values[i+g.cols+1][0])
+			px, py := x&7, y&7
+			return byte((a*(8-px)*(8-py) + b*px*(8-py) + c*(8-px)*py + d*px*py + 32) >> 6)
+		}
+	}
+	rows := len(g.values) / g.cols
+	gx, gy := min(x/g.step, max(g.cols-2, 0)), min(y/g.step, max(rows-2, 0))
+	x0, y0 := gx*g.step, gy*g.step
+	x1, y1 := min(x0+g.step, g.width-1), min(y0+g.step, g.height-1)
+	dx, dy := max(x1-x0, 1), max(y1-y0, 1)
+	px, py := x-x0, y-y0
+	right, below := min(gx+1, g.cols-1), min(gy+1, rows-1)
+	a, b := int(g.values[gy*g.cols+gx][0]), int(g.values[gy*g.cols+right][0])
+	c, d := int(g.values[below*g.cols+gx][0]), int(g.values[below*g.cols+right][0])
+	den := dx * dy
+	return byte((a*(dx-px)*(dy-py) + b*px*(dy-py) + c*(dx-px)*py + d*px*py + den/2) / den)
 }
 
 func (g cornerGrid) writeRGB(pix []byte, stride, y0, y1 int) {
@@ -120,7 +159,7 @@ func blendGlyphResidual(x, y, width, height, minSize int, sizes []byte, residual
 		if diff < -24 || diff > 24 {
 			return
 		}
-		other := n - int(baseline.at(nx, ny)[0])
+		other := n - int(baseline.lumaAt(nx, ny))
 		delta += (other - residual) * 3 / 8
 	}
 	if x%step == 0 {
@@ -151,7 +190,7 @@ func spreadGlyphResidual(x, y, width, height, minSize int, sizes []byte, residua
 		if distance > 3 || ex < 0 || ex >= width || ey < 0 || ey >= height {
 			return
 		}
-		edge := int(luma(ex, ey)) - int(baseline.at(ex, ey)[0])
+		edge := int(luma(ex, ey)) - int(baseline.lumaAt(ex, ey))
 		corrected := blendGlyphResidual(ex, ey, width, height, minSize, sizes, edge, luma, baseline)
 		residual += (corrected - edge) * (4 - distance) / 4
 	}
@@ -169,12 +208,23 @@ func (d *Decoder) writeStoredCorners(g, baseline cornerGrid, luma func(x, y int)
 		for y := 0; y < g.height; y++ {
 			for x := 0; x < g.width; x++ {
 				i := y*g.width + x
-				if d.gradientMask[i] != 0 || (d.Smooth && sizes != nil && sizes[i] <= 4) {
+				if d.gradientMask[i] != 0 {
 					resolved[i] = luma(x, y)
 					continue
 				}
-				v, old := g.at(x, y), baseline.at(x, y)
-				residual := int(luma(x, y)) - int(old[0])
+				// The stitcher reads ordinary glyphs only immediately across a
+				// gradient boundary. Resolve those neighbours here; all other
+				// glyphs can be reconstructed once in the parallel RGB pass.
+				adjacent := (x > 0 && d.gradientMask[i-1] != 0) || (x+1 < g.width && d.gradientMask[i+1] != 0) || (y > 0 && d.gradientMask[i-g.width] != 0) || (y+1 < g.height && d.gradientMask[i+g.width] != 0)
+				if !adjacent {
+					continue
+				}
+				if d.Smooth && sizes != nil && sizes[i] <= 4 {
+					resolved[i] = luma(x, y)
+					continue
+				}
+				v, old := g.at(x, y), baseline.lumaAt(x, y)
+				residual := int(luma(x, y)) - int(old)
 				if sizes != nil {
 					residual = blendGlyphResidual(x, y, g.width, g.height, minSize, sizes, residual, luma, baseline)
 					if d.Smooth {
@@ -192,7 +242,7 @@ func (d *Decoder) writeStoredCorners(g, baseline cornerGrid, luma func(x, y int)
 				o := y*d.dst.Stride + x*4
 				if d.Smooth && sizes != nil && sizes[y*g.width+x] <= 4 {
 					Y := int32(luma(x, y))
-					if resolved != nil {
+					if resolved != nil && d.gradientMask[y*g.width+x] != 0 {
 						Y = int32(resolved[y*g.width+x])
 					}
 					Cb, Cr := int32(d.dst.Pix[o+1])-128, int32(d.dst.Pix[o+2])-128
@@ -208,11 +258,11 @@ func (d *Decoder) writeStoredCorners(g, baseline cornerGrid, luma func(x, y int)
 				}
 				v := g.at(x, y)
 				var Y int32
-				if resolved != nil {
+				if resolved != nil && d.gradientMask[y*g.width+x] != 0 {
 					Y = int32(resolved[y*g.width+x])
 				} else {
-					old := baseline.at(x, y)
-					residual := int(luma(x, y)) - int(old[0])
+					old := baseline.lumaAt(x, y)
+					residual := int(luma(x, y)) - int(old)
 					if sizes != nil {
 						residual = blendGlyphResidual(x, y, g.width, g.height, minSize, sizes, residual, luma, baseline)
 						if d.Smooth {
