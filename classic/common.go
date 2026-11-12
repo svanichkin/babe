@@ -1167,6 +1167,31 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh, quantStep i
 	}
 
 	avg := uint8(sum / uint64(total))
+	// A rare bright feature can leave floor(mean) at the background level,
+	// collapsing a nonuniform block. Preserve larger differences while
+	// allowing the lossy encoder to omit very small (under 8-level) changes.
+	retry := false
+	if (fgCnt == 0 || bgCnt == 0) && (encodeDither || sum > uint64(avg)*uint64(total)) {
+		lo, hi := vals[0], vals[0]
+		for _, v := range vals[1:] {
+			lo, hi = min(lo, v), max(hi, v)
+		}
+		retry = int(hi)-int(lo) >= 8
+	}
+	if retry {
+		fgSum, bgSum, fgCnt, bgCnt, bits = 0, 0, 0, 0, 0
+		for _, v := range vals {
+			bits <<= 1
+			if v > avg {
+				bits |= 1
+				fgSum += uint64(v)
+				fgCnt++
+			} else {
+				bgSum += uint64(v)
+				bgCnt++
+			}
+		}
+	}
 	if fgCnt == 0 || bgCnt == 0 {
 		v := quantizeLevel(avg, quantStep)
 		return v, v, false, nil

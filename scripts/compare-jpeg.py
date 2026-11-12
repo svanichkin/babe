@@ -59,7 +59,7 @@ with tempfile.TemporaryDirectory(prefix="babe-jpeg-bench-") as directory:
             cycle(*case, run)
 
 Path(args.output).write_text(json.dumps({"source_dimensions": reference[:2], "rgb_sha256": reference[2],
-                                         "rounds": args.rounds, "threads": 8,
+                                         "rounds": args.rounds, "threads": 8, "load_average_after": os.getloadavg(),
                                          "measurements": measurements}, indent=2) + "\n")
 for codec, quality in cases:
     rows = [m for m in measurements if m["codec"] == codec and m["quality"] == quality]

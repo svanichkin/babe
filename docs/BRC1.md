@@ -164,7 +164,10 @@ visual quality and their ordering between adjacent levels are not guaranteed.
 If both rounded levels are equal, the block becomes solid; no pattern bits or
 background entry are emitted. BW stores only Y. At qualities below 90 the decoded
 image can differ from previous builds at the same numeric quality. Entropy coding
-and PNG compression add no further loss.
+and PNG compression add no further loss. For blocks of 3×3 or larger, if the
+rounded-down mean equals the minimum and classifying at that mean would make a
+nonuniform block solid, the encoder retries the split for level spreads of at
+least 8. Smaller spreads may still be represented as solid in lossy modes.
 
 ## Lossless quality 100
 

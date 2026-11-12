@@ -1,0 +1,82 @@
+{
+  "source_dimensions": [
+    800,
+    572
+  ],
+  "rgb_sha256": "c17cf66be7460ec2466aec42d65379ffbd64b9288277cd8c13adc8ac76fb2c2d",
+  "rounds": 3,
+  "threads": 8,
+  "load_average_after": [
+    43.35791015625,
+    144.2255859375,
+    174.64306640625
+  ],
+  "measurements": [
+    {
+      "round": 1,
+      "quality": 10,
+      "mode": "babe-sparse-dither3-old",
+      "encoded_bytes": 53871,
+      "encode_wall_seconds": 0.02176608401350677,
+      "decode_wall_seconds": 0.03692854201653972,
+      "cycle_wall_seconds": 0.058910958003252745,
+      "cycle_cpu_seconds": 0.087119,
+      "peak_process_rss_bytes": 11206656
+    },
+    {
+      "round": 1,
+      "quality": 10,
+      "mode": "babe-sparse-dither3",
+      "encoded_bytes": 53871,
+      "encode_wall_seconds": 0.023197167029138654,
+      "decode_wall_seconds": 0.03863562498008832,
+      "cycle_wall_seconds": 0.062030665983911604,
+      "cycle_cpu_seconds": 0.087062,
+      "peak_process_rss_bytes": 10944512
+    },
+    {
+      "round": 2,
+      "quality": 10,
+      "mode": "babe-sparse-dither3",
+      "encoded_bytes": 53871,
+      "encode_wall_seconds": 0.023543958959635347,
+      "decode_wall_seconds": 0.04145395802333951,
+      "cycle_wall_seconds": 0.06514229200547561,
+      "cycle_cpu_seconds": 0.094061,
+      "peak_process_rss_bytes": 10567680
+    },
+    {
+      "round": 2,
+      "quality": 10,
+      "mode": "babe-sparse-dither3-old",
+      "encoded_bytes": 53871,
+      "encode_wall_seconds": 0.022208458045497537,
+      "decode_wall_seconds": 0.03902329201810062,
+      "cycle_wall_seconds": 0.06143541698111221,
+      "cycle_cpu_seconds": 0.076745,
+      "peak_process_rss_bytes": 10469376
+    },
+    {
+      "round": 3,
+      "quality": 10,
+      "mode": "babe-sparse-dither3",
+      "encoded_bytes": 53871,
+      "encode_wall_seconds": 0.022705084003973752,
+      "decode_wall_seconds": 0.03738945903023705,
+      "cycle_wall_seconds": 0.060314666014164686,
+      "cycle_cpu_seconds": 0.085889,
+      "peak_process_rss_bytes": 10813440
+    },
+    {
+      "round": 3,
+      "quality": 10,
+      "mode": "babe-sparse-dither3-old",
+      "encoded_bytes": 53871,
+      "encode_wall_seconds": 0.021372790972236544,
+      "decode_wall_seconds": 0.035738332953769714,
+      "cycle_wall_seconds": 0.05731000000378117,
+      "cycle_cpu_seconds": 0.088036,
+      "peak_process_rss_bytes": 10878976
+    }
+  ]
+}

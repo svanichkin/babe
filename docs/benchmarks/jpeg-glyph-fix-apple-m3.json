@@ -1,0 +1,148 @@
+{
+  "source_dimensions": [
+    800,
+    572
+  ],
+  "rgb_sha256": "c17cf66be7460ec2466aec42d65379ffbd64b9288277cd8c13adc8ac76fb2c2d",
+  "rounds": 3,
+  "threads": 8,
+  "measurements": [
+    {
+      "round": 1,
+      "codec": "BABE",
+      "quality": 17,
+      "encoded_bytes": 71960,
+      "encode_wall_seconds": 0.01097783399745822,
+      "decode_wall_seconds": 0.011802666005678475,
+      "cycle_wall_seconds": 0.022896625043358654,
+      "cycle_cpu_seconds": 0.026590000000000003,
+      "peak_process_rss_bytes": 10240000
+    },
+    {
+      "round": 1,
+      "codec": "JPEG",
+      "quality": 1,
+      "encoded_bytes": 9256,
+      "encode_wall_seconds": 0.013673249981366098,
+      "decode_wall_seconds": 0.015260374988429248,
+      "cycle_wall_seconds": 0.02902241697302088,
+      "cycle_cpu_seconds": 0.022940000000000002,
+      "peak_process_rss_bytes": 7766016
+    },
+    {
+      "round": 1,
+      "codec": "JPEG",
+      "quality": 80,
+      "encoded_bytes": 71042,
+      "encode_wall_seconds": 0.01630637503694743,
+      "decode_wall_seconds": 0.013252917036879808,
+      "cycle_wall_seconds": 0.029655749967787415,
+      "cycle_cpu_seconds": 0.025651999999999998,
+      "peak_process_rss_bytes": 7667712
+    },
+    {
+      "round": 1,
+      "codec": "BABE",
+      "quality": 0,
+      "encoded_bytes": 8843,
+      "encode_wall_seconds": 0.027627792034763843,
+      "decode_wall_seconds": 0.025925832975190133,
+      "cycle_wall_seconds": 0.05367670801933855,
+      "cycle_cpu_seconds": 0.031422000000000005,
+      "peak_process_rss_bytes": 9994240
+    },
+    {
+      "round": 2,
+      "codec": "JPEG",
+      "quality": 80,
+      "encoded_bytes": 71042,
+      "encode_wall_seconds": 0.01695620798273012,
+      "decode_wall_seconds": 0.013800166954752058,
+      "cycle_wall_seconds": 0.03084629203658551,
+      "cycle_cpu_seconds": 0.026876999999999998,
+      "peak_process_rss_bytes": 7651328
+    },
+    {
+      "round": 2,
+      "codec": "JPEG",
+      "quality": 1,
+      "encoded_bytes": 9256,
+      "encode_wall_seconds": 0.01344570895889774,
+      "decode_wall_seconds": 0.012119999970309436,
+      "cycle_wall_seconds": 0.025664207991212606,
+      "cycle_cpu_seconds": 0.022667,
+      "peak_process_rss_bytes": 7634944
+    },
+    {
+      "round": 2,
+      "codec": "BABE",
+      "quality": 17,
+      "encoded_bytes": 71960,
+      "encode_wall_seconds": 0.01117033400805667,
+      "decode_wall_seconds": 0.01097762503195554,
+      "cycle_wall_seconds": 0.0222404160303995,
+      "cycle_cpu_seconds": 0.026546999999999998,
+      "peak_process_rss_bytes": 10403840
+    },
+    {
+      "round": 2,
+      "codec": "BABE",
+      "quality": 0,
+      "encoded_bytes": 8843,
+      "encode_wall_seconds": 0.010572790983133018,
+      "decode_wall_seconds": 0.010589416022412479,
+      "cycle_wall_seconds": 0.02128891699248925,
+      "cycle_cpu_seconds": 0.024350999999999998,
+      "peak_process_rss_bytes": 10010624
+    },
+    {
+      "round": 3,
+      "codec": "BABE",
+      "quality": 0,
+      "encoded_bytes": 8843,
+      "encode_wall_seconds": 0.009038750024046749,
+      "decode_wall_seconds": 0.009162290953099728,
+      "cycle_wall_seconds": 0.01829758402891457,
+      "cycle_cpu_seconds": 0.021622,
+      "peak_process_rss_bytes": 10158080
+    },
+    {
+      "round": 3,
+      "codec": "JPEG",
+      "quality": 1,
+      "encoded_bytes": 9256,
+      "encode_wall_seconds": 0.013001791026908904,
+      "decode_wall_seconds": 0.012669583025854081,
+      "cycle_wall_seconds": 0.025769374973606318,
+      "cycle_cpu_seconds": 0.021718,
+      "peak_process_rss_bytes": 7634944
+    },
+    {
+      "round": 3,
+      "codec": "BABE",
+      "quality": 17,
+      "encoded_bytes": 71960,
+      "encode_wall_seconds": 0.012010208040010184,
+      "decode_wall_seconds": 0.010422874998766929,
+      "cycle_wall_seconds": 0.02251674997387454,
+      "cycle_cpu_seconds": 0.025269,
+      "peak_process_rss_bytes": 10108928
+    },
+    {
+      "round": 3,
+      "codec": "JPEG",
+      "quality": 80,
+      "encoded_bytes": 71042,
+      "encode_wall_seconds": 0.014652749989181757,
+      "decode_wall_seconds": 0.01397224998800084,
+      "cycle_wall_seconds": 0.0287218329613097,
+      "cycle_cpu_seconds": 0.025528999999999996,
+      "peak_process_rss_bytes": 7618560
+    }
+  ],
+  "load_average_after": [
+    289.85791015625,
+    236.771484375,
+    207.18017578125
+  ]
+}

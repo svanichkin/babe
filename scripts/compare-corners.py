@@ -26,6 +26,7 @@ parser.add_argument("--glyph-min-size", type=int, default=0, help="minimum block
 parser.add_argument("--experiments", action="store_true", help="compare dense, sparse, dithered and simplified encoding")
 parser.add_argument("--decode-dither", action="store_true", help="compare sparse encoding with and without decoder dithering")
 parser.add_argument("--decode-blur", action="store_true", help="compare sparse decoding with and without edge-aware luma blur")
+parser.add_argument("--pattern2-input", action="store_true", help="use simplified patterns for the decoder blur comparison")
 parser.add_argument("--previous-helper", help="compare decoder dithering with a previously built helper")
 args = parser.parse_args()
 if args.rounds < 1:
@@ -34,6 +35,8 @@ if args.glyph_min_size < 0 or (args.glyph_min_size and not args.glyph_blend):
     parser.error("--glyph-min-size requires --glyph-blend and must be nonnegative")
 if args.previous_helper and not (args.decode_dither or args.decode_blur):
     parser.error("--previous-helper requires --decode-dither or --decode-blur")
+if args.pattern2_input and not args.decode_blur:
+    parser.error("--pattern2-input requires --decode-blur")
 qualities = [int(q) for q in args.qualities.split(",")]
 if not qualities or any(q < 0 or q > 100 for q in qualities):
     parser.error("qualities must be between 0 and 100")
@@ -64,7 +67,8 @@ with tempfile.TemporaryDirectory(prefix="babe-corners-bench-") as directory:
         start = time.perf_counter()
         decode_helper = helper
         if args.decode_blur:
-            encoder, decoder = "babe-sparse", "babe-dither3" if "-dither3" in mode else "babe"
+            encoder = "babe-pattern2" if args.pattern2_input else "babe-sparse"
+            decoder = "babe-dither3" if "-dither3" in mode else "babe"
             if mode.endswith("-old"):
                 decode_helper = previous_helper
         elif args.decode_dither:

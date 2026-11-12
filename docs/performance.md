@@ -114,6 +114,9 @@ block processing, validation and color conversion.
 
 ## Experimental corner reconstruction
 
+Unless otherwise stated, the measurements in this section predate the rare
+glyph fix described in [edge-aware decoder blur](#edge-aware-decoder-blur).
+
 For an existing ordinary BRC1 file, `-corners` or `Decoder.CornerGradient`
 enables the earlier decoder-only experiment: the lossy decoder estimates each
 grid corner by averaging the reconstructed samples touching it, then derives
@@ -242,6 +245,9 @@ python3 scripts/compare-corners.py --input benchmark.jpg --helper /tmp/babe-glyp
 
 ## Selective corners and pattern experiments
 
+The measurements in this section were recorded before the rare-glyph fix;
+encoded sizes and decoded pixels may differ slightly with the current encoder.
+
 The experimental BGC2 encoder stores a shared grid of corner positions but
 selects Y, Cb and Cr independently. For each channel it examines that channel's
 actual block partition, storing a corner only if a neighbouring block meets the
@@ -300,6 +306,9 @@ python3 scripts/compare-corners.py --input benchmark.jpg --helper /tmp/babe-expe
 ```
 
 ## Decoder-only dithering
+
+The numerical measurements in this section were recorded before the
+rare-glyph fix; current lossy bitstreams may differ slightly.
 
 `-dither2` / `Decoder.Dither2` leaves the encoded data unchanged. During lossy
 decoding it finds patterned luma blocks of at least 4×4, estimates local
@@ -363,6 +372,8 @@ python3 scripts/compare-corners.py --input benchmark.jpg --helper /tmp/babe-dith
 `-dither3` / `Decoder.Dither3` is a separate experimental lossy decoder mode.
 It uses the decoded luma block partition and affects only the interior of actual
 8×8 and larger blocks; block-edge pixels and smaller blocks are untouched.
+The correction fades in over the first two interior pixels, preventing a sharp
+transition from the fixed edge to the blurred center.
 Horizontal and vertical passes each use an immutable snapshot. Each scan stays
 inside its block and considers up to half the block size in each direction,
 capped at eight pixels. The center gets weight 49; a neighbour with absolute
@@ -373,7 +384,33 @@ The separate `-s` boundary blending is unchanged. Chroma is left intact. Source-
 baselines are computed before the blur, q100 is untouched, and encoded data
 does not change. When combined, `-dither2` precedes `-dither3`.
 
-With direct CLI input from 800×572 `samples/source.jpg`, q10 `-s 4` produced
+On the top-left 400×250 region of `samples/source.jpg` at q10 with
+`-s 4 -pattern2`, the former `-dither3` introduced a visible frame: mean absolute
+RGB-derived luma differences at the two pixel transitions just inside the 8×8
+grid were 0.829 and 0.907 levels, versus 0.395 and 0.429 without the blur.
+With the fade they were 0.397 and 0.426. These are measurements on one region,
+not a general quality metric. The old and new decoders used the same encoded
+file; a test also checks that `-s` boundary pixels remain unchanged.
+
+Three complete CLI cycles per version on the same 800×572 RGB PPM and the
+same q10 `-pattern2` BGC2 bitstream gave 0.0589, 0.0614 and 0.0573 s before
+the fade and 0.0620, 0.0651 and 0.0603 s after it. These timings include process
+startup, encoding and file I/O; glyph boundary blending was not enabled for the
+timing comparison. The one-minute load average after the run was 43.36, so the
+small differences should not be treated as a reliable speed result. Individual
+CPU and memory values are in [dither3-frame-fix-apple-m3.json](benchmarks/dither3-frame-fix-apple-m3.json).
+
+During the investigation, a separate encoder defect was found: if the rounded
+mean of a two-level block equalled its background, a rare brighter feature
+could be lost. Lossy blocks now retain such features when the level difference
+is at least 8; smaller differences can still collapse under the lossy policy.
+An 8×8 block containing 63 samples of 96 and one of 128 formerly decoded as
+all 96 and now preserves both levels. On `samples/source.jpg` at q10 the case
+affected two luma blocks. The pattern bit order and lossless q100 were also
+checked. The fix changes some lossy bitstreams but does not change the format.
+
+Before the rare-glyph and edge-fade fixes, direct CLI input from 800×572
+`samples/source.jpg`, q10 `-s 4` produced
 the same 54,374-byte `.babe` file before and after this blur change (SHA-256
 checked). RGB PSNR against the decoded JPEG was 29.46 dB for the former weak
 blur and 29.30 dB for the larger-block interior blur. This does not guarantee
@@ -461,8 +498,11 @@ pixels cannot be required to match the source; the benchmark checks the output
 dimensions and PPM structure, while `compareimages` calculates PSNR separately.
 CPU sums user and system times of both stages; RSS is the highest single
 process peak. This small image makes startup and file overhead significant.
-The [raw JSON](benchmarks/jpeg-matched-size-apple-m3.json) contains all 12
+The [raw JSON](benchmarks/jpeg-glyph-fix-apple-m3.json) contains all 12
 cycles, and results use their medians. Apple M3, Go 1.27.3, GOMAXPROCS=8.
+The machine was heavily loaded: its one-minute load average immediately after
+the run was 289.86, and BABE q0 full-cycle times ranged from 0.0183 to 0.0537 s.
+Treat these numbers as a rough snapshot rather than a reliable speed ranking.
 
 ```sh
 go build -o /tmp/babe-losslessbench ./cmd/losslessbench
@@ -522,6 +562,7 @@ does not repeatedly encode the image to seek a target size. The block and
 range-coded BRC1 format is unchanged, so the previous decoder can read files
 from the new scale. Opaque 8-bit RGB at quality 100 remains lossless.
 
+The following historical calibration was measured before the rare-glyph fix.
 Four local input images were decoded to RGBA before measuring all 101 quality
 levels. Each image's straight-line reference runs from its actual q0 size to its
 actual q100 size. The mean and maximum errors below are absolute deviations
@@ -552,8 +593,9 @@ was 14,018 bytes while q99 was 35,159 bytes. Thus neither monotonic size nor a
 linear size/quality curve is guaranteed, especially at the lossless endpoint.
 
 Raw results: [previous scale](benchmarks/quality-curve-previous.csv) and
-[current scale](benchmarks/quality-curve-current.csv). The other three photos
-are local examples; replace them with your own to evaluate other content.
+[calibrated scale before the glyph fix](benchmarks/quality-curve-current.csv).
+The [source-image curve after the fix](benchmarks/quality-curve-glyph-fix-source.csv)
+is recorded separately; the other three photos are local examples.
 
 ```sh
 go run ./cmd/qualitycurve -input samples/source.jpg > /tmp/babe-quality.csv

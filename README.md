@@ -163,7 +163,8 @@ their difference:
 
 The decoder blurs only the interior of actual 8×8 and larger luma blocks. It
 does not mix adjacent blocks or change their edge pixels, so the separate
-`-s` boundary handling remains intact. Similar neighbours get more weight;
+`-s` boundary handling remains intact. Blur strength fades toward the block
+edges to avoid a visible frame. Similar neighbours get more weight;
 a luma difference above 48 stops the scan. A real lower-contrast edge inside a
 block may still blur. Chroma is not blurred, the encoded file is unchanged,
 and lossless q100 is unaffected. When
@@ -305,14 +306,15 @@ Each time is a median of three complete encode/decode cycles after warm-up,
 with process startup and disk I/O included. CPU is user plus system time across
 threads; peak RSS is the highest individual process peak in the cycle. The
 image is small, so process and file overhead account for a substantial portion
-of these timings. [Per-round data and methodology](docs/performance.md#jpeg-at-comparable-sizes).
+of these timings. The machine was heavily loaded during the latest run and
+individual cycle times varied; see [per-round data and methodology](docs/performance.md#jpeg-at-comparable-sizes).
 
 | Size target | Format and setting | Encoded size | RGB PSNR | Encode | Decode | Full cycle | CPU / cycle | Peak RSS |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| Small | JPEG q1 | 9,256 B | 21.73 dB | 0.0091 s | 0.0089 s | 0.0182 s | 0.0154 s | 7.3 MiB |
-| Small | BABE q0 | 8,843 B | 23.91 dB | 0.0065 s | 0.0075 s | 0.0142 s | 0.0158 s | 9.5 MiB |
-| Medium | JPEG q80 | 71,042 B | 35.40 dB | 0.0108 s | 0.0140 s | 0.0250 s | 0.0183 s | 7.2 MiB |
-| Medium | BABE q17 | 71,953 B | 30.47 dB | 0.0076 s | 0.0085 s | 0.0165 s | 0.0190 s | 9.9 MiB |
+| Small | JPEG q1 | 9,256 B | 21.73 dB | 0.0134 s | 0.0127 s | 0.0258 s | 0.0227 s | 7.3 MiB |
+| Small | BABE q0 | 8,843 B | 23.91 dB | 0.0106 s | 0.0106 s | 0.0213 s | 0.0244 s | 9.5 MiB |
+| Medium | JPEG q80 | 71,042 B | 35.40 dB | 0.0163 s | 0.0138 s | 0.0297 s | 0.0257 s | 7.3 MiB |
+| Medium | BABE q17 | 71,960 B | 30.47 dB | 0.0112 s | 0.0110 s | 0.0225 s | 0.0265 s | 9.8 MiB |
 
 ### Visual comparison
 
@@ -326,7 +328,7 @@ BABE is 4.5% smaller.
 <a href="samples/jpeg-q1.jpg"><img src="samples/jpeg-q1.jpg" alt="JPEG q1" width="49%"></a>
 <a href="samples/babe-q0.png"><img src="samples/babe-q0.png" alt="BABE q0" width="49%"></a>
 
-**Medium:** JPEG q80 (71,042 B) on the left; BABE q17 (71,953 B) on the right.
+**Medium:** JPEG q80 (71,042 B) on the left; BABE q17 (71,960 B) on the right.
 BABE is 1.3% larger. JPEG has higher PSNR on this image at these sizes.
 
 <a href="samples/jpeg-q80.jpg"><img src="samples/jpeg-q80.jpg" alt="JPEG q80" width="49%"></a>

@@ -55,7 +55,17 @@ func (d *Decoder) blurLuma(width, height int, sizes []byte, get func(int, int) b
 							weight += w
 						}
 					}
-					set(x, y, byte((sum+weight/2)/weight))
+					blurred := (sum + weight/2) / weight
+					// Keep the border untouched for -s, but fade the correction in
+					// gradually instead of creating a visible one-pixel frame.
+					distance := min(x-blockX, blockX+size-1-x, y-blockY, blockY+size-1-y)
+					strength := 8
+					if distance == 1 {
+						strength = 1
+					} else if distance == 2 {
+						strength = 4
+					}
+					set(x, y, byte((center*(8-strength)+blurred*strength+4)/8))
 				}
 			}
 		}

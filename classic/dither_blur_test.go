@@ -141,6 +141,30 @@ func TestDither3OnlyLargeBlocks(t *testing.T) {
 	}
 }
 
+func TestDither3TapersTowardGlyphEdges(t *testing.T) {
+	const size = 8
+	plane := make([]byte, size*size)
+	for y := range size {
+		for x := range size {
+			if x < 4 {
+				plane[y*size+x] = 100
+			} else {
+				plane[y*size+x] = 132
+			}
+		}
+	}
+	d := NewDecoder()
+	d.Parallel = false
+	d.blurLuma(size, size, bytes.Repeat([]byte{8}, len(plane)), func(x, y int) byte { return plane[y*size+x] }, func(x, y int, v byte) { plane[y*size+x] = v })
+	near, middle := int(plane[1*size+3])-100, int(plane[3*size+3])-100
+	if near <= 0 || near >= middle {
+		t.Fatalf("blur does not taper toward the fixed block edge: near=%d middle=%d", near, middle)
+	}
+	if plane[3] != 100 {
+		t.Fatal("block edge changed")
+	}
+}
+
 func TestDither3Softens32LevelGlyphStep(t *testing.T) {
 	const size = 8
 	plane := make([]byte, size*size)
