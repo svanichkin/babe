@@ -7,7 +7,7 @@ import (
 	"math"
 )
 
-// A large gradient replaces the Y glyphs in a 16, 32 or 64 pixel square.
+// A large gradient replaces the Y glyphs in a square up to 256 pixels wide.
 // Its four corners represent a plane fitted to source luminance.
 type largeGradient struct {
 	x, y, size int
@@ -36,6 +36,9 @@ func stitchLargeGradients(plane, sizes []byte, w, h int, stitchNeighbours bool) 
 		for x := 0; x < w; x++ {
 			i := y*w + x
 			size := int(sizes[i])
+			if size == 255 {
+				size = 256
+			}
 			if size == 0 {
 				continue
 			}
@@ -69,8 +72,50 @@ func stitchLargeGradients(plane, sizes []byte, w, h int, stitchNeighbours bool) 
 	return out
 }
 
+// gradientTileSums keeps integral sums at 16-pixel granularity. Every gradient
+// candidate is aligned to that grid, so its least-squares plane can be fitted
+// without rescanning its pixels at every level of the subdivision tree.
+type gradientTileSums struct {
+	cols            int
+	sum, xsum, ysum []int64
+}
+
+func makeGradientTileSums(plane []byte, w, h int) gradientTileSums {
+	cols, rows := w/16+1, h/16+1
+	s := gradientTileSums{cols: cols, sum: make([]int64, cols*rows), xsum: make([]int64, cols*rows), ysum: make([]int64, cols*rows)}
+	for ty := 0; ty < h/16; ty++ {
+		for tx := 0; tx < w/16; tx++ {
+			var sum, sx, sy int64
+			for y := ty * 16; y < ty*16+16; y++ {
+				for x := tx * 16; x < tx*16+16; x++ {
+					v := int64(plane[y*w+x])
+					sum += v
+					sx += int64(x) * v
+					sy += int64(y) * v
+				}
+			}
+			i := (ty+1)*cols + tx + 1
+			s.sum[i] = sum + s.sum[i-1] + s.sum[i-cols] - s.sum[i-cols-1]
+			s.xsum[i] = sx + s.xsum[i-1] + s.xsum[i-cols] - s.xsum[i-cols-1]
+			s.ysum[i] = sy + s.ysum[i-1] + s.ysum[i-cols] - s.ysum[i-cols-1]
+		}
+	}
+	return s
+}
+
+func (s gradientTileSums) planeMoments(x, y, size int) (float64, float64, float64) {
+	x0, y0, x1, y1 := x/16, y/16, (x+size)/16, (y+size)/16
+	get := func(v []int64) int64 { return v[y1*s.cols+x1] - v[y0*s.cols+x1] - v[y1*s.cols+x0] + v[y0*s.cols+x0] }
+	sum, sx, sy := get(s.sum), get(s.xsum), get(s.ysum)
+	return float64(sum), float64(2*sx - int64(2*x+size-1)*sum), float64(2*sy - int64(2*y+size-1)*sum)
+}
+
 func selectLargeGradients(plane []byte, w, h, quality int) []largeGradient {
 	var blocks []largeGradient
+	if w < 16 || h < 16 {
+		return blocks
+	}
+	stats := makeGradientTileSums(plane, w, h)
 	// Conservative error limits preserve small features. Each accepted 16x16
 	// block replaces at least four 8x8 glyphs, offsetting its metadata.
 	limit, maxError := 5.0, 10
@@ -92,17 +137,9 @@ func selectLargeGradients(plane []byte, w, h, quality int) []largeGradient {
 			}
 			return
 		}
-		sum, sx, sy := 0.0, 0.0, 0.0
-		for y := 0; y < n; y++ {
-			for x := 0; x < n; x++ {
-				v := float64(plane[(y0+y)*w+x0+x])
-				sum += v
-				sx += v * float64(2*x-(n-1))
-				sy += v * float64(2*y-(n-1))
-			}
-		}
+		sum, sx, sy := stats.planeMoments(x0, y0, n)
 		mean := sum / float64(n*n)
-		denom := float64(n*n*(n*n-1)) / 3
+		denom := float64(n*n) * float64(n*n-1) / 3
 		dx, dy := sx*float64(n-1)/denom, sy*float64(n-1)/denom
 		vals := [4]float64{mean - dx - dy, mean + dx - dy, mean - dx + dy, mean + dx + dy}
 		b := largeGradient{x: x0, y: y0, size: n}
@@ -114,15 +151,20 @@ func selectLargeGradients(plane []byte, w, h, quality int) []largeGradient {
 			lo = min(lo, z)
 			hi = max(hi, z)
 		}
-		errSum, maxDiff := 0, 0
+		var errSum int64
+		maxDiff := 0
+	verifyPlane:
 		for y := 0; y < n; y++ {
 			for x := 0; x < n; x++ {
 				d := int(plane[(y0+y)*w+x0+x]) - int(gradientAt(b, x0+x, y0+y))
 				if d < 0 {
 					d = -d
 				}
-				errSum += d * d
+				errSum += int64(d * d)
 				maxDiff = max(maxDiff, d)
+				if maxDiff > maxError || errSum > int64(limit)*int64(n*n) {
+					break verifyPlane
+				}
 			}
 		}
 		if hi-lo >= 4 && float64(errSum)/float64(n*n) <= limit && maxDiff <= maxError {
@@ -137,9 +179,9 @@ func selectLargeGradients(plane []byte, w, h, quality int) []largeGradient {
 			}
 		}
 	}
-	for y := 0; y < h; y += 64 {
-		for x := 0; x < w; x += 64 {
-			visit(x, y, 64)
+	for y := 0; y < h; y += 256 {
+		for x := 0; x < w; x += 256 {
+			visit(x, y, 256)
 		}
 	}
 	return blocks
@@ -189,8 +231,10 @@ func unpackLargeGradients(data []byte) ([]byte, []largeGradient, error) {
 	for i := range blocks {
 		p := raw[i*gradientRecordSize:]
 		b := &blocks[i]
-		b.x = int(binary.BigEndian.Uint32(p))
-		b.y = int(binary.BigEndian.Uint32(p[4:]))
+		x, y := binary.BigEndian.Uint32(p), binary.BigEndian.Uint32(p[4:])
+		if uint64(x) > maxImagePixels || uint64(y) > maxImagePixels { return nil,nil,fmt.Errorf("invalid gradient coordinates") }
+		b.x = int(x)
+		b.y = int(y)
 		b.size = int(p[8])
 		copy(b.corners[:], p[9:13])
 		if (b.size != 16 && b.size != 32 && b.size != 64) || b.x%b.size != 0 || b.y%b.size != 0 {
@@ -204,7 +248,7 @@ func validateLargeGradients(blocks []largeGradient, w, h int) error {
 	cols, rows := (w+15)/16, (h+15)/16
 	used := make([]bool, cols*rows)
 	for _, b := range blocks {
-		if b.x > w-b.size || b.y > h-b.size {
+		if b.x < 0 || b.y < 0 || b.size <= 0 || b.x > w-b.size || b.y > h-b.size {
 			return fmt.Errorf("gradient outside image")
 		}
 		for y := b.y / 16; y < (b.y+b.size)/16; y++ {

@@ -100,13 +100,13 @@ smaller. BGC3 separates flags and per-channel residuals for range coding;
 both reconstruct the same pixels. Luma corners entirely covered by selected
 large gradients are omitted when they cannot affect neighbouring glyphs.
 
-When encoding lossy images, `-smooth` also tries large 16×16, 32×32 and 64×64
-luminance gradients. The encoder fits each candidate to the source and splits
+When encoding lossy images, `-smooth` also tries large luminance gradients
+from 16×16 up to 256×256. The encoder fits each candidate to the source and splits
 areas with excessive error into smaller candidates, leaving details to normal
 glyphs. Neighbouring gradient blocks share boundary vertices on a 16-pixel grid,
 including intermediate vertices where blocks of different sizes meet. The
 decoder interpolates each block using its boundary vertices; small mismatches
-against ordinary glyphs are faded into the gradient. This experimental representation uses a `BGG2` wrapper and is decoded
+against ordinary glyphs are faded into the gradient. This experimental representation uses a `BGG3` wrapper and is decoded
 automatically; existing BABE decoders cannot read it. It keeps constant base
 glyphs under the gradients, so it is a prototype rather than a fully compact
 block format, and can increase file size. Gradient selection currently uses

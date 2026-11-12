@@ -65,7 +65,7 @@ func TestLargeGradientEncodeDecode(t *testing.T) {
 		t.Fatal(err)
 	}
 	data = bytes.Clone(data)
-	if string(data[:4]) != sharedGradientMagic {
+	if string(data[:4]) != compactSharedGradientMagic {
 		t.Fatal("expected encoded gradients")
 	}
 	_, blocks, _, err := unpackSharedGradients(data)

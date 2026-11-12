@@ -77,7 +77,7 @@ func TestGradientCornerElisionPreservesPixels(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if string(data[:4]) != sharedGradientMagic {
+			if string(data[:4]) != compactSharedGradientMagic {
 				t.Fatalf("%v q%d: expected gradients", dims, q)
 			}
 			wrapped, blocks, mesh, err := unpackSharedGradients(data)

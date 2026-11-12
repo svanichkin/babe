@@ -825,7 +825,7 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	d.sharedGradient = false
 	var gradients []largeGradient
 	var sharedMesh *sharedGradientMesh
-	if len(compData) >= 4 && string(compData[:4]) == sharedGradientMagic {
+	if len(compData) >= 4 && (string(compData[:4]) == sharedGradientMagic || string(compData[:4]) == compactSharedGradientMagic) {
 		var err error
 		compData, gradients, sharedMesh, err = unpackSharedGradients(compData)
 		if err != nil {
@@ -1067,6 +1067,10 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	if len(gradients) != 0 {
 		d.gradientMask = make([]byte, imgW*imgH)
 		for _, b := range gradients {
+			size := b.size
+			if size == 256 {
+				size = 255
+			}
 			for y := b.y; y < b.y+b.size; y++ {
 				for x := b.x; x < b.x+b.size; x++ {
 					if sharedMesh != nil {
@@ -1074,7 +1078,7 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 					} else {
 						pix[y*stride+x*4] = gradientAt(b, x, y)
 					}
-					d.gradientMask[y*imgW+x] = byte(b.size)
+					d.gradientMask[y*imgW+x] = byte(size)
 				}
 			}
 		}

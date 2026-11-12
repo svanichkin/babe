@@ -10,6 +10,7 @@ import (
 // different sizes meet there. Block interiors use a Coons patch over its
 // piecewise-linear boundary, ensuring that both sides use the same edge.
 const sharedGradientMagic = "BGG2"
+const compactSharedGradientMagic = "BGG3"
 const sharedGradientHeaderSize = 28
 const sharedGradientRecordSize = 9
 
@@ -84,8 +85,10 @@ func selectSharedGradients(plane []byte, w, h, quality int, m *sharedGradientMes
 	var result []largeGradient
 	var visit func(largeGradient)
 	visit = func(b largeGradient) {
-		sum, maxDiff := 0, 0
+		var sum int64
+		maxDiff := 0
 		lo, hi := 255, 0
+	verifyPatch:
 		for y := b.y; y < b.y+b.size; y++ {
 			for x := b.x; x < b.x+b.size; x++ {
 				predicted := int(m.at(b, x, y))
@@ -95,14 +98,17 @@ func selectSharedGradients(plane []byte, w, h, quality int, m *sharedGradientMes
 				if diff < 0 {
 					diff = -diff
 				}
-				sum += diff * diff
+				sum += int64(diff * diff)
 				maxDiff = max(maxDiff, diff)
+				if maxDiff > maxError || sum > int64(limit)*int64(b.size*b.size) {
+					break verifyPatch
+				}
 			}
 		}
 		// Reject a block that crosses a prominent real boundary at its perimeter.
 		// The neighbour can then remain represented by ordinary glyphs.
-		safe := true
-		for _, side := range []int{0, 1, 2, 3} {
+		safe := hi-lo >= 4 && float64(sum)/float64(b.size*b.size) <= limit && maxDiff <= maxError
+		for side := 0; safe && side < 4; side++ {
 			total, count := 0, 0
 			for k := 0; k < b.size; k++ {
 				x, y, nx, ny := b.x+k, b.y, b.x+k, b.y-1
@@ -163,11 +169,15 @@ func sharedNodeMask(blocks []largeGradient, w, h int) []bool {
 }
 func packSharedGradients(base []byte, blocks []largeGradient, m *sharedGradientMesh) []byte {
 	used := sharedNodeMask(blocks, m.width, m.height)
-	raw := make([]byte, 0, len(blocks)*sharedGradientRecordSize+len(used))
+	raw := make([]byte, 0, len(blocks)*3+len(used))
 	for _, b := range blocks {
-		raw = binary.BigEndian.AppendUint32(raw, uint32(b.x))
-		raw = binary.BigEndian.AppendUint32(raw, uint32(b.y))
-		raw = append(raw, byte(b.size))
+		code := byte(0)
+		for size := b.size; size > 16; size /= 2 {
+			code++
+		}
+		raw = append(raw, code)
+		raw = binary.AppendUvarint(raw, uint64(b.x/16))
+		raw = binary.AppendUvarint(raw, uint64(b.y/16))
 	}
 	prev := byte(0)
 	for i, yes := range used {
@@ -179,7 +189,7 @@ func packSharedGradients(base []byte, blocks []largeGradient, m *sharedGradientM
 	}
 	packed := encodeByteRangeInto(nil, raw)
 	out := make([]byte, 0, sharedGradientHeaderSize+len(base)+len(packed))
-	out = append(out, sharedGradientMagic...)
+	out = append(out, compactSharedGradientMagic...)
 	for _, v := range []uint32{uint32(m.width), uint32(m.height), uint32(len(base)), uint32(len(raw)), uint32(len(blocks))} {
 		out = binary.BigEndian.AppendUint32(out, v)
 	}
@@ -191,7 +201,7 @@ func packSharedGradients(base []byte, blocks []largeGradient, m *sharedGradientM
 	return append(out, packed...)
 }
 func unpackSharedGradients(data []byte) ([]byte, []largeGradient, *sharedGradientMesh, error) {
-	if len(data) < sharedGradientHeaderSize || string(data[:4]) != sharedGradientMagic {
+	if len(data) < sharedGradientHeaderSize || (string(data[:4]) != sharedGradientMagic && string(data[:4]) != compactSharedGradientMagic) {
 		return nil, nil, nil, fmt.Errorf("invalid shared gradient header")
 	}
 	w, h := int(binary.BigEndian.Uint32(data[4:])), int(binary.BigEndian.Uint32(data[8:]))
@@ -199,7 +209,11 @@ func unpackSharedGradients(data []byte) ([]byte, []largeGradient, *sharedGradien
 		return nil, nil, nil, err
 	}
 	baseLen, rawLen, count := uint64(binary.BigEndian.Uint32(data[12:])), uint64(binary.BigEndian.Uint32(data[16:])), uint64(binary.BigEndian.Uint32(data[20:]))
-	if baseLen < 4 || baseLen > uint64(len(data)-sharedGradientHeaderSize) || count == 0 || count > uint64(w/16)*uint64(h/16) || rawLen < count*sharedGradientRecordSize || rawLen > count*sharedGradientRecordSize+uint64(w/16+1)*uint64(h/16+1) {
+	minimumRecordSize := uint64(sharedGradientRecordSize)
+	if string(data[:4]) == compactSharedGradientMagic {
+		minimumRecordSize = 3
+	}
+	if baseLen < 4 || baseLen > uint64(len(data)-sharedGradientHeaderSize) || count == 0 || count > uint64(w/16)*uint64(h/16) || rawLen < count*minimumRecordSize || rawLen > count*sharedGradientRecordSize+uint64(w/16+1)*uint64(h/16+1) {
 		return nil, nil, nil, fmt.Errorf("invalid shared gradient lengths")
 	}
 	base := data[sharedGradientHeaderSize : sharedGradientHeaderSize+int(baseLen)]
@@ -214,13 +228,39 @@ func unpackSharedGradients(data []byte) ([]byte, []largeGradient, *sharedGradien
 		return nil, nil, nil, fmt.Errorf("shared gradient checksum mismatch")
 	}
 	blocks := make([]largeGradient, int(count))
+	pos := 0
 	for i := range blocks {
-		p := raw[i*sharedGradientRecordSize:]
 		b := &blocks[i]
-		b.x = int(binary.BigEndian.Uint32(p))
-		b.y = int(binary.BigEndian.Uint32(p[4:]))
-		b.size = int(p[8])
-		if (b.size != 16 && b.size != 32 && b.size != 64) || b.x%b.size != 0 || b.y%b.size != 0 {
+		if string(data[:4]) == compactSharedGradientMagic {
+			if pos >= len(raw) || raw[pos] > 4 {
+				return nil, nil, nil, fmt.Errorf("invalid compact gradient size")
+			}
+			b.size = 16 << raw[pos]
+			pos++
+			x, n := binary.Uvarint(raw[pos:])
+			if n <= 0 || x > uint64(w/16) {
+				return nil, nil, nil, fmt.Errorf("invalid compact gradient x")
+			}
+			pos += n
+			y, n := binary.Uvarint(raw[pos:])
+			if n <= 0 || y > uint64(h/16) {
+				return nil, nil, nil, fmt.Errorf("invalid compact gradient y")
+			}
+			pos += n
+			b.x, b.y = int(x)*16, int(y)*16
+		} else {
+			p := raw[pos : pos+sharedGradientRecordSize]
+			x, y := binary.BigEndian.Uint32(p), binary.BigEndian.Uint32(p[4:])
+			if uint64(x) > uint64(w) || uint64(y) > uint64(h) { return nil,nil,nil,fmt.Errorf("invalid shared gradient coordinates") }
+			b.x = int(x)
+			b.y = int(y)
+			b.size = int(p[8])
+			pos += sharedGradientRecordSize
+			if b.size == 0 {
+				b.size = 256
+			}
+		}
+		if (b.size != 16 && b.size != 32 && b.size != 64 && b.size != 128 && b.size != 256) || b.x%b.size != 0 || b.y%b.size != 0 {
 			return nil, nil, nil, fmt.Errorf("invalid shared gradient block")
 		}
 	}
@@ -229,7 +269,6 @@ func unpackSharedGradients(data []byte) ([]byte, []largeGradient, *sharedGradien
 	}
 	used := sharedNodeMask(blocks, w, h)
 	m := &sharedGradientMesh{width: w, height: h, cols: w/16 + 1, values: make([]byte, len(used))}
-	pos := int(count) * sharedGradientRecordSize
 	prev := byte(0)
 	for i, yes := range used {
 		if yes {

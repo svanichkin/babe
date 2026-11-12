@@ -32,7 +32,7 @@ type Encoder struct {
 	SparseCorners bool
 	CornerMinSize int
 
-	// LargeGradients replaces suitable 16–64 pixel luminance areas with
+	// LargeGradients replaces suitable 16–256 pixel luminance areas with
 	// gradient patches that share boundary vertices.
 	LargeGradients bool
 

@@ -603,6 +603,32 @@ is recorded separately; the other three photos are local examples.
 go run ./cmd/qualitycurve -input samples/source.jpg > /tmp/babe-quality.csv
 ```
 
+## Large shared gradients: 128 and 256 pixels
+
+The following comparison uses `benchmark.jpg` at 5152×7728, decoded from JPEG
+for each run. Each of three shuffled rounds ran a complete BABE `-smooth`
+encode and decode for each quality and version, in a fresh process. The prior
+version is commit `416eec6`; the new version adds 128×128 and 256×256 blocks,
+tile-sum acceleration and compact BGG3 coordinates. Times exclude loading
+the JPEG and writing a PNG. Entries are medians; the complete-cycle time is
+the median of the three encode-plus-decode sums, not the sum of the medians.
+The system load increased during the run, so these are approximate timings.
+
+| Quality | Version | Encode | Decode | Encode + decode | Peak RSS | BABE bytes | RGB PSNR |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 0 | Before | 0.995 s | 3.827 s | 4.822 s | 619.4 MiB | 1,502,145 | 24.003 dB |
+| 0 | After | 0.528 s | 3.875 s | 4.403 s | 619.7 MiB | 1,501,923 | 24.003 dB |
+| 10 | Before | 1.179 s | 2.513 s | 3.697 s | 623.9 MiB | 6,923,656 | 28.993 dB |
+| 10 | After | 0.675 s | 2.550 s | 3.226 s | 624.2 MiB | 6,923,569 | 28.993 dB |
+| 50 | Before | 1.352 s | 0.426 s | 1.783 s | 746.8 MiB | 20,699,063 | 34.422 dB |
+| 50 | After | 0.861 s | 0.428 s | 1.300 s | 749.0 MiB | 20,699,039 | 34.422 dB |
+
+This photograph contains few areas suitable for the larger blocks. On a
+synthetic 512×512 smooth grayscale gradient at q10, the file went from 1,011
+to 506 bytes and PSNR from 37.15 to 37.43 dB; this is a single example, not a
+general compression claim. The original 800×572 `samples/source.jpg` used
+three 128×128 blocks at q0 and q10, two at q50, and no 256×256 blocks.
+
 ## Reproduction
 
 Sample JPEGs are local and are not tracked. Run from the repository root:

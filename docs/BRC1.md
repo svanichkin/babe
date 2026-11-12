@@ -191,6 +191,15 @@ decoder rejects overlapping or out-of-bounds blocks and inconsistent lengths.
 Gradient boundaries next to ordinary glyphs still use the local correction
 described in the README. BGG1 remains readable, and q100 is unaffected.
 
+## Experimental BGG3 compact gradient records
+
+`BGG3` uses the same 28-byte header, checksum, shared vertices and patch
+interpolation as BGG2. Blocks may have side lengths 16, 32, 64, 128 or 256.
+Instead of BGG2's nine-byte coordinates and size, each BGG3 block record is a
+one-byte size code (0 through 4 for the five sizes), followed by unsigned
+varints for x/16 and y/16. Delta-coded vertex bytes follow all block records.
+BGG1 and BGG2 remain readable. Older decoders cannot read BGG3.
+
 ## Quantization
 
 At qualities 0–99 quantization happens before entropy coding, so the decoder needs no quality or
