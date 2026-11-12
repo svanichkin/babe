@@ -161,9 +161,12 @@ their difference:
 ./Babe 1.babe -dither3
 ```
 
-The decoder gives similar neighbours more weight and ignores luma differences
-above 12 levels. It may still blur a real low-contrast edge. Chroma is not
-blurred, the encoded file is unchanged, and lossless q100 is unaffected. When
+The decoder blurs only the interior of actual 8×8 and larger luma blocks. It
+does not mix adjacent blocks or change their edge pixels, so the separate
+`-s` boundary handling remains intact. Similar neighbours get more weight;
+a luma difference above 48 stops the scan. A real lower-contrast edge inside a
+block may still blur. Chroma is not blurred, the encoded file is unchanged,
+and lossless q100 is unaffected. When
 combined, `-dither2` runs first and `-dither3` second. In Go use
 `Decoder.Dither3`.
 

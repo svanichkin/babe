@@ -994,7 +994,7 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 		return nil, errCr
 	}
 	var originalCornerGrid *cornerGrid
-	if (d.Dither2 || d.Dither3) && channelsMask&channelFlagLossless == 0 {
+	if ((d.Dither2 && macroBlock >= 4) || (d.Dither3 && macroBlock >= 8)) && channelsMask&channelFlagLossless == 0 {
 		if storedCorners != nil && !d.GlyphsOnly {
 			grid := makeCornerGrid(imgW, imgH, storedCorners.step, func(x, y int) [3]byte {
 				o := y*stride + x*4
@@ -1014,8 +1014,9 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 		if d.Dither2 {
 			d.ditherLuma(ySeg, imgW, imgH, get, set)
 		}
-		if d.Dither3 {
-			d.blurLuma(imgW, imgH, get, set)
+		if d.Dither3 && macroBlock >= 8 {
+			sizes := d.glyphBlockSizes(ySeg, imgW, imgH)
+			d.blurLuma(imgW, imgH, sizes, get, set)
 		}
 	}
 	if d.GlyphsOnly {

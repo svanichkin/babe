@@ -361,20 +361,25 @@ python3 scripts/compare-corners.py --input benchmark.jpg --helper /tmp/babe-dith
 ## Edge-aware decoder blur
 
 `-dither3` / `Decoder.Dither3` is a separate experimental lossy decoder mode.
-For every luma sample, it looks at four adjacent samples from an immutable
-snapshot, including across block boundaries. The center gets weight 13; a
-neighbour with absolute luma difference `d <= 12` gets weight `13-d`, and a
-neighbour with a larger difference gets zero weight. The rounded weighted mean
-is used for reconstruction. Thus larger steps are not blended across, but a
-low-contrast real edge can still blur. Chroma is left intact. Source-corner
+It uses the decoded luma block partition and affects only the interior of actual
+8×8 and larger blocks; block-edge pixels and smaller blocks are untouched.
+Horizontal and vertical passes each use an immutable snapshot. Each scan stays
+inside its block and considers up to half the block size in each direction,
+capped at eight pixels. The center gets weight 49; a neighbour with absolute
+luma difference `d <= 48` gets weight `49-d`, while a larger difference stops
+that scan. The rounded weighted mean is used for reconstruction. Thus strong
+steps are not blended across, but a real edge within the threshold can still blur.
+The separate `-s` boundary blending is unchanged. Chroma is left intact. Source-corner
 baselines are computed before the blur, q100 is untouched, and encoded data
 does not change. When combined, `-dither2` precedes `-dither3`.
 
 With direct CLI input from 800×572 `samples/source.jpg`, q10 `-s 4` produced
-the same 54,374-byte `.babe` file with and without blur (SHA-256 checked). RGB
-PSNR against the decoded JPEG rounded to 29.46 dB in both cases. This does not
-guarantee equal perceived quality, nor preservation of every true edge.
+the same 54,374-byte `.babe` file before and after this blur change (SHA-256
+checked). RGB PSNR against the decoded JPEG was 29.46 dB for the former weak
+blur and 29.30 dB for the larger-block interior blur. This does not guarantee
+equal perceived quality, nor preservation of every true edge.
 
+The following historical timings refer to the earlier four-neighbour blur.
 Three full cycles on the 5152×7728 image used byte-identical BGC2 files with
 and without `-dither3`. Their elapsed times were 6.469, 4.009 and 6.008 s
 without blur, and 5.981, 4.370 and 8.027 s with blur. The one-minute system
@@ -382,9 +387,17 @@ load average immediately after the run was 330.85, and the large spread makes
 these measurements unsuitable for a speed comparison. All individual CPU,
 RSS and timing values are retained in [dither3-apple-m3.json](benchmarks/dither3-apple-m3.json).
 
+The old and current blur were also compared in three complete cycles on the
+same BGC2 bitstream. Old cycle times were 19.459, 7.555 and 31.274 s; current
+times were 7.775, 7.989 and 27.421 s. The one-minute system load average after
+the run was 676.32, so this run cannot establish a speed difference. The full
+records are in [dither3-interior-apple-m3.json](benchmarks/dither3-interior-apple-m3.json).
+The previous helper was built from commit `e69338f`.
+
 ```sh
 go build -o /tmp/babe-dither3bench ./cmd/losslessbench
 python3 scripts/compare-corners.py --input benchmark.jpg --helper /tmp/babe-dither3bench --rounds 3 --qualities 10 --decode-blur --output /tmp/dither3-results.json
+python3 scripts/compare-corners.py --input benchmark.jpg --helper /tmp/babe-dither3-finalbench --previous-helper /tmp/babe-dither3bench --rounds 3 --qualities 10 --decode-blur --output /tmp/dither3-interior.json
 ```
 
 ## Lossless CLI comparison

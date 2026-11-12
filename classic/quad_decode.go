@@ -70,24 +70,6 @@ func (d *Decoder) decodeQuadImage(segments [3][]byte, w, h int, lossless bool, s
 			decodeValidatedQuadPlane(segments[i], planes[i], w, h)
 		}
 	})
-	var originalCornerGrid *cornerGrid
-	if d.Dither3 && !lossless {
-		if storedCorners != nil && !d.GlyphsOnly {
-			grid := makeCornerGrid(w, h, storedCorners.step, func(x, y int) [3]byte {
-				o := y*w + x
-				v := [3]byte{planes[0][o], 128, 128}
-				if planes[1] != nil {
-					v[1] = planes[1][o]
-				}
-				if planes[2] != nil {
-					v[2] = planes[2][o]
-				}
-				return v
-			})
-			originalCornerGrid = &grid
-		}
-		d.blurLuma(w, h, func(x, y int) byte { return planes[0][y*w+x] }, func(x, y int, v byte) { planes[0][y*w+x] = v })
-	}
 	if d.GlyphsOnly {
 		processStreams(4, n, d.Parallel, func(i int) {
 			start, end := n*i/4, n*(i+1)/4
@@ -103,22 +85,17 @@ func (d *Decoder) decodeQuadImage(segments [3][]byte, w, h int, lossless bool, s
 		if storedCorners != nil {
 			step = storedCorners.step
 		}
-		var grid cornerGrid
-		if originalCornerGrid != nil {
-			grid = *originalCornerGrid
-		} else {
-			grid = makeCornerGrid(w, h, step, func(x, y int) [3]byte {
-				o := y*w + x
-				v := [3]byte{planes[0][o], 128, 128}
-				if planes[1] != nil {
-					v[1] = planes[1][o]
-				}
-				if planes[2] != nil {
-					v[2] = planes[2][o]
-				}
-				return v
-			})
-		}
+		grid := makeCornerGrid(w, h, step, func(x, y int) [3]byte {
+			o := y*w + x
+			v := [3]byte{planes[0][o], 128, 128}
+			if planes[1] != nil {
+				v[1] = planes[1][o]
+			}
+			if planes[2] != nil {
+				v[2] = planes[2][o]
+			}
+			return v
+		})
 		if storedCorners != nil {
 			storedCorners.fillMissing(grid)
 			var sizes []byte

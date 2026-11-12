@@ -32,8 +32,8 @@ if args.rounds < 1:
     parser.error("rounds must be positive")
 if args.glyph_min_size < 0 or (args.glyph_min_size and not args.glyph_blend):
     parser.error("--glyph-min-size requires --glyph-blend and must be nonnegative")
-if args.previous_helper and not args.decode_dither:
-    parser.error("--previous-helper requires --decode-dither")
+if args.previous_helper and not (args.decode_dither or args.decode_blur):
+    parser.error("--previous-helper requires --decode-dither or --decode-blur")
 qualities = [int(q) for q in args.qualities.split(",")]
 if not qualities or any(q < 0 or q > 100 for q in qualities):
     parser.error("qualities must be between 0 and 100")
@@ -50,7 +50,7 @@ if args.experiments:
 if args.decode_dither:
     modes = ("babe-sparse-dither2-old", "babe-sparse-dither2") if previous_helper else ("babe-sparse", "babe-sparse-dither2")
 if args.decode_blur:
-    modes = ("babe-sparse", "babe-sparse-dither3")
+    modes = ("babe-sparse-dither3-old", "babe-sparse-dither3") if previous_helper else ("babe-sparse", "babe-sparse-dither3")
 cases = [(quality, mode) for quality in qualities for mode in modes]
 measurements, bitstreams = [], {}
 with tempfile.TemporaryDirectory(prefix="babe-corners-bench-") as directory:
@@ -64,7 +64,9 @@ with tempfile.TemporaryDirectory(prefix="babe-corners-bench-") as directory:
         start = time.perf_counter()
         decode_helper = helper
         if args.decode_blur:
-            encoder, decoder = "babe-sparse", "babe-dither3" if mode.endswith("-dither3") else "babe"
+            encoder, decoder = "babe-sparse", "babe-dither3" if "-dither3" in mode else "babe"
+            if mode.endswith("-old"):
+                decode_helper = previous_helper
         elif args.decode_dither:
             encoder, decoder = "babe-sparse", "babe-dither2" if "-dither2" in mode else "babe"
             if mode.endswith("-old"):
