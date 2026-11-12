@@ -60,7 +60,12 @@ func (d *Decoder) patternBlockMap(channel []byte, width, height int) []byte {
 
 // ditherLuma reads a snapshot of the decoded Y channel and writes only the
 // luma output. Within each patterned block it estimates local coverage, then
-// selects one of the existing two levels using an ordered 4x4 threshold.
+// selects one of the existing two levels using an ordered 4x4 threshold. Larger
+// blocks give more weight to neighbours and therefore a stronger effect.
+func ditherCenterWeight(size int) int {
+	return max(2, 32/size)
+}
+
 func (d *Decoder) ditherLuma(channel []byte, width, height int, get func(int, int) byte, set func(int, int, byte)) {
 	if macroBlock < 4 {
 		return
@@ -89,7 +94,8 @@ func (d *Decoder) ditherLuma(channel []byte, width, height int, get func(int, in
 				x0, y0 := x/size*size, y/size*size
 				center := int(d.ditherInput[y*width+x])
 				lo, hi := center, center
-				sum, weight := center*8, 8
+				centerWeight := ditherCenterWeight(size)
+				sum, weight := center*centerWeight, centerWeight
 				for _, p := range [4][2]int{{x - 1, y}, {x + 1, y}, {x, y - 1}, {x, y + 1}} {
 					if p[0] < x0 || p[0] >= x0+size || p[1] < y0 || p[1] >= y0+size {
 						continue

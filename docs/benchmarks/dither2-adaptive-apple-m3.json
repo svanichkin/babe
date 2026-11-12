@@ -1,0 +1,148 @@
+{
+  "source_dimensions": [
+    5152,
+    7728
+  ],
+  "rgb_sha256": "ead8f20ca8c77be96ece5ba93b760b18f0875bece9ef2b29598b90f7d5b0d20a",
+  "rounds": 3,
+  "threads": 8,
+  "measurements": [
+    {
+      "round": 1,
+      "quality": 0,
+      "mode": "babe-sparse-dither2-old",
+      "encoded_bytes": 1939924,
+      "encode_wall_seconds": 1.6365107080200687,
+      "decode_wall_seconds": 5.535945957992226,
+      "cycle_wall_seconds": 7.174017707991879,
+      "cycle_cpu_seconds": 4.856930999999999,
+      "peak_process_rss_bytes": 309739520
+    },
+    {
+      "round": 1,
+      "quality": 0,
+      "mode": "babe-sparse-dither2",
+      "encoded_bytes": 1939924,
+      "encode_wall_seconds": 1.5138960829935968,
+      "decode_wall_seconds": 3.794586166040972,
+      "cycle_wall_seconds": 5.309293833968695,
+      "cycle_cpu_seconds": 4.799737,
+      "peak_process_rss_bytes": 313638912
+    },
+    {
+      "round": 1,
+      "quality": 10,
+      "mode": "babe-sparse-dither2-old",
+      "encoded_bytes": 7155522,
+      "encode_wall_seconds": 3.451234709005803,
+      "decode_wall_seconds": 5.4418421250302345,
+      "cycle_wall_seconds": 8.893816124997102,
+      "cycle_cpu_seconds": 5.641617999999999,
+      "peak_process_rss_bytes": 314310656
+    },
+    {
+      "round": 1,
+      "quality": 10,
+      "mode": "babe-sparse-dither2",
+      "encoded_bytes": 7155522,
+      "encode_wall_seconds": 2.7755804589833133,
+      "decode_wall_seconds": 2.8139352910220623,
+      "cycle_wall_seconds": 5.591754459019285,
+      "cycle_cpu_seconds": 5.557233999999999,
+      "peak_process_rss_bytes": 305922048
+    },
+    {
+      "round": 2,
+      "quality": 10,
+      "mode": "babe-sparse-dither2-old",
+      "encoded_bytes": 7155522,
+      "encode_wall_seconds": 2.635352833021898,
+      "decode_wall_seconds": 3.3134937079739757,
+      "cycle_wall_seconds": 5.950319083989598,
+      "cycle_cpu_seconds": 5.59337,
+      "peak_process_rss_bytes": 323600384
+    },
+    {
+      "round": 2,
+      "quality": 0,
+      "mode": "babe-sparse-dither2",
+      "encoded_bytes": 1939924,
+      "encode_wall_seconds": 1.1788013330078684,
+      "decode_wall_seconds": 1.6040199999697506,
+      "cycle_wall_seconds": 2.783129832998384,
+      "cycle_cpu_seconds": 4.143317,
+      "peak_process_rss_bytes": 314163200
+    },
+    {
+      "round": 2,
+      "quality": 10,
+      "mode": "babe-sparse-dither2",
+      "encoded_bytes": 7155522,
+      "encode_wall_seconds": 1.200529792055022,
+      "decode_wall_seconds": 1.732689084019512,
+      "cycle_wall_seconds": 2.933402083988767,
+      "cycle_cpu_seconds": 4.633859,
+      "peak_process_rss_bytes": 313704448
+    },
+    {
+      "round": 2,
+      "quality": 0,
+      "mode": "babe-sparse-dither2-old",
+      "encoded_bytes": 1939924,
+      "encode_wall_seconds": 0.9747379169566557,
+      "decode_wall_seconds": 1.120010458980687,
+      "cycle_wall_seconds": 2.0949432919733226,
+      "cycle_cpu_seconds": 3.87386,
+      "peak_process_rss_bytes": 313393152
+    },
+    {
+      "round": 3,
+      "quality": 0,
+      "mode": "babe-sparse-dither2-old",
+      "encoded_bytes": 1939924,
+      "encode_wall_seconds": 0.6757031250162981,
+      "decode_wall_seconds": 1.106592416006606,
+      "cycle_wall_seconds": 1.7824882499990053,
+      "cycle_cpu_seconds": 3.301418,
+      "peak_process_rss_bytes": 313704448
+    },
+    {
+      "round": 3,
+      "quality": 10,
+      "mode": "babe-sparse-dither2",
+      "encoded_bytes": 7155522,
+      "encode_wall_seconds": 0.8271468330058269,
+      "decode_wall_seconds": 1.5473196670063771,
+      "cycle_wall_seconds": 2.3746262500062585,
+      "cycle_cpu_seconds": 4.391208,
+      "peak_process_rss_bytes": 314081280
+    },
+    {
+      "round": 3,
+      "quality": 10,
+      "mode": "babe-sparse-dither2-old",
+      "encoded_bytes": 7155522,
+      "encode_wall_seconds": 1.1664822080056183,
+      "decode_wall_seconds": 2.1808436249848455,
+      "cycle_wall_seconds": 3.3476108329487033,
+      "cycle_cpu_seconds": 4.946096,
+      "peak_process_rss_bytes": 314359808
+    },
+    {
+      "round": 3,
+      "quality": 0,
+      "mode": "babe-sparse-dither2",
+      "encoded_bytes": 1939924,
+      "encode_wall_seconds": 1.3093755840091035,
+      "decode_wall_seconds": 3.6083557090023533,
+      "cycle_wall_seconds": 4.918540915998165,
+      "cycle_cpu_seconds": 4.071932,
+      "peak_process_rss_bytes": 313573376
+    }
+  ],
+  "load_average_after": [
+    372.56,
+    246.93,
+    161.84
+  ]
+}

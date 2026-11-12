@@ -148,9 +148,24 @@ For decoder-only dithering, use `-dither2`:
 
 Unlike `-dither`, this does not change the encoded file or its size. It applies
 an ordered pattern to the decoded luma glyphs in lossy patterned blocks of
-4×4 or larger. It can introduce visible noise and has no effect on q100 or
+4×4 or larger. Larger blocks use stronger dithering, while the ordered pattern
+still has a 4×4 period. It can introduce visible noise and has no effect on q100 or
 layouts whose largest blocks are 2×2. It can be combined with `-glyphs-only`
 to inspect the resulting luma glyphs; in Go use `Decoder.Dither2`.
+
+For a different experiment, `-dither3` blends nearby luma values according to
+their difference:
+
+```sh
+./Babe 1.jpg 10 -s 4 -dither3 1-dither3.png
+./Babe 1.babe -dither3
+```
+
+The decoder gives similar neighbours more weight and ignores luma differences
+above 12 levels. It may still blur a real low-contrast edge. Chroma is not
+blurred, the encoded file is unchanged, and lossless q100 is unaffected. When
+combined, `-dither2` runs first and `-dither3` second. In Go use
+`Decoder.Dither3`.
 
 To inspect the stored glyphs without color, render the first channel as
 grayscale:

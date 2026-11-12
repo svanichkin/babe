@@ -44,6 +44,10 @@ type Decoder struct {
 	// patterns. It does not change the bitstream or lossless output.
 	Dither2 bool
 
+	// Dither3 applies experimental threshold-aware luma blur during lossy
+	// reconstruction; it leaves high-contrast edges and lossless mode intact.
+	Dither3 bool
+
 	payload []byte
 	zdec    *zstd.Decoder
 
@@ -990,7 +994,7 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 		return nil, errCr
 	}
 	var originalCornerGrid *cornerGrid
-	if d.Dither2 && channelsMask&channelFlagLossless == 0 && macroBlock >= 4 {
+	if (d.Dither2 || d.Dither3) && channelsMask&channelFlagLossless == 0 {
 		if storedCorners != nil && !d.GlyphsOnly {
 			grid := makeCornerGrid(imgW, imgH, storedCorners.step, func(x, y int) [3]byte {
 				o := y*stride + x*4
@@ -1005,9 +1009,14 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 			})
 			originalCornerGrid = &grid
 		}
-		d.ditherLuma(ySeg, imgW, imgH,
-			func(x, y int) byte { return pix[y*stride+x*4] },
-			func(x, y int, v byte) { pix[y*stride+x*4] = v })
+		get := func(x, y int) byte { return pix[y*stride+x*4] }
+		set := func(x, y int, v byte) { pix[y*stride+x*4] = v }
+		if d.Dither2 {
+			d.ditherLuma(ySeg, imgW, imgH, get, set)
+		}
+		if d.Dither3 {
+			d.blurLuma(imgW, imgH, get, set)
+		}
 	}
 	if d.GlyphsOnly {
 		for y := 0; y < imgH; y++ {

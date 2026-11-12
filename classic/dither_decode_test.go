@@ -78,6 +78,45 @@ func TestDitherLumaKeepsLevelsAndStrongEdges(t *testing.T) {
 	}
 }
 
+func TestDitherStrengthTracksBlockSize(t *testing.T) {
+	if ditherCenterWeight(4) != 8 || ditherCenterWeight(8) != 4 || ditherCenterWeight(16) != 2 {
+		t.Fatal("larger blocks do not increase dither strength as intended")
+	}
+	codecStateMu.Lock()
+	defer codecStateMu.Unlock()
+	oldSmall, oldMacro := smallBlock, macroBlock
+	defer func() { smallBlock, macroBlock = oldSmall, oldMacro }()
+	smallBlock, macroBlock = 4, 8
+	segment := make([]byte, 14)
+	binary.BigEndian.PutUint32(segment[4:], 1)
+	segment[8] = 0x80
+	binary.BigEndian.PutUint32(segment[9:], 1)
+	segment[13] = 0x80
+	const pattern = "0101100001000101001010111010100100101000110100001000000100110100"
+	plane := make([]byte, 64)
+	for i, v := range pattern {
+		if v == '1' {
+			plane[i] = 100
+		} else {
+			plane[i] = 80
+		}
+	}
+	original := bytes.Clone(plane)
+	d := NewDecoder()
+	d.Parallel = false
+	d.ditherLuma(segment, 8, 8, func(x, y int) byte { return plane[y*8+x] }, func(x, y int, v byte) { plane[y*8+x] = v })
+	changed := 0
+	for i := range plane {
+		if plane[i] != original[i] {
+			changed++
+		}
+	}
+	// The previous fixed-strength decoder changes seven pixels on this fixture.
+	if changed != 10 {
+		t.Fatalf("8x8 block: changed %d pixels, expected 10", changed)
+	}
+}
+
 func TestDither2Decode(t *testing.T) {
 	img := image.NewRGBA(image.Rect(0, 0, 128, 128))
 	for y := range 128 {

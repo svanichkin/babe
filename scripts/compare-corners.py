@@ -25,25 +25,32 @@ parser.add_argument("--glyph-blend", action="store_true", help="compare decoding
 parser.add_argument("--glyph-min-size", type=int, default=0, help="minimum block size when comparing glyph blending")
 parser.add_argument("--experiments", action="store_true", help="compare dense, sparse, dithered and simplified encoding")
 parser.add_argument("--decode-dither", action="store_true", help="compare sparse encoding with and without decoder dithering")
+parser.add_argument("--decode-blur", action="store_true", help="compare sparse decoding with and without edge-aware luma blur")
+parser.add_argument("--previous-helper", help="compare decoder dithering with a previously built helper")
 args = parser.parse_args()
 if args.rounds < 1:
     parser.error("rounds must be positive")
 if args.glyph_min_size < 0 or (args.glyph_min_size and not args.glyph_blend):
     parser.error("--glyph-min-size requires --glyph-blend and must be nonnegative")
+if args.previous_helper and not args.decode_dither:
+    parser.error("--previous-helper requires --decode-dither")
 qualities = [int(q) for q in args.qualities.split(",")]
 if not qualities or any(q < 0 or q > 100 for q in qualities):
     parser.error("qualities must be between 0 and 100")
 helper = str(Path(args.helper).resolve())
+previous_helper = str(Path(args.previous_helper).resolve()) if args.previous_helper else None
 env = os.environ.copy()
 env["GOMAXPROCS"] = "8"
-if sum((args.glyph_blend, args.encoded_corners, args.experiments, args.decode_dither)) > 1:
+if sum((args.glyph_blend, args.encoded_corners, args.experiments, args.decode_dither, args.decode_blur)) > 1:
     parser.error("select one comparison")
 glyph_mode = f"babe-glyphs:{args.glyph_min_size}" if args.glyph_min_size else "babe-glyphs"
 modes = ("babe-cornerdata", glyph_mode) if args.glyph_blend else (("babe", "babe-cornerdata") if args.encoded_corners else ("babe", "babe-corners"))
 if args.experiments:
     modes = ("babe-cornerdata", "babe-sparse", "babe-dither", "babe-pattern2", "babe-combined")
 if args.decode_dither:
-    modes = ("babe-sparse", "babe-sparse-dither2")
+    modes = ("babe-sparse-dither2-old", "babe-sparse-dither2") if previous_helper else ("babe-sparse", "babe-sparse-dither2")
+if args.decode_blur:
+    modes = ("babe-sparse", "babe-sparse-dither3")
 cases = [(quality, mode) for quality in qualities for mode in modes]
 measurements, bitstreams = [], {}
 with tempfile.TemporaryDirectory(prefix="babe-corners-bench-") as directory:
@@ -55,8 +62,13 @@ with tempfile.TemporaryDirectory(prefix="babe-corners-bench-") as directory:
     def cycle(quality, mode, run):
         print(f"{'Warm-up' if run == 0 else f'Round {run}/{args.rounds}'}: q{quality} {mode}", flush=True)
         start = time.perf_counter()
-        if args.decode_dither:
-            encoder, decoder = "babe-sparse", "babe-dither2" if mode.endswith("-dither2") else "babe"
+        decode_helper = helper
+        if args.decode_blur:
+            encoder, decoder = "babe-sparse", "babe-dither3" if mode.endswith("-dither3") else "babe"
+        elif args.decode_dither:
+            encoder, decoder = "babe-sparse", "babe-dither2" if "-dither2" in mode else "babe"
+            if mode.endswith("-old"):
+                decode_helper = previous_helper
         elif args.experiments:
             encoder, decoder = mode, "babe"
         else:
@@ -64,7 +76,7 @@ with tempfile.TemporaryDirectory(prefix="babe-corners-bench-") as directory:
             decoder = "babe" if mode == "babe-cornerdata" else mode
         enc = timed([helper, "encode", f"{encoder}:{quality}", str(source), str(encoded)], env)
         size = encoded.stat().st_size
-        dec = timed([helper, "decode", decoder, str(encoded), str(decoded)], env)
+        dec = timed([decode_helper, "decode", decoder, str(encoded), str(decoded)], env)
         elapsed = time.perf_counter() - start
         output = ppm_hash(decoded)
         if output[:2] != reference[:2] or (quality == 100 and output != reference):
@@ -90,7 +102,9 @@ with tempfile.TemporaryDirectory(prefix="babe-corners-bench-") as directory:
             cycle(*case, run)
 
 Path(args.output).write_text(json.dumps({"source_dimensions": reference[:2], "rgb_sha256": reference[2],
-                                         "rounds": args.rounds, "threads": 8, "measurements": measurements}, indent=2) + "\n")
+                                         "rounds": args.rounds, "threads": 8,
+                                         "load_average_after": os.getloadavg(),
+                                         "measurements": measurements}, indent=2) + "\n")
 for quality, mode in cases:
     rows = [m for m in measurements if m["quality"] == quality and m["mode"] == mode]
     med = lambda key: statistics.median(row[key] for row in rows)

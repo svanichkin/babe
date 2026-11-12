@@ -97,6 +97,14 @@ func run(op, codec, input, output string) error {
 				decoder.Dither2 = true
 				img, err = decoder.Decode(data, false)
 			}
+		case "babe-dither3":
+			var data []byte
+			data, err = io.ReadAll(f)
+			if err == nil {
+				decoder := classic.NewDecoder()
+				decoder.Dither3 = true
+				img, err = decoder.Decode(data, false)
+			}
 		case "qoi":
 			img, err = qoi.Decode(f)
 		case "png":
