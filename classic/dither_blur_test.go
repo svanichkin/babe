@@ -307,3 +307,42 @@ func TestDither3SmallImages(t *testing.T) {
 		}
 	}
 }
+
+func TestBlockLocalBlurMatchesSnapshot(t *testing.T) {
+	for _, dims := range [][2]int{{8, 8}, {16, 24}, {37, 29}, {168, 137}} {
+		w, h := dims[0], dims[1]
+		for trial := 0; trial < 5; trial++ {
+			input, sizes := make([]byte, w*h), make([]byte, w*h)
+			var state uint32 = 273895 + uint32(trial)
+			for y := 0; y < h; y++ {
+				for x := 0; x < w; x++ {
+					i := y*w + x
+					state = state*1664525 + 1013904223
+					input[i] = byte(state >> 24)
+					if trial%2 == 0 {
+						input[i] = 100 + input[i]%40
+					}
+					sizes[i] = 4
+					if x/8*8+8 <= w && y/8*8+8 <= h && (x/8+y/8)%3 != 1 {
+						sizes[i] = 8
+					}
+				}
+			}
+			want := append([]byte(nil), input...)
+			reference := NewDecoder()
+			reference.Parallel = false
+			reference.blurLuma(w, h, sizes, func(x, y int) byte { return want[y*w+x] }, func(x, y int, v byte) { want[y*w+x] = v })
+			for _, parallel := range []bool{false, true} {
+				got := append([]byte(nil), input...)
+				d := NewDecoder()
+				d.Parallel = parallel
+				d.blurGlyphLuma8(w, h, sizes, func(x, y int) byte { return got[y*w+x] }, func(x, y int, v byte) { got[y*w+x] = v })
+				for i, v := range want {
+					if got[i] != v {
+						t.Fatalf("%v trial=%d parallel=%v pixel=%d: got %d want %d", dims, trial, parallel, i, got[i], v)
+					}
+				}
+			}
+		}
+	}
+}

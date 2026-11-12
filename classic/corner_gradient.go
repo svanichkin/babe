@@ -201,6 +201,41 @@ func spreadGlyphResidual(x, y, width, height, minSize int, sizes []byte, residua
 	return residual
 }
 
+// Compute each edge correction once for a complete 8x8 glyph, then reuse it
+// for the interior pixels. Keep the original signed integer divisions: changing
+// their rounding would change the decoded image.
+func glyphResidual8(x0, y0, width, height, minSize int, sizes []byte, luma func(int, int) byte, baseline cornerGrid, out *[64]int16) {
+	var edges [64]int16
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 8; x++ {
+			i := y*8 + x
+			r := int(luma(x0+x, y0+y)) - int(baseline.lumaAt(x0+x, y0+y))
+			out[i] = int16(r)
+			if x == 0 || x == 7 || y == 0 || y == 7 {
+				edges[i] = int16(blendGlyphResidual(x0+x, y0+y, width, height, minSize, sizes, r, luma, baseline) - r)
+				out[i] += edges[i]
+			}
+		}
+	}
+	for y := 1; y < 7; y++ {
+		for x := 1; x < 7; x++ {
+			i := y*8 + x
+			if x <= 3 {
+				out[i] += edges[y*8] * int16(4-x) / 4
+			}
+			if x >= 4 {
+				out[i] += edges[y*8+7] * int16(x-3) / 4
+			}
+			if y <= 3 {
+				out[i] += edges[x] * int16(4-y) / 4
+			}
+			if y >= 4 {
+				out[i] += edges[56+x] * int16(y-3) / 4
+			}
+		}
+	}
+}
+
 func (d *Decoder) writeStoredCorners(g, baseline cornerGrid, luma func(x, y int) byte, sizes []byte, minSize int) {
 	var resolved []byte
 	if d.gradientMask != nil {
@@ -237,60 +272,71 @@ func (d *Decoder) writeStoredCorners(g, baseline cornerGrid, luma func(x, y int)
 		resolved = stitchLargeGradients(resolved, d.gradientMask, g.width, g.height, !d.sharedGradient)
 	}
 	write := func(y0, y1 int) {
-		for y := y0; y < y1; y++ {
-			for x := 0; x < g.width; x++ {
-				o := y*d.dst.Stride + x*4
-				if d.Smooth && sizes != nil && sizes[y*g.width+x] <= 4 {
-					Y := int32(luma(x, y))
-					if resolved != nil && d.gradientMask[y*g.width+x] != 0 {
-						Y = int32(resolved[y*g.width+x])
-					}
-					Cb, Cr := int32(d.dst.Pix[o+1])-128, int32(d.dst.Pix[o+2])-128
-					if !d.smoothHasCb {
-						Cb = 0
-					}
-					if !d.smoothHasCr {
-						Cr = 0
-					}
-					R, G, B := Y+((91881*Cr)>>16), Y-((22554*Cb+46802*Cr)>>16), Y+((116130*Cb)>>16)
-					d.dst.Pix[o], d.dst.Pix[o+1], d.dst.Pix[o+2], d.dst.Pix[o+3] = byte(max(0, min(255, R))), byte(max(0, min(255, G))), byte(max(0, min(255, B))), 255
-					continue
+		for by := y0 / 8 * 8; by < y1; by += 8 {
+			for bx := 0; bx < g.width; bx += 8 {
+				var residuals [64]int16
+				cached := d.Smooth && sizes != nil && bx+8 <= g.width && by+8 <= g.height && sizes[by*g.width+bx] == 8 && (d.gradientMask == nil || d.gradientMask[by*g.width+bx] == 0)
+				if cached {
+					glyphResidual8(bx, by, g.width, g.height, minSize, sizes, luma, baseline, &residuals)
 				}
-				v := g.at(x, y)
-				var Y int32
-				if resolved != nil && d.gradientMask[y*g.width+x] != 0 {
-					Y = int32(resolved[y*g.width+x])
-				} else {
-					old := baseline.lumaAt(x, y)
-					residual := int(luma(x, y)) - int(old)
-					if sizes != nil {
-						residual = blendGlyphResidual(x, y, g.width, g.height, minSize, sizes, residual, luma, baseline)
+				for y := max(y0, by); y < min(y1, by+8); y++ {
+					for x := bx; x < min(g.width, bx+8); x++ {
+						o := y*d.dst.Stride + x*4
+						if d.Smooth && sizes != nil && sizes[y*g.width+x] <= 4 {
+							Y := int32(luma(x, y))
+							if resolved != nil && d.gradientMask[y*g.width+x] != 0 {
+								Y = int32(resolved[y*g.width+x])
+							}
+							Cb, Cr := int32(d.dst.Pix[o+1])-128, int32(d.dst.Pix[o+2])-128
+							if !d.smoothHasCb {
+								Cb = 0
+							}
+							if !d.smoothHasCr {
+								Cr = 0
+							}
+							R, G, B := Y+((91881*Cr)>>16), Y-((22554*Cb+46802*Cr)>>16), Y+((116130*Cb)>>16)
+							d.dst.Pix[o], d.dst.Pix[o+1], d.dst.Pix[o+2], d.dst.Pix[o+3] = byte(max(0, min(255, R))), byte(max(0, min(255, G))), byte(max(0, min(255, B))), 255
+							continue
+						}
+						v := g.at(x, y)
+						var Y int32
+						if resolved != nil && d.gradientMask[y*g.width+x] != 0 {
+							Y = int32(resolved[y*g.width+x])
+						} else if cached {
+							Y = int32(max(0, min(255, int(residuals[(y-by)*8+x-bx])+int(v[0]))))
+						} else {
+							old := baseline.lumaAt(x, y)
+							residual := int(luma(x, y)) - int(old)
+							if sizes != nil {
+								residual = blendGlyphResidual(x, y, g.width, g.height, minSize, sizes, residual, luma, baseline)
+								if d.Smooth {
+									residual = spreadGlyphResidual(x, y, g.width, g.height, minSize, sizes, residual, luma, baseline)
+								}
+							}
+							Y = int32(max(0, min(255, residual+int(v[0]))))
+						}
+						Cb, Cr := int32(v[1])-128, int32(v[2])-128
 						if d.Smooth {
-							residual = spreadGlyphResidual(x, y, g.width, g.height, minSize, sizes, residual, luma, baseline)
+							mask := d.smoothChannels[y*g.width+x]
+							if mask&1 == 0 {
+								Cb = 0
+								if d.smoothHasCb {
+									Cb = int32(d.dst.Pix[o+1]) - 128
+								}
+							}
+							if mask&2 == 0 {
+								Cr = 0
+								if d.smoothHasCr {
+									Cr = int32(d.dst.Pix[o+2]) - 128
+								}
+							}
 						}
+						R := Y + ((91881 * Cr) >> 16)
+						G := Y - ((22554*Cb + 46802*Cr) >> 16)
+						B := Y + ((116130 * Cb) >> 16)
+						d.dst.Pix[o], d.dst.Pix[o+1], d.dst.Pix[o+2], d.dst.Pix[o+3] = byte(max(0, min(255, R))), byte(max(0, min(255, G))), byte(max(0, min(255, B))), 255
 					}
-					Y = int32(max(0, min(255, residual+int(v[0]))))
 				}
-				Cb, Cr := int32(v[1])-128, int32(v[2])-128
-				if d.Smooth {
-					mask := d.smoothChannels[y*g.width+x]
-					if mask&1 == 0 {
-						Cb = 0
-						if d.smoothHasCb {
-							Cb = int32(d.dst.Pix[o+1]) - 128
-						}
-					}
-					if mask&2 == 0 {
-						Cr = 0
-						if d.smoothHasCr {
-							Cr = int32(d.dst.Pix[o+2]) - 128
-						}
-					}
-				}
-				R := Y + ((91881 * Cr) >> 16)
-				G := Y - ((22554*Cb + 46802*Cr) >> 16)
-				B := Y + ((116130 * Cb) >> 16)
-				d.dst.Pix[o], d.dst.Pix[o+1], d.dst.Pix[o+2], d.dst.Pix[o+3] = byte(max(0, min(255, R))), byte(max(0, min(255, G))), byte(max(0, min(255, B))), 255
 			}
 		}
 	}

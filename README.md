@@ -54,9 +54,10 @@ At a high level, Babe is a block-based codec with a dual-tone model per block an
 
 8. **Range compression**
    - Each stream is split into blocks of up to 32 KiB, with one frequency table per block. The range coder processes a whole byte per step. Constant blocks store a single repeated byte; incompressible blocks or streams are stored raw when that is smaller.
+   - For larger glyphs, background levels can be stored as differences from their foreground levels. The encoder chooses the predictor by estimated range-coded size, then falls back to raw storage if needed; reconstructed pixels stay identical.
    - New files always use the `BRC1` container with a checksum. There is no search across codecs or context models, and Zstd is not used for encoding.
    - Up to four entropy workers process independent streams. Small payloads run serially; `Encoder.Parallel` and `Decoder.Parallel` also control these workers.
-   - The decoder still accepts older binary-range and Zstd-based `.babe` files, including mixed range/Zstd `BRC1` files. Older programs do not support the new byte-range method (16) or the lossless color flag.
+   - The decoder still accepts older binary-range and Zstd-based `.babe` files, including mixed range/Zstd `BRC1` files. Older programs may not support byte-range methods 16/17 or the lossless color flag.
 
 9. **Decoding**
    - Decode reverses the process:
@@ -112,6 +113,11 @@ glyphs under the gradients, so it is a prototype rather than a fully compact
 block format, and can increase file size. Gradient selection currently uses
 fixed error limits, not an exact rate–distortion search. The experiment is
 disabled for lossless q100. In Go, enable it with `Encoder.LargeGradients`.
+
+Gradient reconstruction reuses boundary samples, and 8×8 smoothing works
+within each glyph instead of copying the full luma plane. See the
+[speed and size measurements](docs/performance.md#gradient-and-glyph-reuse-with-contrast-coding)
+for comparisons against the previous implementation with identical decoded pixels.
 
 To inspect the stored glyphs without color, render the first channel as
 grayscale:

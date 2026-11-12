@@ -11,7 +11,7 @@ encoder/decoder's `Parallel` field to false also disables entropy workers.
 
 The decoder recognizes both BRC1 and previous Zstd-based files, including mixed
 range/Zstd containers produced by the earlier exhaustive encoder. Earlier BRC1
-decoders do not support method 16 or the new lossless color flag; Zstd-only
+decoders do not support methods 16/17 or the new lossless color flag; Zstd-only
 decoders cannot read BRC1 at all. Files produced by earlier encoders remain
 readable, with their original decoded pixel values.
 
@@ -47,6 +47,7 @@ method, and `stored length` bytes. Methods:
 | 4 | Read compatibility: range context is the high nibble of the preceding byte |
 | 8 | Read compatibility: range context is the whole preceding byte |
 | 16 | Byte-symbol range coding with a static model per block; current encoder |
+| 17 | Byte-symbol range coding of within-glyph foreground/background differences |
 | 254 | Read compatibility: Zstd frame |
 | 255 | Raw bytes; stored and raw lengths must be equal |
 
@@ -84,6 +85,28 @@ speculative normalization read within the stored buffer.
 The encoder can store an individual block raw or as a repeated byte. It also
 falls back to method 255 if the whole method-16 stream is not smaller than raw.
 No Zstd or alternative context-model search is performed.
+
+## Within-glyph contrast (method 17)
+
+Method 17 is valid only for stream 5 (background levels). Its byte-range
+representation is identical to method 16, but the symbols are `FG - BG` modulo
+256 for each pattern glyph, rather than deltas between successive backgrounds.
+After decompressing the channel streams, accumulate the foreground deltas from
+zero. For each foreground whose type bit is 1, consume one contrast byte and
+recover `BG = FG - contrast` modulo 256. Convert these backgrounds back to the
+original delta stream, starting from zero, before checking the payload CRC.
+There must be exactly one contrast byte per set type bit within the block count.
+
+The encoder estimates both predictors' range-coded sizes from the normalized
+frequency models, including model headers, and chooses method 17 when its
+estimate is at least two bytes smaller. Only that candidate is range-encoded;
+the original raw bytes are stored if the result is not smaller than raw.
+The estimate avoids compressing each background stream twice, but does not
+guarantee the absolute smaller of the two packed representations for every
+input. It tries this for macroblocks of at least 4 pixels. The 1×1/2×2 path,
+including lossless q100, keeps its existing representation to avoid the extra
+prediction pass. This changes storage only; every reconstructed pixel is
+unchanged. Decoders without method-17 support reject these new streams.
 
 ## Legacy binary range coding (methods 0, 4, 8)
 

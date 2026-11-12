@@ -1061,20 +1061,28 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 		}
 		if (d.Dither3 || d.Smooth) && macroBlock >= 8 {
 			sizes := d.glyphBlockSizes(ySeg, imgW, imgH)
-			d.blurLuma(imgW, imgH, sizes, get, set)
+			d.blurGlyphLuma8(imgW, imgH, sizes, get, set)
 		}
 	}
 	if len(gradients) != 0 {
 		d.gradientMask = make([]byte, imgW*imgH)
 		for _, b := range gradients {
+			var patch sharedGradientPatch
+			var row [256]byte
+			if sharedMesh != nil {
+				patch = sharedMesh.preparePatch(b)
+			}
 			size := b.size
 			if size == 256 {
 				size = 255
 			}
 			for y := b.y; y < b.y+b.size; y++ {
+				if sharedMesh != nil {
+					patch.row(sharedMesh, b, y, row[:b.size])
+				}
 				for x := b.x; x < b.x+b.size; x++ {
 					if sharedMesh != nil {
-						pix[y*stride+x*4] = sharedMesh.at(b, x, y)
+						pix[y*stride+x*4] = row[x-b.x]
 					} else {
 						pix[y*stride+x*4] = gradientAt(b, x, y)
 					}

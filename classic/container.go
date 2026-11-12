@@ -12,13 +12,14 @@ import (
 )
 
 const (
-	packedMagic       = "BRC1"
-	payloadHeaderSize = 18
-	maxImagePixels    = 1 << 26
-	maxPayloadSize    = 1 << 30
-	methodByteRange   = 16
-	methodZstd        = 254
-	methodRaw         = 255
+	packedMagic         = "BRC1"
+	payloadHeaderSize   = 18
+	maxImagePixels      = 1 << 26
+	maxPayloadSize      = 1 << 30
+	methodByteRange     = 16
+	methodContrastRange = 17
+	methodZstd          = 254
+	methodRaw           = 255
 )
 
 type payloadHeader struct {
@@ -126,7 +127,10 @@ type payloadStream struct {
 	err      error
 }
 
-type payloadPacker struct{ buffers [15][]byte }
+type payloadPacker struct {
+	buffers  [15][]byte
+	contrast [3][]byte
+}
 
 // Limit entropy workers to avoid oversubscribing the image conversion workers.
 // Small payloads stay serial, and Parallel=false disables all entropy workers.
@@ -187,16 +191,33 @@ func (p *payloadPacker) compress(raw, dst []byte, parallel bool) ([]byte, error)
 		job := &streams[i]
 		job.method = methodRaw
 		job.dst = job.src
-		if len(job.src) > 5 {
-			p.buffers[i] = encodeByteRangeInto(p.buffers[i], job.src)
-			if len(p.buffers[i]) < len(job.src) {
-				job.dst = p.buffers[i]
-				job.method = methodByteRange
+		if len(job.src) <= 5 {
+			return
+		}
+		input, method := job.src, byte(methodByteRange)
+		// Keep the 1x1/2x2 path (including lossless) free of this extra pass.
+		// Compare model costs instead of encoding a background stream twice.
+		if i%5 == 4 && h.macro >= 4 {
+			c := i / 5
+			p.contrast[c] = append(p.contrast[c][:0], job.src...)
+			job.err = transformBackground(p.contrast[c], streams[i-1].src, streams[i-3].src, false)
+			if job.err != nil {
+				return
 			}
+			if estimateRangeBytes(p.contrast[c])+2 < estimateRangeBytes(job.src) {
+				input, method = p.contrast[c], methodContrastRange
+			}
+		}
+		p.buffers[i] = encodeByteRangeInto(p.buffers[i], input)
+		if len(p.buffers[i]) < len(job.src) {
+			job.dst, job.method = p.buffers[i], method
 		}
 	})
 	size := 26 + h.channels*4 + count*9
 	for i := 0; i < count; i++ {
+		if streams[i].err != nil {
+			return nil, streams[i].err
+		}
 		size += len(streams[i].dst)
 	}
 	if cap(dst) < size {
@@ -239,7 +260,7 @@ func decompressPayload(data, dst []byte, zd *zstd.Decoder, parallel bool) ([]byt
 	var blocks [3]int
 	count := h.channels * 5
 	size := payloadHeaderSize + h.channels*4 + count*4
-	hasZstd := false
+	hasZstd, hasContrast := false, false
 	// Parse and bound every stream before allocating the output or launching jobs.
 	for c := 0; c < h.channels; c++ {
 		blocks[c], err = r.u32()
@@ -270,6 +291,11 @@ func decompressPayload(data, dst []byte, zd *zstd.Decoder, parallel bool) ([]byt
 				return nil, err
 			}
 			switch method[0] {
+			case methodContrastRange:
+				hasContrast = true
+				if s != 4 {
+					return nil, fmt.Errorf("contrast coding requires a background stream")
+				}
 			case methodRaw:
 				if stored != n {
 					return nil, fmt.Errorf("incorrect raw stream length")
@@ -322,7 +348,7 @@ func decompressPayload(data, dst []byte, zd *zstd.Decoder, parallel bool) ([]byt
 		switch job.method {
 		case methodRaw:
 			copy(job.dst, job.src)
-		case methodByteRange:
+		case methodByteRange, methodContrastRange:
 			job.err = decodeByteRangeInto(job.dst, job.src)
 		case methodZstd:
 			var decoded []byte
@@ -337,6 +363,21 @@ func decompressPayload(data, dst []byte, zd *zstd.Decoder, parallel bool) ([]byt
 	for i := 0; i < count; i++ {
 		if streams[i].err != nil {
 			return nil, streams[i].err
+		}
+	}
+	if hasContrast {
+		// The inverse predictors read only their own channel's streams. Parallelize
+		// substantial payloads after entropy workers have completed the dependencies.
+		processStreams(h.channels, size, parallel && size >= 1<<20, func(c int) {
+			i := c*5 + 4
+			if streams[i].method == methodContrastRange {
+				streams[i].err = transformBackground(streams[i].dst, streams[i-1].dst, streams[i-3].dst, true)
+			}
+		})
+		for c := 0; c < h.channels; c++ {
+			if err := streams[c*5+4].err; err != nil {
+				return nil, err
+			}
 		}
 	}
 	if crc32.ChecksumIEEE(dst) != binary.BigEndian.Uint32(checksum) {

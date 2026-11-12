@@ -174,3 +174,69 @@ func TestSparseGradientNeighbourResolutionMatchesDense(t *testing.T) {
 		}
 	}
 }
+
+func TestSharedGradientRowsMatchPixels(t *testing.T) {
+	const w, h = 544, 544
+	plane := make([]byte, w*h)
+	var state uint32 = 138123
+	for i := range plane {
+		state = state*1664525 + 1013904223
+		plane[i] = byte(state >> 24)
+	}
+	mesh := makeSharedGradientMesh(plane, w, h)
+	for _, size := range []int{16, 32, 64, 128, 256} {
+		for _, offset := range []int{0, 16, 256} {
+			b := largeGradient{x: offset, y: 16, size: size}
+			p := mesh.preparePatch(b)
+			var row [256]byte
+			for y := b.y; y < b.y+size; y++ {
+				p.row(mesh, b, y, row[:size])
+				for x := 0; x < size; x++ {
+					if want := mesh.at(b, b.x+x, y); row[x] != want {
+						t.Fatalf("size=%d offset=%d pixel=(%d,%d): got %d want %d", size, offset, x, y, row[x], want)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestCachedGlyphResidualMatchesScalar(t *testing.T) {
+	const w, h = 32, 32
+	var state uint32 = 32912
+	for trial := 0; trial < 20; trial++ {
+		plane, sizes := make([]byte, w*h), make([]byte, w*h)
+		for i := range plane {
+			state = state*1664525 + 1013904223
+			plane[i] = byte(state >> 24)
+			if trial%2 == 0 {
+				plane[i] = 100 + plane[i]%40
+			}
+			sizes[i] = 8
+			if i%w < 8 {
+				sizes[i] = 4
+			}
+			if i/w < 8 && trial%3 == 0 {
+				sizes[i] = 0
+			}
+		}
+		get := func(x, y int) byte { return plane[y*w+x] }
+		baseline := makeCornerGrid(w, h, 8, func(x, y int) [3]byte { return [3]byte{plane[y*w+x], 128, 128} })
+		for by := 8; by < h; by += 8 {
+			for bx := 8; bx < w; bx += 8 {
+				var got [64]int16
+				glyphResidual8(bx, by, w, h, 5, sizes, get, baseline, &got)
+				for y := by; y < by+8; y++ {
+					for x := bx; x < bx+8; x++ {
+						r := int(get(x, y)) - int(baseline.lumaAt(x, y))
+						r = blendGlyphResidual(x, y, w, h, 5, sizes, r, get, baseline)
+						r = spreadGlyphResidual(x, y, w, h, 5, sizes, r, get, baseline)
+						if int(got[(y-by)*8+x-bx]) != r {
+							t.Fatalf("trial=%d (%d,%d): got %d want %d", trial, x, y, got[(y-by)*8+x-bx], r)
+						}
+					}
+				}
+			}
+		}
+	}
+}

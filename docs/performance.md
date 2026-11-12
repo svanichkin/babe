@@ -661,6 +661,91 @@ median encode 0.688→0.678 s, decode 2.510→1.156 s, complete cycle
 bytes in both versions and PSNR was 28.993 dB. These are approximate results
 from one machine; one q0 baseline decode was a large timing outlier.
 
+## Gradient and glyph reuse with contrast coding
+
+This comparison starts at commit `566eeff`, using Go 1.27.3 on darwin/arm64.
+The changes reuse shared-gradient boundary samples, cache each 8×8 glyph's
+seam corrections, and run both interior-blur passes inside each glyph using
+two 64-byte buffers instead of a full-image snapshot. Background colors can
+use reversible FG−BG prediction (BRC1 method 17). A model-size estimate chooses
+the predictor before range coding, avoiding two complete compression attempts.
+The 1×1/2×2 path, including q100, keeps the previous predictor.
+
+Each of three shuffled rounds starts a fresh helper process per case. For the
+800×572 `samples/source.jpg` (identical to the local `1.jpg`), each process runs
+10 complete in-memory encode/decode cycles on reused codec instances, including
+the first cycle, with no separate warm-up. The 5152×7728 photo runs one complete
+cycle per process. All entries are medians of the three process results; cycle
+is measured independently as encode plus decode in each process, so its median
+need not equal the sum of the two stage medians. JPEG loading, output hashing
+and PNG export are outside codec timing. CPU sums all process threads during
+the cycles. Peak RSS is process-wide, including input loading and retained
+buffers; it is not allocated bytes per operation. Do not compare the 10-cycle
+RSS directly with the earlier single-cycle tables.
+
+Small photo, `-smooth`:
+
+| Q | Version | Encode ms | Decode ms | Cycle ms | CPU ms/cycle | Peak RSS MiB | BABE bytes |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 0 | Before | 9.674 | 18.274 | 27.948 | 47.174 | 25.2 | 16,763 |
+| 0 | After | 7.149 | 11.231 | 18.380 | 35.396 | 23.5 | 16,563 |
+| 10 | Before | 9.746 | 15.565 | 25.311 | 40.680 | 25.4 | 47,524 |
+| 10 | After | 7.049 | 10.107 | 17.157 | 30.402 | 24.7 | 47,002 |
+| 50 | Before | 10.381 | 6.665 | 16.984 | 27.985 | 23.6 | 177,998 |
+| 50 | After | 9.237 | 5.539 | 14.775 | 25.835 | 23.5 | 168,673 |
+| 100 | Before | 5.717 | 4.150 | 9.867 | 18.971 | 19.7 | 374,884 |
+| 100 | After | 5.913 | 4.361 | 10.291 | 19.525 | 20.1 | 374,884 |
+
+40-megapixel photo, `-smooth`:
+
+| Q | Version | Encode ms | Decode ms | Cycle ms | CPU ms/cycle | Peak RSS MiB | BABE bytes |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 0 | Before | 498.881 | 1336.723 | 1835.604 | 4262.850 | 693.7 | 1,501,923 |
+| 0 | After | 493.433 | 850.715 | 1351.060 | 2849.058 | 693.5 | 1,481,821 |
+| 10 | Before | 673.381 | 1190.096 | 1859.168 | 3414.449 | 731.6 | 6,923,569 |
+| 10 | After | 675.844 | 760.152 | 1435.995 | 2432.736 | 693.5 | 6,748,671 |
+| 50 | Before | 856.595 | 433.926 | 1290.522 | 1960.084 | 745.8 | 20,699,039 |
+| 50 | After | 867.733 | 454.789 | 1361.059 | 2017.957 | 783.0 | 19,853,337 |
+
+The decoded RGBA SHA-256 matches between versions in every recorded case.
+q100 bitstreams also remain identical. These changes preserve image quality;
+file-size reductions come from the reversible predictor. Timings vary with
+machine load. In particular, the larger q50 case trades a 4.1% smaller file
+for a 5.5% longer cycle and a higher measured peak RSS. This is not a speedup
+at every quality or a universal memory reduction.
+
+For context, the plain codec on the small photo (separate three-round run):
+
+| Q | Version | Encode ms | Decode ms | Cycle ms | CPU ms/cycle | Peak RSS MiB | BABE bytes |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 0 | Before | 1.922 | 1.234 | 3.155 | 6.382 | 11.9 | 8,837 |
+| 0 | After | 1.846 | 1.176 | 3.028 | 6.368 | 12.1 | 8,621 |
+| 10 | Before | 2.620 | 1.748 | 4.368 | 8.256 | 12.6 | 47,943 |
+| 10 | After | 2.627 | 1.797 | 4.424 | 8.479 | 12.8 | 47,473 |
+| 50 | Before | 3.343 | 2.877 | 6.232 | 14.313 | 14.2 | 183,862 |
+| 50 | After | 3.557 | 3.061 | 6.605 | 14.836 | 15.1 | 174,307 |
+| 100 | Before | 5.696 | 4.179 | 9.875 | 19.134 | 19.6 | 374,884 |
+| 100 | After | 5.920 | 4.402 | 10.322 | 19.643 | 19.8 | 374,884 |
+
+The plain q50 cycle increased about 6% while the file shrank 5.2%; most speed
+improvements above concern gradient reconstruction and smoothing. q100 does
+not execute the new prediction or smoothing paths, so its small timing
+variations should not be presented as an algorithmic improvement.
+
+Raw rounds: [small smooth](benchmarks/smooth-contrast-source.json),
+[large smooth](benchmarks/smooth-contrast-large.json), and
+[small plain](benchmarks/smooth-contrast-plain.json).
+To reproduce, build `cmd/smoothbench/main.go` against both revisions (use the
+same helper source for the older revision), then run:
+
+```sh
+python3 scripts/compare-smooth-speed.py --before /tmp/babe-before --after /tmp/babe-after --input samples/source.jpg --iterations 10 --output /tmp/smooth-small.json
+python3 scripts/compare-smooth-speed.py --before /tmp/babe-before --after /tmp/babe-after --input benchmark.jpg --qualities 0,10,50 --iterations 1 --output /tmp/smooth-large.json
+```
+
+Add `--plain` for the codec without smoothing. The script enforces at least
+three rounds and fails if decoded pixel hashes differ.
+
 ## Reproduction
 
 Sample JPEGs are local and are not tracked. Run from the repository root:

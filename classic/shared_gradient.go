@@ -75,6 +75,42 @@ func (m *sharedGradientMesh) at(b largeGradient, x, y int) byte {
 	return byte(max(0, min(255, lr+tb-corner)))
 }
 
+// Reuse the horizontal boundary samples across all rows of a patch. Within
+// a row, the left/right and corner terms are linear: advance their numerators
+// instead of looking up the same mesh vertices for every pixel. Rounding stays
+// at exactly the same three points as in at.
+type sharedGradientPatch struct {
+	top, bottom [256]int
+	a, b, c, d  int
+}
+
+func (m *sharedGradientMesh) preparePatch(b largeGradient) sharedGradientPatch {
+	p := sharedGradientPatch{
+		a: m.node(b.x, b.y), b: m.node(b.x+b.size, b.y),
+		c: m.node(b.x, b.y+b.size), d: m.node(b.x+b.size, b.y+b.size),
+	}
+	for x := 0; x < b.size; x++ {
+		p.top[x] = m.horizontal(2*(b.x+x)+1, b.y)
+		p.bottom[x] = m.horizontal(2*(b.x+x)+1, b.y+b.size)
+	}
+	return p
+}
+
+func (p *sharedGradientPatch) row(m *sharedGradientMesh, b largeGradient, y int, out []byte) {
+	den, v := 2*b.size, 2*(y-b.y)+1
+	shift := uint(bits.TrailingZeros(uint(b.size)) + 1)
+	left, right := m.vertical(b.x, 2*y+1), m.vertical(b.x+b.size, 2*y+1)
+	lr, lrStep := left*(den-1)+right+den/2, 2*(right-left)
+	corner := p.a*(den-1)*(den-v) + p.b*(den-v) + p.c*(den-1)*v + p.d*v + den*den/2
+	cornerStep := 2 * ((p.b-p.a)*(den-v) + (p.d-p.c)*v)
+	for x := 0; x < b.size; x++ {
+		tb := (p.top[x]*(den-v) + p.bottom[x]*v + den/2) >> shift
+		out[x] = byte(max(0, min(255, (lr>>shift)+tb-(corner>>(2*shift)))))
+		lr += lrStep
+		corner += cornerStep
+	}
+}
+
 func selectSharedGradients(plane []byte, w, h, quality int, m *sharedGradientMesh) []largeGradient {
 	candidates := selectLargeGradients(plane, w, h, quality)
 	limit, maxError := 5.0, 10
@@ -87,13 +123,26 @@ func selectSharedGradients(plane []byte, w, h, quality int, m *sharedGradientMes
 	var result []largeGradient
 	var visit func(largeGradient)
 	visit = func(b largeGradient) {
+		var patch sharedGradientPatch
+		var row [256]byte
 		var sum int64
 		maxDiff := 0
 		lo, hi := 255, 0
 	verifyPatch:
 		for y := b.y; y < b.y+b.size; y++ {
+			// Many candidates fail at their first few pixels. Avoid preparing
+			// all edges (or a whole row) until the first row has passed.
+			if y == b.y+1 {
+				patch = m.preparePatch(b)
+			}
+			if y > b.y {
+				patch.row(m, b, y, row[:b.size])
+			}
 			for x := b.x; x < b.x+b.size; x++ {
-				predicted := int(m.at(b, x, y))
+				predicted := int(row[x-b.x])
+				if y == b.y {
+					predicted = int(m.at(b, x, y))
+				}
 				lo = min(lo, predicted)
 				hi = max(hi, predicted)
 				diff := int(plane[y*w+x]) - predicted
