@@ -23,6 +23,7 @@ parser.add_argument("--qualities", default="0,17,80")
 parser.add_argument("--encoded-corners", action="store_true", help="compare regular encoding with encoded source corners")
 parser.add_argument("--glyph-blend", action="store_true", help="compare decoding stored corners with and without glyph blending")
 parser.add_argument("--glyph-min-size", type=int, default=0, help="minimum block size when comparing glyph blending")
+parser.add_argument("--experiments", action="store_true", help="compare dense, sparse, dithered and simplified encoding")
 args = parser.parse_args()
 if args.rounds < 1:
     parser.error("rounds must be positive")
@@ -34,10 +35,12 @@ if not qualities or any(q < 0 or q > 100 for q in qualities):
 helper = str(Path(args.helper).resolve())
 env = os.environ.copy()
 env["GOMAXPROCS"] = "8"
-if args.glyph_blend and args.encoded_corners:
+if sum((args.glyph_blend, args.encoded_corners, args.experiments)) > 1:
     parser.error("select one comparison")
 glyph_mode = f"babe-glyphs:{args.glyph_min_size}" if args.glyph_min_size else "babe-glyphs"
 modes = ("babe-cornerdata", glyph_mode) if args.glyph_blend else (("babe", "babe-cornerdata") if args.encoded_corners else ("babe", "babe-corners"))
+if args.experiments:
+    modes = ("babe-cornerdata", "babe-sparse", "babe-dither", "babe-pattern2", "babe-combined")
 cases = [(quality, mode) for quality in qualities for mode in modes]
 measurements, bitstreams = [], {}
 with tempfile.TemporaryDirectory(prefix="babe-corners-bench-") as directory:
@@ -49,8 +52,11 @@ with tempfile.TemporaryDirectory(prefix="babe-corners-bench-") as directory:
     def cycle(quality, mode, run):
         print(f"{'Warm-up' if run == 0 else f'Round {run}/{args.rounds}'}: q{quality} {mode}", flush=True)
         start = time.perf_counter()
-        encoder = "babe-cornerdata" if mode == "babe-cornerdata" or mode.startswith("babe-glyphs") else "babe"
-        decoder = "babe" if mode == "babe-cornerdata" else mode
+        if args.experiments:
+            encoder, decoder = mode, "babe"
+        else:
+            encoder = "babe-cornerdata" if mode == "babe-cornerdata" or mode.startswith("babe-glyphs") else "babe"
+            decoder = "babe" if mode == "babe-cornerdata" else mode
         enc = timed([helper, "encode", f"{encoder}:{quality}", str(source), str(encoded)], env)
         size = encoded.stat().st_size
         dec = timed([helper, "decode", decoder, str(encoded), str(decoded)], env)

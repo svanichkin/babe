@@ -3,6 +3,11 @@
 **Babe** is an experimental dual‑tone block-based image codec designed for extremely lightweight compression with visually smooth output.
 The encoder uses byte-symbol range coding with local frequency tables, parallel processing and reusable buffers. Qualities 0–99 are lossy; quality 100 preserves opaque 8-bit RGB pixels exactly.
 
+**Implementation comparison:** BABE is implemented in pure Go. The benchmarks
+also use C/C++ and Rust reference tools, some with SIMD acceleration; QOI and
+the initial PNG encoder in these measurements are Go implementations. See the
+settings and methodology below when comparing their results.
+
 ## Features
 
 - Two‑tone block encoding with adaptive subdivision
@@ -110,11 +115,29 @@ Use `-s` to set the minimum side length of blocks whose edges are blended:
 ```
 
 `-s 4` blends eligible 4×4 and larger blocks; smaller blocks remain unchanged,
-including where they touch a larger block. It enables `-glyphs` and encoded
-corners when encoding, and requires an existing BGC1 file when decoding. The
+including where they touch a larger block. When encoding, it enables glyph
+blending and selective corner storage in experimental BGC2. On an existing
+file, it requires BGC1 or BGC2. The
 current encoder uses blocks up to 8×8, so 16×16 blocks are not present yet.
 The threshold is a decoding option and is not stored in the file. In Go, set
 `Decoder.GlyphBlend = true` and `Decoder.GlyphMinSize = 4`.
+
+Additional opt-in encoder experiments (lossy q0–99 only):
+
+```sh
+./Babe 1.jpg 10 -sparse 1-sparse.png
+./Babe 1.jpg 10 -sparse -dither 1-dither.png
+./Babe 1.jpg 10 -sparse -pattern2 1-pattern2.png
+```
+
+`-sparse` stores only source corner channels that differ from the decoded base
+and touch a sufficiently large block, using the partition of each color
+channel independently. It writes BGC2, which older decoders cannot read.
+`-dither` adjusts the 4×4 and 8×8 two-tone mask thresholds with a mild ordered
+pattern. `-pattern2` approximates some simple masks by expanding 2×2 samples,
+then stores them in the existing mask stream. These are experiments: they can
+increase size, introduce noise or reduce quality. None is enabled by default;
+see [measurements](docs/performance.md#selective-corners-and-pattern-experiments).
 
 To inspect the stored glyphs without color, render the first channel as
 grayscale:
@@ -215,7 +238,7 @@ go run ./cmd/qualitycurve -input samples/source.jpg > /tmp/babe-quality.csv
 
 ### Lossless: complete encode/decode cycle
 
-All five codecs received the same decoded 5152×7728 opaque 8-bit RGB image.
+All codecs and JPEG XL settings received the same decoded 5152×7728 opaque 8-bit RGB image.
 Each measurement is a complete encode followed by a decode, with separate
 processes and disk I/O included. After warm-up, three rounds were run in
 shuffled order and every decoded image was checked pixel-for-pixel. The table
@@ -225,13 +248,14 @@ peak RSS is the largest individual process peak in the cycle.
 
 | Lossless format | Encode | Decode | Full cycle | CPU / cycle | Peak RSS | Size |
 |---|---:|---:|---:|---:|---:|---:|
-| BABE q100 | 0.608 s | 0.654 s | 1.291 s | 1.978 s | 705.1 MiB | 44.09 MB |
-| QOI | 1.285 s | 0.473 s | 1.777 s | 1.708 s | 316.5 MiB | 78.98 MB |
-| JPEG XL | 3.473 s | 1.450 s | 4.923 s | 27.497 s | 719.2 MiB | 42.06 MB |
-| PNG + OxiPNG | 12.464 s | 1.231 s | 13.696 s | 17.684 s | 802.4 MiB | 64.77 MB |
-| WebP | 17.313 s | 0.647 s | 17.961 s | 16.987 s | 1017.5 MiB | 47.93 MB |
+| BABE q100 | 0.581 s | 0.586 s | 1.177 s | 1.978 s | 675.1 MiB | 44.09 MB |
+| QOI | 1.249 s | 0.537 s | 1.787 s | 1.711 s | 316.6 MiB | 78.98 MB |
+| JPEG XL, effort 1 | 0.136 s | 0.210 s | 0.345 s | 1.320 s | 470.2 MiB | 48.87 MB |
+| JPEG XL, effort 5 | 3.619 s | 1.004 s | 5.051 s | 27.192 s | 780.8 MiB | 42.06 MB |
+| PNG + OxiPNG | 12.426 s | 1.101 s | 13.526 s | 17.315 s | 819.2 MiB | 64.77 MB |
+| WebP | 15.336 s | 0.644 s | 15.967 s | 15.473 s | 1149.2 MiB | 47.93 MB |
 
-JPEG XL used distance 0, effort 5; WebP used lossless mode, quality 75,
+JPEG XL used distance 0 at efforts 1 and 5; WebP used lossless mode, quality 75,
 method 4; PNG used Go's PNG encoder followed by OxiPNG `-o2`. These settings
 affect both size and speed. Times include process startup and PPM input/output;
 the image and settings differ from the JPEG comparison below. See

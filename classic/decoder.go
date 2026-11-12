@@ -810,6 +810,13 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 			return nil, fmt.Errorf("decode corners: %w", err)
 		}
 	}
+	if len(compData) >= 4 && string(compData[:4]) == sparseCornerMagic {
+		var err error
+		compData, storedCorners, err = unpackSparseCornerImage(compData)
+		if err != nil {
+			return nil, fmt.Errorf("decode sparse corners: %w", err)
+		}
+	}
 
 	if d.zdec == nil {
 		d.zdec = mustNewZstdDecoder()
@@ -1006,6 +1013,7 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 			return v
 		})
 		if storedCorners != nil {
+			storedCorners.fillMissing(grid)
 			readLuma := func(x, y int) byte { return pix[y*stride+x*4] }
 			blend := d.GlyphBlend && macroBlock >= max(d.GlyphMinSize, 1)
 			var sizes []byte

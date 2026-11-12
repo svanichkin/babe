@@ -1,0 +1,176 @@
+{
+  "source_dimensions": [
+    5152,
+    7728
+  ],
+  "rgb_sha256": "ead8f20ca8c77be96ece5ba93b760b18f0875bece9ef2b29598b90f7d5b0d20a",
+  "rounds": 3,
+  "threads": 8,
+  "measurements": [
+    {
+      "round": 1,
+      "quality": 10,
+      "mode": "babe-combined",
+      "encoded_bytes": 7098311,
+      "encode_wall_seconds": 0.9448426250019111,
+      "decode_wall_seconds": 0.7397792079718783,
+      "cycle_wall_seconds": 1.684730082983151,
+      "cycle_cpu_seconds": 2.941642,
+      "peak_process_rss_bytes": 314310656
+    },
+    {
+      "round": 1,
+      "quality": 10,
+      "mode": "babe-cornerdata",
+      "encoded_bytes": 7745569,
+      "encode_wall_seconds": 0.8069611660321243,
+      "decode_wall_seconds": 0.7293633329682052,
+      "cycle_wall_seconds": 1.536432207969483,
+      "cycle_cpu_seconds": 2.35314,
+      "peak_process_rss_bytes": 322551808
+    },
+    {
+      "round": 1,
+      "quality": 10,
+      "mode": "babe-sparse",
+      "encoded_bytes": 7155522,
+      "encode_wall_seconds": 1.1825734580052085,
+      "decode_wall_seconds": 0.6547219579806551,
+      "cycle_wall_seconds": 1.8373891669907607,
+      "cycle_cpu_seconds": 2.6036469999999996,
+      "peak_process_rss_bytes": 313737216
+    },
+    {
+      "round": 1,
+      "quality": 10,
+      "mode": "babe-dither",
+      "encoded_bytes": 7098738,
+      "encode_wall_seconds": 0.8607787499786355,
+      "decode_wall_seconds": 0.5997611249913462,
+      "cycle_wall_seconds": 1.4606333749834448,
+      "cycle_cpu_seconds": 2.607973,
+      "peak_process_rss_bytes": 314376192
+    },
+    {
+      "round": 1,
+      "quality": 10,
+      "mode": "babe-pattern2",
+      "encoded_bytes": 7155129,
+      "encode_wall_seconds": 0.7390972499852069,
+      "decode_wall_seconds": 0.7030239169835113,
+      "cycle_wall_seconds": 1.4422232920187525,
+      "cycle_cpu_seconds": 2.655234,
+      "peak_process_rss_bytes": 314146816
+    },
+    {
+      "round": 2,
+      "quality": 10,
+      "mode": "babe-combined",
+      "encoded_bytes": 7098311,
+      "encode_wall_seconds": 0.9136670419829898,
+      "decode_wall_seconds": 0.6162102919770405,
+      "cycle_wall_seconds": 1.530013957992196,
+      "cycle_cpu_seconds": 2.708288,
+      "peak_process_rss_bytes": 314195968
+    },
+    {
+      "round": 2,
+      "quality": 10,
+      "mode": "babe-dither",
+      "encoded_bytes": 7098738,
+      "encode_wall_seconds": 0.888062792015262,
+      "decode_wall_seconds": 0.6563497500028461,
+      "cycle_wall_seconds": 1.5445263750152662,
+      "cycle_cpu_seconds": 2.691434,
+      "peak_process_rss_bytes": 314277888
+    },
+    {
+      "round": 2,
+      "quality": 10,
+      "mode": "babe-pattern2",
+      "encoded_bytes": 7155129,
+      "encode_wall_seconds": 0.7162133330130018,
+      "decode_wall_seconds": 0.6303464999655262,
+      "cycle_wall_seconds": 1.3466887910035439,
+      "cycle_cpu_seconds": 2.556049,
+      "peak_process_rss_bytes": 314114048
+    },
+    {
+      "round": 2,
+      "quality": 10,
+      "mode": "babe-sparse",
+      "encoded_bytes": 7155522,
+      "encode_wall_seconds": 0.8343588749994524,
+      "decode_wall_seconds": 0.872187250002753,
+      "cycle_wall_seconds": 1.7067012089537457,
+      "cycle_cpu_seconds": 2.787393,
+      "peak_process_rss_bytes": 313884672
+    },
+    {
+      "round": 2,
+      "quality": 10,
+      "mode": "babe-cornerdata",
+      "encoded_bytes": 7745569,
+      "encode_wall_seconds": 0.414935625041835,
+      "decode_wall_seconds": 0.6066745419520885,
+      "cycle_wall_seconds": 1.0216987499734387,
+      "cycle_cpu_seconds": 2.215237,
+      "peak_process_rss_bytes": 313901056
+    },
+    {
+      "round": 3,
+      "quality": 10,
+      "mode": "babe-combined",
+      "encoded_bytes": 7098311,
+      "encode_wall_seconds": 0.915484374971129,
+      "decode_wall_seconds": 0.7372385000344366,
+      "cycle_wall_seconds": 1.6528305420069955,
+      "cycle_cpu_seconds": 2.832899,
+      "peak_process_rss_bytes": 314048512
+    },
+    {
+      "round": 3,
+      "quality": 10,
+      "mode": "babe-cornerdata",
+      "encoded_bytes": 7745569,
+      "encode_wall_seconds": 0.4467087499797344,
+      "decode_wall_seconds": 0.790752834000159,
+      "cycle_wall_seconds": 1.2375578329665586,
+      "cycle_cpu_seconds": 2.46203,
+      "peak_process_rss_bytes": 314392576
+    },
+    {
+      "round": 3,
+      "quality": 10,
+      "mode": "babe-dither",
+      "encoded_bytes": 7098738,
+      "encode_wall_seconds": 0.9678737909998745,
+      "decode_wall_seconds": 0.7303095419774763,
+      "cycle_wall_seconds": 1.6982953749829903,
+      "cycle_cpu_seconds": 2.851616,
+      "peak_process_rss_bytes": 314130432
+    },
+    {
+      "round": 3,
+      "quality": 10,
+      "mode": "babe-pattern2",
+      "encoded_bytes": 7155129,
+      "encode_wall_seconds": 0.8139922080445103,
+      "decode_wall_seconds": 0.7113091250066645,
+      "cycle_wall_seconds": 1.5254360840190202,
+      "cycle_cpu_seconds": 2.681538,
+      "peak_process_rss_bytes": 313950208
+    },
+    {
+      "round": 3,
+      "quality": 10,
+      "mode": "babe-sparse",
+      "encoded_bytes": 7155522,
+      "encode_wall_seconds": 0.805789707985241,
+      "decode_wall_seconds": 0.6383457499905489,
+      "cycle_wall_seconds": 1.4442348750308156,
+      "cycle_cpu_seconds": 2.575673,
+      "peak_process_rss_bytes": 314015744
+    }
+  ]
+}

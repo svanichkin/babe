@@ -6,6 +6,23 @@ package classic
 type cornerGrid struct {
 	width, height, step, cols int
 	values                    [][3]byte
+	flags                     []byte // non-nil for sparse source corners
+}
+
+// fillMissing resolves sparse corner channels from the decoded base image.
+func (g *cornerGrid) fillMissing(baseline cornerGrid) {
+	if g.flags == nil {
+		return
+	}
+	for i := range g.values {
+		for c := range 3 {
+			if g.flags[i]&(1<<c) == 0 {
+				g.values[i][c] = baseline.values[i][c]
+			} else {
+				g.values[i][c] += baseline.values[i][c]
+			}
+		}
+	}
 }
 
 func makeCornerGrid(w, h, step int, sample func(x, y int) [3]byte) cornerGrid {

@@ -97,6 +97,7 @@ func (d *Decoder) decodeQuadImage(segments [3][]byte, w, h int, lossless bool, s
 			return v
 		})
 		if storedCorners != nil {
+			storedCorners.fillMissing(grid)
 			var sizes []byte
 			if d.GlyphBlend && 2 >= max(d.GlyphMinSize, 1) {
 				sizes = d.glyphBlockSizes(segments[0], w, h)

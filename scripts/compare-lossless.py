@@ -81,7 +81,7 @@ def main():
     image = str(Path(args.input).resolve())
     env = os.environ.copy()
     env["GOMAXPROCS"] = str(args.threads)
-    names = ("BABE", "QOI", "JPEG XL", "PNG + OxiPNG", "WebP")
+    names = ("BABE", "QOI", "JPEG XL (e1)", "JPEG XL (e5)", "PNG + OxiPNG", "WebP")
     versions = {
         "cjxl": version([args.cjxl, "--version"]), "djxl": version([args.djxl, "--version"]),
         "cwebp": version([args.cwebp, "-version"]), "dwebp": version([args.dwebp, "-version"]),
@@ -96,12 +96,13 @@ def main():
 
         def cycle(name, round_number):
             print(f"{'Warm-up' if round_number == 0 else f'Round {round_number}/{args.rounds}'}: {name}", file=sys.stderr, flush=True)
-            ext = {"BABE": "babe", "QOI": "qoi", "JPEG XL": "jxl", "PNG + OxiPNG": "png", "WebP": "webp"}[name]
+            ext = {"BABE": "babe", "QOI": "qoi", "JPEG XL (e1)": "jxl", "JPEG XL (e5)": "jxl", "PNG + OxiPNG": "png", "WebP": "webp"}[name]
             encoded, decoded, rawpng = root / f"output.{ext}", root / "decoded.ppm", root / "raw.png"
             for p in (encoded, decoded, rawpng):
                 p.unlink(missing_ok=True)
-            if name == "JPEG XL":
-                enc = [[args.cjxl, str(source), str(encoded), "-d", "0", "-e", "5", f"--num_threads={args.threads}", "--quiet"]]
+            if name in ("JPEG XL (e1)", "JPEG XL (e5)"):
+                effort = "1" if name == "JPEG XL (e1)" else "5"
+                enc = [[args.cjxl, str(source), str(encoded), "-d", "0", "-e", effort, f"--num_threads={args.threads}", "--quiet"]]
                 dec = [args.djxl, str(encoded), str(decoded), f"--num_threads={args.threads}", "--quiet"]
             elif name == "WebP":
                 enc = [[args.cwebp, "-lossless", "-q", "75", "-m", "4", "-mt", "-quiet", str(source), "-o", str(encoded)]]
@@ -143,7 +144,7 @@ def main():
     result = {"source_dimensions": reference[:2], "rgb_sha256": reference[2],
               "rounds": args.rounds, "threads": args.threads, "versions": versions,
               "settings": {"BABE": "quality 100, opaque RGB", "QOI": "lossless",
-                           "JPEG XL": "distance 0, effort 5", "PNG + OxiPNG": "Go PNG default + oxipng -o2 --strip safe",
+                           "JPEG XL (e1)": "distance 0, effort 1", "JPEG XL (e5)": "distance 0, effort 5", "PNG + OxiPNG": "Go PNG default + oxipng -o2 --strip safe",
                            "WebP": "lossless, quality 75, method 4, multithreaded"},
               "measurements": measurements}
     if args.output:

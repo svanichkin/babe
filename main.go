@@ -17,7 +17,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [-corners] [-glyphs] [-glyphs-only] [-s size] [decoded.png]\n  babe <input.babe> [-postfilter] [-corners] [-glyphs] [-glyphs-only] [-s size]\n")
+		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [-corners|-sparse] [-glyphs] [-glyphs-only] [-dither] [-pattern2] [-s size] [decoded.png]\n  babe <input.babe> [-postfilter] [-corners] [-glyphs] [-glyphs-only] [-s size]\n")
 		os.Exit(1)
 	}
 	options, minSize, err := parseMinBlockSize(os.Args[2:])
@@ -80,8 +80,23 @@ func main() {
 	corners := false
 	glyphs := minSize > 0
 	glyphsOnly := false
+	dither := false
+	sparse := false
+	pattern2 := false
 	decodeOutPath := ""
 	for _, a := range encodeArgs {
+		if a == "-pattern2" {
+			pattern2 = true
+			continue
+		}
+		if a == "-sparse" {
+			sparse = true
+			continue
+		}
+		if a == "-dither" {
+			dither = true
+			continue
+		}
 		if a == "-glyphs-only" {
 			glyphsOnly = true
 			continue
@@ -105,9 +120,12 @@ func main() {
 	if glyphs {
 		corners = true
 	}
+	if minSize > 0 {
+		sparse = true
+	}
 
 	outPath := base + ".babe"
-	if err := encodeToBabe(inputPath, outPath, quality, bwmode, corners); err != nil {
+	if err := encodeToBabe(inputPath, outPath, quality, bwmode, corners, dither, sparse, pattern2, minSize); err != nil {
 		fmt.Fprintln(os.Stderr, "encode error:", err)
 		os.Exit(1)
 	}
@@ -140,7 +158,7 @@ func parseMinBlockSize(args []string) ([]string, int, error) {
 	return remaining, minSize, nil
 }
 
-func encodeToBabe(inPath, outPath string, quality int, bwmode, corners bool) error {
+func encodeToBabe(inPath, outPath string, quality int, bwmode, corners, dither, sparse, pattern2 bool, minSize int) error {
 	info, err := os.Stat(inPath)
 	if err != nil {
 		return err
@@ -161,6 +179,10 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode, corners bool) err
 	start := time.Now()
 	encoder := NewEncoder()
 	encoder.CornerData = corners
+	encoder.DitherPatterns = dither
+	encoder.SparseCorners = sparse
+	encoder.SimplifyPatterns = pattern2
+	encoder.CornerMinSize = minSize
 	enc, err := encoder.Encode(img, quality, bwmode)
 	if err != nil {
 		return err

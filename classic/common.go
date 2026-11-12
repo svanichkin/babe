@@ -66,6 +66,10 @@ var (
 var encQuality int = 70
 var qualityProfileFP int = 70 * 256
 
+// encodeDither is protected by codecStateMu, including channel workers.
+var encodeDither bool
+var encodePattern2 bool
+
 // channel presence flags for the header; at least Y must be set.
 const (
 	channelFlagY        = 1 << 0
@@ -1124,16 +1128,41 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh, quantStep i
 	var fgCnt, bgCnt uint32
 
 	var bits uint64
-	for _, v := range vals {
-		isFg := v >= thr
-		bits <<= 1
-		if isFg {
-			bits |= 1
-			fgSum += uint64(v)
-			fgCnt++
-		} else {
-			bgSum += uint64(v)
-			bgCnt++
+	if encodeDither && bw >= 4 && bh >= 4 {
+		lo, hi := byte(255), byte(0)
+		for _, v := range vals {
+			lo, hi = min(lo, v), max(hi, v)
+		}
+		bayer := [16]int{0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5}
+		for i, v := range vals {
+			x, y := x0+i%bw, y0+i/bw
+			level := bayer[(y&3)*4+(x&3)]
+			// Modulate the existing threshold gently, rather than spreading it
+			// across the full block range and turning edges into heavy noise.
+			threshold := int(thr)*32 + (2*level-15)*(int(hi)-int(lo))/4
+			isFg := int(v)*32 >= threshold
+			bits <<= 1
+			if isFg {
+				bits |= 1
+				fgSum += uint64(v)
+				fgCnt++
+			} else {
+				bgSum += uint64(v)
+				bgCnt++
+			}
+		}
+	} else {
+		for _, v := range vals {
+			isFg := v >= thr
+			bits <<= 1
+			if isFg {
+				bits |= 1
+				fgSum += uint64(v)
+				fgCnt++
+			} else {
+				bgSum += uint64(v)
+				bgCnt++
+			}
 		}
 	}
 
@@ -1147,8 +1176,54 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh, quantStep i
 	if fg == bg {
 		return fg, bg, false, nil
 	}
+	if encodePattern2 && bw == bh && bw >= 4 {
+		bits = simplifyPattern2(bits, bw)
+		if bits == 0 {
+			return bg, bg, false, nil
+		}
+		all := ^uint64(0) >> (64 - uint(bw*bh))
+		if bits == all {
+			return fg, fg, false, nil
+		}
+	}
 	writePatternComposite(pw, bits, bw, bh)
 	return fg, bg, true, nil
+}
+
+// simplifyPattern2 expands 2x2 majority samples when at most 1/16 of the mask
+// bits change. It keeps the old bitstream layout, allowing entropy coding to
+// exploit repeated patterns; it does not guarantee a smaller file.
+func simplifyPattern2(bits uint64, size int) uint64 {
+	if size != 4 && size != 8 {
+		return bits
+	}
+	var out uint64
+	changes := 0
+	for y := 0; y < size; y += 2 {
+		for x := 0; x < size; x += 2 {
+			count := 0
+			for dy := 0; dy < 2; dy++ {
+				for dx := 0; dx < 2; dx++ {
+					count += int((bits >> uint(size*size-1-(y+dy)*size-x-dx)) & 1)
+				}
+			}
+			if count == 2 {
+				return bits
+			} // do not arbitrarily break a tie
+			changes += min(count, 4-count)
+			if count >= 3 {
+				for dy := 0; dy < 2; dy++ {
+					for dx := 0; dx < 2; dx++ {
+						out |= 1 << uint(size*size-1-(y+dy)*size-x-dx)
+					}
+				}
+			}
+		}
+	}
+	if changes > size*size/16 {
+		return bits
+	}
+	return out
 }
 
 // encodeChannelBlock optionally replaces a low-contrast block with its

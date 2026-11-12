@@ -126,6 +126,26 @@ decoder also retains a luma residual from the base block representation to
 help preserve details. The same q100 input always produces ordinary lossless
 BRC1, with no corner wrapper.
 
+## Experimental BGC2 selective corners
+
+BGC2 has the same 25-byte header and BRC1 base as BGC1, but a different corner
+stream. Each grid node has four decoded bytes: a three-bit channel-presence
+mask followed by modulo-256 residuals for Y, Cb and Cr. A residual is source
+corner minus the corner estimated from the decoded BRC1 base; absent channels
+must have zero residual. The stream is encoded with range method 16 and CRC32
+covers the base and decoded four-byte records. The raw stream length is four
+times the grid-node count. Invalid flag bits, nonzero omitted values and
+checksum mismatches are errors.
+
+The experimental encoder determines each channel's block sizes independently.
+It stores a channel at a corner only when a neighbouring block meets the
+requested minimum side length and the source and base estimates differ by more
+than three levels. A missing channel uses the base estimate. All channels share
+the same node coordinates, but use independent presence bits. The decoder
+does not need the encoder's minimum to reconstruct the file. BGC2 is separate
+from BGC1 so older decoders reject it explicitly. The encoder emits ordinary
+lossless BRC1 for q100.
+
 ## Quantization
 
 At qualities 0–99 quantization happens before entropy coding, so the decoder needs no quality or

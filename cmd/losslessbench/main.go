@@ -36,7 +36,7 @@ func run(op, codec, input, output string) error {
 	if name, value, ok := strings.Cut(codec, ":"); ok {
 		var err error
 		quality, err = strconv.Atoi(value)
-		if err != nil || quality < 0 || quality > 100 || (name != "babe" && name != "babe-cornerdata" && name != "babe-glyphs" && name != "jpeg") {
+		if err != nil || quality < 0 || quality > 100 || (name != "babe" && name != "babe-cornerdata" && name != "babe-glyphs" && name != "babe-sparse" && name != "babe-dither" && name != "babe-pattern2" && name != "babe-combined" && name != "jpeg") {
 			return fmt.Errorf("invalid codec quality %q", codec)
 		}
 		if name == "babe-glyphs" {
@@ -118,6 +118,12 @@ func run(op, codec, input, output string) error {
 		case "babe-cornerdata":
 			encoder := classic.NewEncoder()
 			encoder.CornerData = true
+			err = encoder.EncodeTo(out, img, quality, false)
+		case "babe-sparse", "babe-dither", "babe-pattern2", "babe-combined":
+			encoder := classic.NewEncoder()
+			encoder.SparseCorners = true
+			encoder.DitherPatterns = codec == "babe-dither" || codec == "babe-combined"
+			encoder.SimplifyPatterns = codec == "babe-pattern2" || codec == "babe-combined"
 			err = encoder.EncodeTo(out, img, quality, false)
 		case "jpeg":
 			err = jpeg.Encode(out, img, &jpeg.Options{Quality: quality})

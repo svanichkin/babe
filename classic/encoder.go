@@ -19,6 +19,19 @@ type Encoder struct {
 	// It produces BGC1 files, which require a decoder supporting this feature.
 	CornerData bool
 
+	// DitherPatterns experimentally applies ordered dithering when choosing
+	// two-tone masks for 4x4 and larger lossy blocks.
+	DitherPatterns bool
+
+	// SimplifyPatterns experimentally approximates simple 4x4/8x8 masks by
+	// expanding 2x2 majority samples; it retains the existing stream format.
+	SimplifyPatterns bool
+
+	// SparseCorners enables experimental selective BGC2 source corner storage.
+	// CornerMinSize sets the minimum actual side length; zero defaults to 4.
+	SparseCorners bool
+	CornerMinSize int
+
 	yPlane      []uint8
 	cbPlane     []uint8
 	crPlane     []uint8
@@ -335,6 +348,8 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 	if err := setBlocksForQuality(quality); err != nil {
 		return nil, err
 	}
+	encodeDither = e.DitherPatterns && encQuality != 100
+	encodePattern2 = e.SimplifyPatterns && encQuality != 100
 	b := img.Bounds()
 	w, h := b.Dx(), b.Dy()
 	if err := checkImageSize(w, h); err != nil {
@@ -365,7 +380,7 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 		extractYCbCrPlanesIntoSerial(img, e.yPlane, e.cbPlane, e.crPlane)
 	}
 	var sourceCorners cornerGrid
-	if e.CornerData && encQuality != 100 {
+	if (e.CornerData || e.SparseCorners) && encQuality != 100 {
 		const step = 8
 		sourceCorners = makeCornerGrid(w, h, step, func(x, y int) [3]byte {
 			i := y*w + x
@@ -552,7 +567,16 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 	if err != nil {
 		return nil, err
 	}
-	if e.CornerData && encQuality != 100 {
+	if e.SparseCorners && encQuality != 100 {
+		minSize := e.CornerMinSize
+		if minSize <= 0 {
+			minSize = 4
+		}
+		comp, err = packSparseCorners(comp, e.raw.Bytes(), sourceCorners, minSize)
+		if err != nil {
+			return nil, err
+		}
+	} else if e.CornerData && encQuality != 100 {
 		comp = packCornerImage(comp, sourceCorners)
 	}
 	e.comp = comp

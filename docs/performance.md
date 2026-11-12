@@ -240,17 +240,76 @@ Per-cycle data: [glyph minimum 4](benchmarks/glyph-min4-apple-m3.json).
 python3 scripts/compare-corners.py --input benchmark.jpg --helper /tmp/babe-glyphbench --rounds 3 --qualities 10,80 --glyph-blend --glyph-min-size 4 --output /tmp/glyph-min4-results.json
 ```
 
+## Selective corners and pattern experiments
+
+The experimental BGC2 encoder stores a shared grid of corner positions but
+selects Y, Cb and Cr independently. For each channel it examines that channel's
+actual block partition, storing a corner only if a neighbouring block meets the
+minimum size and the source differs from the decoded base by more than three
+levels. Missing channels use the decoded base estimate. `-sparse` defaults to a
+minimum of 4; when `-s N` is used for encoding, it also selects BGC2 with that
+minimum. See [BGC2](BRC1.md#experimental-bgc2-selective-corners) for the
+representation. The current implementation reconstructs the base channels to
+make that choice, so encoding can be slower. BGC1 remains readable; older
+decoders do not support BGC2.
+
+`-dither` mildly modulates the two-tone mask threshold with a deterministic
+ordered 4×4 pattern on eligible lossy blocks of size 4×4 or larger.
+`-pattern2` replaces certain 4×4 or 8×8 masks by 2×2-majority samples expanded
+back to the original size, but only if no group ties and at most 1/16 of bits
+change. The full mask is still stored in the existing stream; range coding may
+or may not compress the repetition better. Both are lossy encoder experiments,
+disabled by default; they do not change the BRC1 mask format or q100.
+
+On the 800×572 `samples/source.jpg`, using direct JPEG input to the CLI, these
+are sizes and RGB PSNR against the decoded JPEG. The comparable-size rows make
+the tradeoff visible; PSNR does not measure all perceptual artifacts.
+
+| Mode | Quality | Encoded size | RGB PSNR |
+|---|---:|---:|---:|
+| Dense BGC1 corners | 10 | 60,637 B | 29.63 dB |
+| Selective BGC2 corners | 10 | 54,374 B | 29.48 dB |
+| Selective + dither | 10 | 58,834 B | 29.03 dB |
+| Selective + pattern2 | 10 | 53,748 B | 29.30 dB |
+| Selective + both | 10 | 58,401 B | 28.94 dB |
+| Selective BGC2 corners | 12 | 60,389 B | 29.57 dB |
+| Selective + pattern2 | 12 | 59,422 B | 29.39 dB |
+| Ordinary BABE, no corners | 15 | 60,011 B | 30.43 dB |
+
+On the local 5152×7728 image, three shuffled full encode/decode CLI cycles per
+case after warm-up produced the following medians. Each process reads/writes
+PPM and compressed files; CPU sums both stages, peak RSS is the largest single
+process high-water mark. Raw records, including all three runs, are in
+[experiments-apple-m3.json](benchmarks/experiments-apple-m3.json). The cycle
+spread was substantial (for example, dense ranged 1.022–1.536 s), so small
+timing differences should not be interpreted as conclusive speedups. This
+benchmark uses RGB PPM input and is not directly comparable to direct JPEG
+input sizes in the previous table.
+
+| Mode, quality 10 | Decode | Full cycle | CPU / cycle | Peak RSS | Size |
+|---|---:|---:|---:|---:|---:|
+| Dense BGC1 | 0.729 s | 1.238 s | 2.353 s | 299.8 MiB | 7,745,569 B |
+| Selective BGC2 | 0.655 s | 1.707 s | 2.604 s | 299.3 MiB | 7,155,522 B |
+| Selective + dither | 0.656 s | 1.545 s | 2.691 s | 299.7 MiB | 7,098,738 B |
+| Selective + pattern2 | 0.703 s | 1.442 s | 2.655 s | 299.6 MiB | 7,155,129 B |
+| Selective + both | 0.737 s | 1.653 s | 2.833 s | 299.6 MiB | 7,098,311 B |
+
+```sh
+go build -o /tmp/babe-experiments ./cmd/losslessbench
+python3 scripts/compare-corners.py --input benchmark.jpg --helper /tmp/babe-experiments --rounds 3 --qualities 10 --experiments --output /tmp/experiments.json
+```
+
 ## Lossless CLI comparison
 
 The [README table](../README.md#lossless-complete-encodedecode-cycle) uses the
 same 5152×7728 local `benchmark.jpg`, decoded once into an opaque 8-bit RGB PPM.
-BABE q100, QOI, JPEG XL, PNG + OxiPNG and WebP each encode this same PPM and
+BABE q100, QOI, JPEG XL at efforts 1 and 5, PNG + OxiPNG and WebP each encode this same PPM and
 then decode their output to RGB PPM. A SHA-256 comparison of dimensions and
 pixel bytes verifies every warm-up and measured cycle. JPEG source metadata and
 the original JPEG bitstream are not part of the comparison.
 
 There is one warm-up per format, followed by three complete measured rounds,
-each containing all five formats in a shuffled order. Each cycle starts new
+each containing all six cases in a shuffled order. Each cycle starts new
 processes and includes reading and writing the files, process startup and RGB
 conversion. PNG encoding includes both the initial Go PNG encoding and the
 subsequent OxiPNG optimization. Full-cycle wall time is measured directly.
@@ -260,7 +319,7 @@ stages. The table gives medians across the three cycles, not a sum of medians.
 Unlike the earlier in-memory measurements, buffers are not reused across
 processes, and disk I/O is included.
 
-Apple M3, macOS, Go 1.27.3, GOMAXPROCS=8; libjxl 0.12.0 (`-d 0 -e 5`,
+Apple M3, macOS, Go 1.27.3, GOMAXPROCS=8; libjxl 0.12.0 (`-d 0 -e 1` or `-d 0 -e 5`,
 8 threads), libwebp 1.6.0 (`-lossless -q 75 -m 4 -mt`), OxiPNG 10.2.1
 (`-o2 -t 8 --strip safe`). Encoder settings are not equivalent optimization
 levels. These are results for one image and machine; three runs reduce reliance
@@ -268,14 +327,15 @@ on one timing but do not eliminate effects of system load.
 
 | Format | Full-cycle wall time, three rounds | CPU time, three rounds |
 |---|---|---|
-| BABE | 1.677, 1.291, 1.198 s | 1.978, 2.028, 1.962 s |
-| QOI | 1.816, 1.715, 1.777 s | 1.720, 1.663, 1.708 s |
-| JPEG XL | 4.584, 4.923, 6.276 s | 27.497, 27.319, 28.404 s |
-| PNG + OxiPNG | 13.696, 13.448, 14.118 s | 17.684, 17.605, 18.206 s |
-| WebP | 18.153, 16.125, 17.961 s | 17.346, 15.975, 16.987 s |
+| BABE | 1.189, 1.167, 1.177 s | 1.947, 1.978, 2.001 s |
+| QOI | 1.708, 2.184, 1.787 s | 1.652, 1.774, 1.711 s |
+| JPEG XL, effort 1 | 0.345, 0.422, 0.344 s | 1.260, 1.348, 1.320 s |
+| JPEG XL, effort 5 | 5.051, 4.214, 5.059 s | 27.192, 26.475, 27.539 s |
+| PNG + OxiPNG | 13.272, 14.129, 13.526 s | 17.315, 17.980, 17.310 s |
+| WebP | 15.478, 16.192, 15.967 s | 15.369, 15.917, 15.473 s |
 
-The [individual results and exact settings](benchmarks/lossless-cli-apple-m3.json)
-include wall time, CPU, process peak RSS and encoded size for all 15 cycles.
+The [individual results and exact settings](benchmarks/lossless-e1-apple-m3.json)
+include wall time, CPU, process peak RSS and encoded size for all 18 cycles.
 To reproduce on macOS or Linux with `cjxl`, `djxl`, `cwebp`, `dwebp` and
 `oxipng` installed:
 
