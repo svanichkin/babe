@@ -17,7 +17,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [-corners|-sparse] [-glyphs] [-glyphs-only] [-dither] [-pattern2] [-s size] [decoded.png]\n  babe <input.babe> [-postfilter] [-corners] [-glyphs] [-glyphs-only] [-s size]\n")
+		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [-corners|-sparse] [-glyphs] [-glyphs-only] [-dither] [-dither2] [-pattern2] [-s size] [decoded.png]\n  babe <input.babe> [-postfilter] [-corners] [-glyphs] [-glyphs-only] [-dither2] [-s size]\n")
 		os.Exit(1)
 	}
 	options, minSize, err := parseMinBlockSize(os.Args[2:])
@@ -36,6 +36,7 @@ func main() {
 		corners := false
 		glyphs := minSize > 0
 		glyphsOnly := false
+		dither2 := false
 		for _, a := range options {
 			if a == "-postfilter" {
 				postfilter = true
@@ -49,8 +50,11 @@ func main() {
 			if a == "-glyphs-only" {
 				glyphsOnly = true
 			}
+			if a == "-dither2" {
+				dither2 = true
+			}
 		}
-		if err := decodeBabe(inputPath, base+".png", false, postfilter, corners, glyphs, glyphsOnly, minSize); err != nil {
+		if err := decodeBabe(inputPath, base+".png", false, postfilter, corners, glyphs, glyphsOnly, dither2, minSize); err != nil {
 			fmt.Fprintln(os.Stderr, "decode error:", err)
 			os.Exit(1)
 		}
@@ -81,10 +85,15 @@ func main() {
 	glyphs := minSize > 0
 	glyphsOnly := false
 	dither := false
+	dither2 := false
 	sparse := false
 	pattern2 := false
 	decodeOutPath := ""
 	for _, a := range encodeArgs {
+		if a == "-dither2" {
+			dither2 = true
+			continue
+		}
 		if a == "-pattern2" {
 			pattern2 = true
 			continue
@@ -130,7 +139,7 @@ func main() {
 		os.Exit(1)
 	}
 	if decodeOutPath != "" {
-		if err := decodeBabe(outPath, decodeOutPath, false, false, corners, glyphs, glyphsOnly, minSize); err != nil {
+		if err := decodeBabe(outPath, decodeOutPath, false, false, corners, glyphs, glyphsOnly, dither2, minSize); err != nil {
 			fmt.Fprintln(os.Stderr, "decode error:", err)
 			os.Exit(1)
 		}
@@ -224,7 +233,7 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode, corners, dither, 
 	return nil
 }
 
-func decodeBabe(inPath, outPath string, splitChannels, postfilter, corners, glyphs, glyphsOnly bool, minSize int) error {
+func decodeBabe(inPath, outPath string, splitChannels, postfilter, corners, glyphs, glyphsOnly, dither2 bool, minSize int) error {
 	pngEncoder := png.Encoder{CompressionLevel: png.DefaultCompression}
 
 	in, err := os.Open(inPath)
@@ -245,6 +254,7 @@ func decodeBabe(inPath, outPath string, splitChannels, postfilter, corners, glyp
 	decoder.CornerGradient = corners
 	decoder.GlyphBlend = glyphs
 	decoder.GlyphsOnly = glyphsOnly
+	decoder.Dither2 = dither2
 	decoder.GlyphMinSize = minSize
 	dec, err := decoder.Decode(compData, postfilter)
 	if err != nil {

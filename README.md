@@ -139,6 +139,19 @@ then stores them in the existing mask stream. These are experiments: they can
 increase size, introduce noise or reduce quality. None is enabled by default;
 see [measurements](docs/performance.md#selective-corners-and-pattern-experiments).
 
+For decoder-only dithering, use `-dither2`:
+
+```sh
+./Babe 1.jpg 10 -s 4 -dither2 1-dither2.png
+./Babe 1.babe -dither2
+```
+
+Unlike `-dither`, this does not change the encoded file or its size. It applies
+an ordered pattern to the decoded luma glyphs in lossy patterned blocks of
+4×4 or larger. It can introduce visible noise and has no effect on q100 or
+layouts whose largest blocks are 2×2. It can be combined with `-glyphs-only`
+to inspect the resulting luma glyphs; in Go use `Decoder.Dither2`.
+
 To inspect the stored glyphs without color, render the first channel as
 grayscale:
 

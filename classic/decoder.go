@@ -40,6 +40,10 @@ type Decoder struct {
 	// In lossless mode the first channel is G, not luminance.
 	GlyphsOnly bool
 
+	// Dither2 applies experimental ordered dithering to decoded lossy luma
+	// patterns. It does not change the bitstream or lossless output.
+	Dither2 bool
+
 	payload []byte
 	zdec    *zstd.Decoder
 
@@ -51,6 +55,8 @@ type Decoder struct {
 	dst         *image.RGBA
 	glyphLuma   []byte
 	glyphBlocks []byte
+	ditherInput []byte
+	ditherMap   []byte
 }
 
 func NewDecoder() *Decoder {
@@ -983,6 +989,26 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	if errCr != nil {
 		return nil, errCr
 	}
+	var originalCornerGrid *cornerGrid
+	if d.Dither2 && channelsMask&channelFlagLossless == 0 && macroBlock >= 4 {
+		if storedCorners != nil && !d.GlyphsOnly {
+			grid := makeCornerGrid(imgW, imgH, storedCorners.step, func(x, y int) [3]byte {
+				o := y*stride + x*4
+				v := [3]byte{pix[o], 128, 128}
+				if hasCb {
+					v[1] = pix[o+1]
+				}
+				if hasCr {
+					v[2] = pix[o+2]
+				}
+				return v
+			})
+			originalCornerGrid = &grid
+		}
+		d.ditherLuma(ySeg, imgW, imgH,
+			func(x, y int) byte { return pix[y*stride+x*4] },
+			func(x, y int, v byte) { pix[y*stride+x*4] = v })
+	}
 	if d.GlyphsOnly {
 		for y := 0; y < imgH; y++ {
 			for x := 0; x < imgW; x++ {
@@ -1001,17 +1027,22 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 		if storedCorners != nil {
 			step = storedCorners.step
 		}
-		grid := makeCornerGrid(imgW, imgH, step, func(x, y int) [3]byte {
-			o := y*stride + x*4
-			v := [3]byte{pix[o], 128, 128}
-			if hasCb {
-				v[1] = pix[o+1]
-			}
-			if hasCr {
-				v[2] = pix[o+2]
-			}
-			return v
-		})
+		var grid cornerGrid
+		if originalCornerGrid != nil {
+			grid = *originalCornerGrid
+		} else {
+			grid = makeCornerGrid(imgW, imgH, step, func(x, y int) [3]byte {
+				o := y*stride + x*4
+				v := [3]byte{pix[o], 128, 128}
+				if hasCb {
+					v[1] = pix[o+1]
+				}
+				if hasCr {
+					v[2] = pix[o+2]
+				}
+				return v
+			})
+		}
 		if storedCorners != nil {
 			storedCorners.fillMissing(grid)
 			readLuma := func(x, y int) byte { return pix[y*stride+x*4] }

@@ -299,6 +299,44 @@ go build -o /tmp/babe-experiments ./cmd/losslessbench
 python3 scripts/compare-corners.py --input benchmark.jpg --helper /tmp/babe-experiments --rounds 3 --qualities 10 --experiments --output /tmp/experiments.json
 ```
 
+## Decoder-only dithering
+
+`-dither2` / `Decoder.Dither2` leaves the encoded data unchanged. During lossy
+decoding it finds patterned luma blocks of at least 4×4, estimates local
+coverage from the current pixel and its in-block neighbours, and uses a 4×4
+ordered threshold to choose one of the existing local luma levels. It skips
+local differences above 48 levels to reduce the effect on high-contrast edges.
+This does not reconstruct lost source detail; it trades some hard transitions
+for a spatial pattern and may introduce noise or worsen numerical fidelity.
+For BGC2 the source-corner baseline is recovered before dithering. The option
+also works with BRC1 and BGC1, and can be combined with `-glyphs-only`. It has
+no effect on lossless q100 or the 1×1/2×2 layout.
+
+On the 800×572 `samples/source.jpg`, CLI q10 `-s 4` produced the same 54,374 B
+file with and without `-dither2` (verified by SHA-256). RGB PSNR against the
+decoded JPEG was 29.46 dB without decoder dithering and 28.91 dB with it. This
+does not establish a perceptual preference; compare the images at equal size.
+
+The following medians use three shuffled complete CLI cycles after warm-up on
+the 5152×7728 RGB input, including process startup and file I/O. All comparisons
+use byte-identical sparse files, without `-s` glyph-edge blending. CPU sums both
+stages; peak RSS is the highest single-process peak. At q80 there are no blocks
+large enough to dither; variations reflect independent timing noise.
+
+| Quality | Decoder | Decode | Full cycle | CPU / cycle | Peak RSS | Encoded size |
+|---:|---|---:|---:|---:|---:|---:|
+| 10 | Normal | 0.692 s | 1.367 s | 2.427 s | 299.6 MiB | 7,155,522 B |
+| 10 | `-dither2` | 0.819 s | 1.482 s | 2.915 s | 299.6 MiB | 7,155,522 B |
+| 80 | Normal | 0.841 s | 1.710 s | 3.159 s | 718.3 MiB | 37,200,451 B |
+| 80 | `-dither2` | 0.870 s | 1.926 s | 3.207 s | 800.5 MiB | 37,200,451 B |
+
+Individual cycles: [dither2-apple-m3.json](benchmarks/dither2-apple-m3.json).
+
+```sh
+go build -o /tmp/babe-dither2bench ./cmd/losslessbench
+python3 scripts/compare-corners.py --input benchmark.jpg --helper /tmp/babe-dither2bench --rounds 3 --qualities 10,80 --decode-dither --output /tmp/dither2-results.json
+```
+
 ## Lossless CLI comparison
 
 The [README table](../README.md#lossless-complete-encodedecode-cycle) uses the
