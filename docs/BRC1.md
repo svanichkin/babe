@@ -146,6 +146,20 @@ does not need the encoder's minimum to reconstruct the file. BGC2 is separate
 from BGC1 so older decoders reject it explicitly. The encoder emits ordinary
 lossless BRC1 for q100.
 
+## Experimental BGG1 large gradients
+
+`BGG1` wraps a lossy BRC1, BGC1 or BGC2 base image with selected 16×16,
+32×32 and 64×64 luminance planes. The 16-byte header contains the magic,
+big-endian base length, uncompressed record length and CRC32 of the base
+followed by the uncompressed records. The base image and one byte-range coded
+record stream follow. Each 13-byte record contains big-endian 32-bit x and y,
+one byte for the side length, and the four luma corners (top left, top right,
+bottom left, bottom right). Blocks are aligned to their size, non-overlapping
+and fully inside the base image. The decoder bilinearly interpolates luma;
+chroma is still reconstructed from the base image. The current encoder stores
+constant placeholder glyphs in the base image under each selected block.
+Lossless images cannot contain this wrapper.
+
 ## Quantization
 
 At qualities 0–99 quantization happens before entropy coding, so the decoder needs no quality or

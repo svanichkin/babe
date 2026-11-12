@@ -87,12 +87,23 @@ To try experimental reconstruction of larger glyphs, use one option:
 
 `-smooth` stores selective source corners and combines corner gradients,
 low-contrast glyph smoothing and a gradual correction near block boundaries.
-It leaves luma glyphs of 4×4 and smaller unchanged, and uses each color
-channel's block sizes when reconstructing larger glyphs. It can soften real
+It leaves luma glyphs of 4×4 and smaller unchanged during smoothing, and uses
+each color channel's block sizes when reconstructing larger glyphs. A selected
+large gradient replaces the luma representation for its entire area. It can soften real
 low-contrast details. The option must also be specified when decoding; an
 existing lossy file must contain stored corners (BGC1 or BGC2). Lossless q100
 is unchanged. In Go, set `Encoder.SparseCorners = true`,
 `Encoder.CornerMinSize = 5` and `Decoder.Smooth = true`.
+
+When encoding lossy images, `-smooth` also tries large 16×16, 32×32 and 64×64
+luminance gradients. The encoder fits each candidate to the source and splits
+areas with excessive error into smaller candidates, leaving details to normal
+glyphs. This experimental representation uses a `BGG1` wrapper and is decoded
+automatically; existing BABE decoders cannot read it. It keeps constant base
+glyphs under the gradients, so it is a prototype rather than a fully compact
+block format, and can increase file size. Gradient selection currently uses
+fixed error limits, not an exact rate–distortion search. The experiment is
+disabled for lossless q100. In Go, enable it with `Encoder.LargeGradients`.
 
 To inspect the stored glyphs without color, render the first channel as
 grayscale:

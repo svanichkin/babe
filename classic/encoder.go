@@ -32,6 +32,9 @@ type Encoder struct {
 	SparseCorners bool
 	CornerMinSize int
 
+	// LargeGradients replaces suitable 16–64 pixel luminance areas with planes.
+	LargeGradients bool
+
 	yPlane      []uint8
 	cbPlane     []uint8
 	crPlane     []uint8
@@ -391,10 +394,22 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 			return v
 		})
 	}
+	var gradients []largeGradient
+	if e.LargeGradients && qualityProfileFP < 75*256 && encQuality != 100 {
+		gradients = selectLargeGradients(e.yPlane, w, h, encQuality)
+	}
 	if qualityProfileFP < 35*256 {
 		remaining := 35*256 - qualityProfileFP
 		threshold := int(int64(remaining) * int64(remaining) * 255 / (35 * 35 * 256 * 256))
 		smoothLowQualityLuma(e.yPlane, w, h, threshold)
+	}
+	for _, b := range gradients {
+		center := byte((int(b.corners[0]) + int(b.corners[1]) + int(b.corners[2]) + int(b.corners[3]) + 2) / 4)
+		for y := b.y; y < b.y+b.size; y++ {
+			for x := b.x; x < b.x+b.size; x++ {
+				e.yPlane[y*w+x] = center
+			}
+		}
 	}
 
 	// Decide which channels will be stored. Y is always present; Cb/Cr
@@ -578,6 +593,9 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 		}
 	} else if e.CornerData && encQuality != 100 {
 		comp = packCornerImage(comp, sourceCorners)
+	}
+	if len(gradients) != 0 {
+		comp = packLargeGradients(comp, gradients)
 	}
 	e.comp = comp
 	return e.comp, nil

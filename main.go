@@ -125,6 +125,7 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode, smooth bool) erro
 	start := time.Now()
 	encoder := NewEncoder()
 	encoder.SparseCorners = smooth
+	encoder.LargeGradients = smooth
 	if smooth {
 		encoder.CornerMinSize = 5
 	}

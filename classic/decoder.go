@@ -68,6 +68,7 @@ type Decoder struct {
 	smoothHasCb    bool
 	smoothHasCr    bool
 	smoothChannels []byte
+	gradientMask   []byte
 }
 
 func NewDecoder() *Decoder {
@@ -819,6 +820,15 @@ func (d *Decoder) decodeChannelInto(data []byte, imgW, imgH int, scratch *decode
 func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) {
 	codecStateMu.Lock()
 	defer codecStateMu.Unlock()
+	d.gradientMask = nil
+	var gradients []largeGradient
+	if len(compData) >= 4 && string(compData[:4]) == gradientMagic {
+		var err error
+		compData, gradients, err = unpackLargeGradients(compData)
+		if err != nil {
+			return nil, fmt.Errorf("decode gradients: %w", err)
+		}
+	}
 	var storedCorners *cornerGrid
 	if len(compData) >= 4 && string(compData[:4]) == cornerMagic {
 		var err error
@@ -912,6 +922,17 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	}
 	imgW := int(imgW32)
 	imgH := int(imgH32)
+	if len(gradients) > 0 {
+		if channelsMask&channelFlagLossless != 0 {
+			return nil, fmt.Errorf("gradients are not allowed in lossless images")
+		}
+		if err := validateLargeGradients(gradients, imgW, imgH); err != nil {
+			return nil, err
+		}
+		if smallBlock == 1 && macroBlock == 2 {
+			return nil, fmt.Errorf("gradients are not supported with quad blocks")
+		}
+	}
 	if storedCorners != nil {
 		if channelsMask&channelFlagLossless != 0 || storedCorners.width != imgW || storedCorners.height != imgH || storedCorners.step != 8 {
 			return nil, fmt.Errorf("corner grid does not match lossy base image")
@@ -1027,6 +1048,17 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 		if (d.Dither3 || d.Smooth) && macroBlock >= 8 {
 			sizes := d.glyphBlockSizes(ySeg, imgW, imgH)
 			d.blurLuma(imgW, imgH, sizes, get, set)
+		}
+	}
+	if len(gradients) != 0 {
+		d.gradientMask = make([]byte, imgW*imgH)
+		for _, b := range gradients {
+			for y := b.y; y < b.y+b.size; y++ {
+				for x := b.x; x < b.x+b.size; x++ {
+					pix[y*stride+x*4] = gradientAt(b, x, y)
+					d.gradientMask[y*imgW+x] = 1
+				}
+			}
 		}
 	}
 	if d.GlyphsOnly {

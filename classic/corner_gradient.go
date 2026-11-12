@@ -189,6 +189,9 @@ func (d *Decoder) writeStoredCorners(g, baseline cornerGrid, luma func(x, y int)
 					}
 				}
 				Y := int32(max(0, min(255, residual+int(v[0]))))
+				if d.gradientMask != nil && d.gradientMask[y*g.width+x] != 0 {
+					Y = int32(luma(x, y))
+				}
 				Cb, Cr := int32(v[1])-128, int32(v[2])-128
 				if d.Smooth {
 					mask := d.smoothChannels[y*g.width+x]
