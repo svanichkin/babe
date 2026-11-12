@@ -1,18 +1,21 @@
 package main
 
-import (
-	"reflect"
-	"testing"
-)
+import "testing"
 
-func TestParseMinBlockSize(t *testing.T) {
-	args, size, err := parseMinBlockSize([]string{"10", "-s", "4", "out.png"})
-	if err != nil || size != 4 || !reflect.DeepEqual(args, []string{"10", "out.png"}) {
-		t.Fatalf("got %v %d %v", args, size, err)
-	}
-	for _, bad := range [][]string{{"-s"}, {"-s", "0"}, {"-s", "-1"}, {"-s", "x"}, {"-s", "4", "-s", "8"}} {
-		if _, _, err := parseMinBlockSize(bad); err == nil {
-			t.Fatalf("accepted %v", bad)
+func TestCLIFlags(t *testing.T) {
+	for _, flag := range []string{"-s", "-sparse", "-corners", "-glyphs", "-dither", "-dither2", "-dither3", "-pattern2", "-unknown"} {
+		for _, decoding := range []bool{false, true} {
+			if err := validateCLIFlags([]string{flag}, decoding); err == nil {
+				t.Fatalf("accepted removed flag %s", flag)
+			}
 		}
+	}
+	for _, decoding := range []bool{false, true} {
+		if err := validateCLIFlags([]string{"-smooth", "-glyphs-only"}, decoding); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if validateCLIFlags([]string{"-postfilter"}, true) != nil || validateCLIFlags([]string{"-postfilter"}, false) == nil {
+		t.Fatal("postfilter mode validation failed")
 	}
 }

@@ -20,61 +20,36 @@ func main() {
 		fmt.Fprint(os.Stderr, "Usage:\n  babe <input-image> [quality] [bw] [-smooth] [-glyphs-only] [decoded.png]\n  babe <input.babe> [-smooth] [-glyphs-only] [-postfilter]\n")
 		os.Exit(1)
 	}
-	options, minSize, err := parseMinBlockSize(os.Args[2:])
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-
 	inputPath := os.Args[1]
 	ext := strings.ToLower(filepath.Ext(inputPath))
 	base := strings.TrimSuffix(inputPath, filepath.Ext(inputPath))
-
-	// If input is .babe → decode to PNG
+	options := os.Args[2:]
+	if err := validateCLIFlags(options, ext == ".babe"); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	if ext == ".babe" {
-		postfilter := false
-		corners := false
-		glyphs := minSize > 0
-		glyphsOnly := false
-		dither2 := false
-		dither3 := false
-		smooth := false
+		postfilter, glyphsOnly, smooth := false, false, false
 		for _, a := range options {
-			if a == "-smooth" {
+			switch a {
+			case "-postfilter":
+				postfilter = true
+			case "-glyphs-only":
+				glyphsOnly = true
+			case "-smooth":
 				smooth = true
 			}
-			if a == "-postfilter" {
-				postfilter = true
-			}
-			if a == "-corners" {
-				corners = true
-			}
-			if a == "-glyphs" {
-				glyphs = true
-			}
-			if a == "-glyphs-only" {
-				glyphsOnly = true
-			}
-			if a == "-dither2" {
-				dither2 = true
-			}
-			if a == "-dither3" {
-				dither3 = true
-			}
 		}
-		if err := decodeBabe(inputPath, base+".png", false, postfilter, corners, glyphs, glyphsOnly, dither2, dither3, smooth, minSize); err != nil {
+		if err := decodeBabe(inputPath, base+".png", false, postfilter, glyphsOnly, smooth); err != nil {
 			fmt.Fprintln(os.Stderr, "decode error:", err)
 			os.Exit(1)
 		}
 		return
 	}
-
-	// Otherwise: encode image → .babe with default or provided quality
 	quality := defaultEncodeQuality
-	encodeArgs := options
-	if len(encodeArgs) > 0 {
-		q, err := strconv.Atoi(encodeArgs[0])
-		if err != nil && !strings.HasPrefix(encodeArgs[0], "-") && encodeArgs[0] != "bw" && !strings.EqualFold(filepath.Ext(encodeArgs[0]), ".png") {
+	if len(options) > 0 {
+		q, err := strconv.Atoi(options[0])
+		if err != nil && !strings.HasPrefix(options[0], "-") && options[0] != "bw" && !strings.EqualFold(filepath.Ext(options[0]), ".png") {
 			fmt.Fprintln(os.Stderr, "quality must be an integer between 0 and 100")
 			os.Exit(1)
 		}
@@ -84,112 +59,52 @@ func main() {
 				os.Exit(1)
 			}
 			quality = q
-			encodeArgs = encodeArgs[1:]
+			options = options[1:]
 		}
 	}
-
-	bwmode := false
-	corners := false
-	glyphs := minSize > 0
-	glyphsOnly := false
-	dither := false
-	dither2 := false
-	dither3 := false
-	sparse := false
-	pattern2 := false
-	smooth := false
+	bwmode, glyphsOnly, smooth := false, false, false
 	decodeOutPath := ""
-	for _, a := range encodeArgs {
-		if a == "-smooth" {
+	for _, a := range options {
+		switch a {
+		case "-smooth":
 			smooth = true
-			continue
-		}
-		if a == "-dither3" {
-			dither3 = true
-			continue
-		}
-		if a == "-dither2" {
-			dither2 = true
-			continue
-		}
-		if a == "-pattern2" {
-			pattern2 = true
-			continue
-		}
-		if a == "-sparse" {
-			sparse = true
-			continue
-		}
-		if a == "-dither" {
-			dither = true
-			continue
-		}
-		if a == "-glyphs-only" {
+		case "-glyphs-only":
 			glyphsOnly = true
-			continue
-		}
-		if a == "-glyphs" {
-			glyphs = true
-			continue
-		}
-		if a == "-corners" {
-			corners = true
-			continue
-		}
-		if a == "bw" {
+		case "bw":
 			bwmode = true
-			continue
+		default:
+			if strings.EqualFold(filepath.Ext(a), ".png") {
+				decodeOutPath = a
+			}
 		}
-		if strings.EqualFold(filepath.Ext(a), ".png") {
-			decodeOutPath = a
-		}
 	}
-	if glyphs {
-		corners = true
-	}
-	if minSize > 0 {
-		sparse = true
-	}
-	if smooth {
-		sparse = true
-		minSize = 5
-	}
-
 	outPath := base + ".babe"
-	if err := encodeToBabe(inputPath, outPath, quality, bwmode, corners, dither, sparse, pattern2, minSize); err != nil {
+	if err := encodeToBabe(inputPath, outPath, quality, bwmode, smooth); err != nil {
 		fmt.Fprintln(os.Stderr, "encode error:", err)
 		os.Exit(1)
 	}
 	if decodeOutPath != "" {
-		if err := decodeBabe(outPath, decodeOutPath, false, false, corners, glyphs, glyphsOnly, dither2, dither3, smooth, minSize); err != nil {
+		if err := decodeBabe(outPath, decodeOutPath, false, false, glyphsOnly, smooth); err != nil {
 			fmt.Fprintln(os.Stderr, "decode error:", err)
 			os.Exit(1)
 		}
 	}
 }
 
-func parseMinBlockSize(args []string) ([]string, int, error) {
-	remaining := make([]string, 0, len(args))
-	minSize := 0
-	for i := 0; i < len(args); i++ {
-		if args[i] != "-s" {
-			remaining = append(remaining, args[i])
+func validateCLIFlags(args []string, decoding bool) error {
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") {
 			continue
 		}
-		if minSize != 0 || i+1 >= len(args) {
-			return nil, 0, fmt.Errorf("-s requires one positive integer")
+		if arg == "-smooth" || arg == "-glyphs-only" || (decoding && arg == "-postfilter") {
+			continue
 		}
-		i++
-		value, err := strconv.Atoi(args[i])
-		if err != nil || value < 1 || value > 65535 {
-			return nil, 0, fmt.Errorf("-s requires a positive integer between 1 and 65535")
-		}
-		minSize = value
+		return fmt.Errorf("unknown option %q", arg)
 	}
-	return remaining, minSize, nil
+	return nil
 }
 
-func encodeToBabe(inPath, outPath string, quality int, bwmode, corners, dither, sparse, pattern2 bool, minSize int) error {
+func encodeToBabe(inPath, outPath string, quality int, bwmode, smooth bool) error {
 	info, err := os.Stat(inPath)
 	if err != nil {
 		return err
@@ -209,11 +124,10 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode, corners, dither, 
 
 	start := time.Now()
 	encoder := NewEncoder()
-	encoder.CornerData = corners
-	encoder.DitherPatterns = dither
-	encoder.SparseCorners = sparse
-	encoder.SimplifyPatterns = pattern2
-	encoder.CornerMinSize = minSize
+	encoder.SparseCorners = smooth
+	if smooth {
+		encoder.CornerMinSize = 5
+	}
 	enc, err := encoder.Encode(img, quality, bwmode)
 	if err != nil {
 		return err
@@ -255,7 +169,7 @@ func encodeToBabe(inPath, outPath string, quality int, bwmode, corners, dither, 
 	return nil
 }
 
-func decodeBabe(inPath, outPath string, splitChannels, postfilter, corners, glyphs, glyphsOnly, dither2, dither3, smooth bool, minSize int) error {
+func decodeBabe(inPath, outPath string, splitChannels, postfilter, glyphsOnly, smooth bool) error {
 	pngEncoder := png.Encoder{CompressionLevel: png.DefaultCompression}
 
 	in, err := os.Open(inPath)
@@ -273,13 +187,8 @@ func decodeBabe(inPath, outPath string, splitChannels, postfilter, corners, glyp
 
 	start := time.Now()
 	decoder := NewDecoder()
-	decoder.CornerGradient = corners
-	decoder.GlyphBlend = glyphs
 	decoder.GlyphsOnly = glyphsOnly
-	decoder.Dither2 = dither2
-	decoder.Dither3 = dither3
 	decoder.Smooth = smooth
-	decoder.GlyphMinSize = minSize
 	dec, err := decoder.Decode(compData, postfilter)
 	if err != nil {
 		return err

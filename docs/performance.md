@@ -1,3 +1,5 @@
+> Historical experimental measurements below refer to CLI flags that have since been removed. The corresponding Go API options and benchmark helpers are retained for reproducibility; use `-smooth` for the current CLI.
+
 # BABE encoder and decoder performance
 
 Measured on Apple M3, darwin/arm64, Go 1.27.3, default GOMAXPROCS=8.

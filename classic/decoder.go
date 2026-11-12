@@ -899,7 +899,7 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 		return nil, fmt.Errorf("decode: Y channel missing in header")
 	}
 	if (d.Smooth || (d.GlyphBlend && d.GlyphMinSize > 0)) && storedCorners == nil && channelsMask&channelFlagLossless == 0 {
-		return nil, fmt.Errorf("minimum glyph size requires an image encoded with -corners")
+		return nil, fmt.Errorf("glyph smoothing requires an image with stored corners (encode with -smooth)")
 	}
 
 	imgW32, err := readU32("image width")
