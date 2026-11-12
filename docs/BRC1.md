@@ -160,6 +160,25 @@ chroma is still reconstructed from the base image. The current encoder stores
 constant placeholder glyphs in the base image under each selected block.
 Lossless images cannot contain this wrapper.
 
+## Experimental BGG2 shared gradient vertices
+
+`BGG2` also wraps a lossy base image, but stores each boundary vertex once on
+a 16-pixel grid. The 28-byte header contains the magic, then big-endian 32-bit
+width, height, base length, raw record length, block count and CRC32 of the
+base followed by the uncompressed record data. The base and a byte-range coded
+record stream follow. A block record has 32-bit x and y and an 8-bit size.
+After all block records, one delta-coded luminance byte is stored for each
+vertex used by any block boundary, in row-major grid order; the first delta is
+relative to zero. The block geometry determines which vertices are present.
+
+Each block uses a Coons patch from piecewise-linear boundary curves, including
+intermediate grid vertices where smaller blocks meet a larger one. Vertices
+are sampled from source luminance at the grid junction; the encoder checks
+approximation error and prominent image edges before accepting a block. The
+decoder rejects overlapping or out-of-bounds blocks and inconsistent lengths.
+Gradient boundaries next to ordinary glyphs still use the local correction
+described in the README. BGG1 remains readable, and q100 is unaffected.
+
 ## Quantization
 
 At qualities 0–99 quantization happens before entropy coding, so the decoder needs no quality or

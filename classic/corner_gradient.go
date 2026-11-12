@@ -184,7 +184,7 @@ func (d *Decoder) writeStoredCorners(g, baseline cornerGrid, luma func(x, y int)
 				resolved[i] = byte(max(0, min(255, residual+int(v[0]))))
 			}
 		}
-		resolved = stitchLargeGradients(resolved, d.gradientMask, g.width, g.height)
+		resolved = stitchLargeGradients(resolved, d.gradientMask, g.width, g.height, !d.sharedGradient)
 	}
 	write := func(y0, y1 int) {
 		for y := y0; y < y1; y++ {

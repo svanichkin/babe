@@ -1,0 +1,248 @@
+package classic
+
+import (
+	"encoding/binary"
+	"fmt"
+	"hash/crc32"
+)
+
+// BGG2 stores each 16-pixel boundary vertex once, even when blocks of
+// different sizes meet there. Block interiors use a Coons patch over its
+// piecewise-linear boundary, ensuring that both sides use the same edge.
+const sharedGradientMagic = "BGG2"
+const sharedGradientHeaderSize = 28
+const sharedGradientRecordSize = 9
+
+type sharedGradientMesh struct {
+	width, height, cols int
+	values              []byte
+}
+
+func makeSharedGradientMesh(plane []byte, w, h int) *sharedGradientMesh {
+	cols, rows := w/16+1, h/16+1
+	m := &sharedGradientMesh{width: w, height: h, cols: cols, values: make([]byte, cols*rows)}
+	for gy := 0; gy < rows; gy++ {
+		for gx := 0; gx < cols; gx++ {
+			px, py := gx*16, gy*16
+			sum, n := 0, 0
+			for y := max(0, py-1); y <= min(h-1, py); y++ {
+				for x := max(0, px-1); x <= min(w-1, px); x++ {
+					sum += int(plane[y*w+x])
+					n++
+				}
+			}
+			m.values[gy*cols+gx] = byte((sum + n/2) / n)
+		}
+	}
+	return m
+}
+func (m *sharedGradientMesh) node(x, y int) int { return int(m.values[(y/16)*m.cols+x/16]) }
+func (m *sharedGradientMesh) horizontal(x2, y int) int {
+	x := x2 / 32 * 16
+	t := x2 % 32
+	a := m.node(x, y)
+	if t == 0 {
+		return a
+	}
+	b := m.node(x+16, y)
+	return (a*(32-t) + b*t + 16) / 32
+}
+func (m *sharedGradientMesh) vertical(x, y2 int) int {
+	y := y2 / 32 * 16
+	t := y2 % 32
+	a := m.node(x, y)
+	if t == 0 {
+		return a
+	}
+	b := m.node(x, y+16)
+	return (a*(32-t) + b*t + 16) / 32
+}
+func (m *sharedGradientMesh) at(b largeGradient, x, y int) byte {
+	u, v := 2*(x-b.x)+1, 2*(y-b.y)+1
+	den := 2 * b.size
+	top := m.horizontal(2*x+1, b.y)
+	bottom := m.horizontal(2*x+1, b.y+b.size)
+	left := m.vertical(b.x, 2*y+1)
+	right := m.vertical(b.x+b.size, 2*y+1)
+	a, bb := m.node(b.x, b.y), m.node(b.x+b.size, b.y)
+	c, d := m.node(b.x, b.y+b.size), m.node(b.x+b.size, b.y+b.size)
+	lr := (left*(den-u) + right*u + den/2) / den
+	tb := (top*(den-v) + bottom*v + den/2) / den
+	corner := (a*(den-u)*(den-v) + bb*u*(den-v) + c*(den-u)*v + d*u*v + den*den/2) / (den * den)
+	return byte(max(0, min(255, lr+tb-corner)))
+}
+
+func selectSharedGradients(plane []byte, w, h, quality int, m *sharedGradientMesh) []largeGradient {
+	candidates := selectLargeGradients(plane, w, h, quality)
+	limit, maxError := 5.0, 10
+	if quality <= 10 {
+		limit, maxError = 16, 18
+	}
+	if quality == 0 {
+		limit, maxError = 36, 26
+	}
+	var result []largeGradient
+	var visit func(largeGradient)
+	visit = func(b largeGradient) {
+		sum, maxDiff := 0, 0
+		lo, hi := 255, 0
+		for y := b.y; y < b.y+b.size; y++ {
+			for x := b.x; x < b.x+b.size; x++ {
+				predicted := int(m.at(b, x, y))
+				lo = min(lo, predicted)
+				hi = max(hi, predicted)
+				diff := int(plane[y*w+x]) - predicted
+				if diff < 0 {
+					diff = -diff
+				}
+				sum += diff * diff
+				maxDiff = max(maxDiff, diff)
+			}
+		}
+		// Reject a block that crosses a prominent real boundary at its perimeter.
+		// The neighbour can then remain represented by ordinary glyphs.
+		safe := true
+		for _, side := range []int{0, 1, 2, 3} {
+			total, count := 0, 0
+			for k := 0; k < b.size; k++ {
+				x, y, nx, ny := b.x+k, b.y, b.x+k, b.y-1
+				switch side {
+				case 1:
+					x, y, nx, ny = b.x+k, b.y+b.size-1, b.x+k, b.y+b.size
+				case 2:
+					x, y, nx, ny = b.x, b.y+k, b.x-1, b.y+k
+				case 3:
+					x, y, nx, ny = b.x+b.size-1, b.y+k, b.x+b.size, b.y+k
+				}
+				if nx < 0 || ny < 0 || nx >= w || ny >= h {
+					continue
+				}
+				d := int(plane[y*w+x]) - int(plane[ny*w+nx])
+				if d < 0 {
+					d = -d
+				}
+				total += d
+				count++
+			}
+			if count > 0 && total > count*12 {
+				safe = false
+				break
+			}
+		}
+		if safe && hi-lo >= 4 && float64(sum)/float64(b.size*b.size) <= limit && maxDiff <= maxError {
+			result = append(result, b)
+			return
+		}
+		if b.size > 16 {
+			n := b.size / 2
+			for y := 0; y < 2; y++ {
+				for x := 0; x < 2; x++ {
+					visit(largeGradient{x: b.x + x*n, y: b.y + y*n, size: n})
+				}
+			}
+		}
+	}
+	for _, b := range candidates {
+		visit(b)
+	}
+	return result
+}
+
+func sharedNodeMask(blocks []largeGradient, w, h int) []bool {
+	cols := w/16 + 1
+	used := make([]bool, cols*(h/16+1))
+	for _, b := range blocks {
+		for k := 0; k <= b.size; k += 16 {
+			used[(b.y/16)*cols+(b.x+k)/16] = true
+			used[((b.y+b.size)/16)*cols+(b.x+k)/16] = true
+			used[((b.y+k)/16)*cols+b.x/16] = true
+			used[((b.y+k)/16)*cols+(b.x+b.size)/16] = true
+		}
+	}
+	return used
+}
+func packSharedGradients(base []byte, blocks []largeGradient, m *sharedGradientMesh) []byte {
+	used := sharedNodeMask(blocks, m.width, m.height)
+	raw := make([]byte, 0, len(blocks)*sharedGradientRecordSize+len(used))
+	for _, b := range blocks {
+		raw = binary.BigEndian.AppendUint32(raw, uint32(b.x))
+		raw = binary.BigEndian.AppendUint32(raw, uint32(b.y))
+		raw = append(raw, byte(b.size))
+	}
+	prev := byte(0)
+	for i, yes := range used {
+		if yes {
+			v := m.values[i]
+			raw = append(raw, v-prev)
+			prev = v
+		}
+	}
+	packed := encodeByteRangeInto(nil, raw)
+	out := make([]byte, 0, sharedGradientHeaderSize+len(base)+len(packed))
+	out = append(out, sharedGradientMagic...)
+	for _, v := range []uint32{uint32(m.width), uint32(m.height), uint32(len(base)), uint32(len(raw)), uint32(len(blocks))} {
+		out = binary.BigEndian.AppendUint32(out, v)
+	}
+	hash := crc32.NewIEEE()
+	hash.Write(base)
+	hash.Write(raw)
+	out = binary.BigEndian.AppendUint32(out, hash.Sum32())
+	out = append(out, base...)
+	return append(out, packed...)
+}
+func unpackSharedGradients(data []byte) ([]byte, []largeGradient, *sharedGradientMesh, error) {
+	if len(data) < sharedGradientHeaderSize || string(data[:4]) != sharedGradientMagic {
+		return nil, nil, nil, fmt.Errorf("invalid shared gradient header")
+	}
+	w, h := int(binary.BigEndian.Uint32(data[4:])), int(binary.BigEndian.Uint32(data[8:]))
+	if err := checkImageSize(w, h); err != nil {
+		return nil, nil, nil, err
+	}
+	baseLen, rawLen, count := uint64(binary.BigEndian.Uint32(data[12:])), uint64(binary.BigEndian.Uint32(data[16:])), uint64(binary.BigEndian.Uint32(data[20:]))
+	if baseLen < 4 || baseLen > uint64(len(data)-sharedGradientHeaderSize) || count == 0 || count > uint64(w/16)*uint64(h/16) || rawLen < count*sharedGradientRecordSize || rawLen > count*sharedGradientRecordSize+uint64(w/16+1)*uint64(h/16+1) {
+		return nil, nil, nil, fmt.Errorf("invalid shared gradient lengths")
+	}
+	base := data[sharedGradientHeaderSize : sharedGradientHeaderSize+int(baseLen)]
+	raw := make([]byte, int(rawLen))
+	if err := decodeByteRangeInto(raw, data[sharedGradientHeaderSize+int(baseLen):]); err != nil {
+		return nil, nil, nil, fmt.Errorf("invalid shared gradient data: %w", err)
+	}
+	hash := crc32.NewIEEE()
+	hash.Write(base)
+	hash.Write(raw)
+	if hash.Sum32() != binary.BigEndian.Uint32(data[24:]) {
+		return nil, nil, nil, fmt.Errorf("shared gradient checksum mismatch")
+	}
+	blocks := make([]largeGradient, int(count))
+	for i := range blocks {
+		p := raw[i*sharedGradientRecordSize:]
+		b := &blocks[i]
+		b.x = int(binary.BigEndian.Uint32(p))
+		b.y = int(binary.BigEndian.Uint32(p[4:]))
+		b.size = int(p[8])
+		if (b.size != 16 && b.size != 32 && b.size != 64) || b.x%b.size != 0 || b.y%b.size != 0 {
+			return nil, nil, nil, fmt.Errorf("invalid shared gradient block")
+		}
+	}
+	if err := validateLargeGradients(blocks, w, h); err != nil {
+		return nil, nil, nil, err
+	}
+	used := sharedNodeMask(blocks, w, h)
+	m := &sharedGradientMesh{width: w, height: h, cols: w/16 + 1, values: make([]byte, len(used))}
+	pos := int(count) * sharedGradientRecordSize
+	prev := byte(0)
+	for i, yes := range used {
+		if yes {
+			if pos >= len(raw) {
+				return nil, nil, nil, fmt.Errorf("missing shared gradient vertex")
+			}
+			prev += raw[pos]
+			pos++
+			m.values[i] = prev
+		}
+	}
+	if pos != len(raw) {
+		return nil, nil, nil, fmt.Errorf("extra shared gradient vertices")
+	}
+	return base, blocks, m, nil
+}

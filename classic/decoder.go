@@ -69,6 +69,7 @@ type Decoder struct {
 	smoothHasCr    bool
 	smoothChannels []byte
 	gradientMask   []byte
+	sharedGradient bool
 }
 
 func NewDecoder() *Decoder {
@@ -821,7 +822,17 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	codecStateMu.Lock()
 	defer codecStateMu.Unlock()
 	d.gradientMask = nil
+	d.sharedGradient = false
 	var gradients []largeGradient
+	var sharedMesh *sharedGradientMesh
+	if len(compData) >= 4 && string(compData[:4]) == sharedGradientMagic {
+		var err error
+		compData, gradients, sharedMesh, err = unpackSharedGradients(compData)
+		if err != nil {
+			return nil, fmt.Errorf("decode shared gradients: %w", err)
+		}
+		d.sharedGradient = true
+	}
 	if len(compData) >= 4 && string(compData[:4]) == gradientMagic {
 		var err error
 		compData, gradients, err = unpackLargeGradients(compData)
@@ -922,6 +933,9 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	}
 	imgW := int(imgW32)
 	imgH := int(imgH32)
+	if sharedMesh != nil && (sharedMesh.width != imgW || sharedMesh.height != imgH) {
+		return nil, fmt.Errorf("shared gradient dimensions do not match base image")
+	}
 	if len(gradients) > 0 {
 		if channelsMask&channelFlagLossless != 0 {
 			return nil, fmt.Errorf("gradients are not allowed in lossless images")
@@ -1055,7 +1069,11 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 		for _, b := range gradients {
 			for y := b.y; y < b.y+b.size; y++ {
 				for x := b.x; x < b.x+b.size; x++ {
-					pix[y*stride+x*4] = gradientAt(b, x, y)
+					if sharedMesh != nil {
+						pix[y*stride+x*4] = sharedMesh.at(b, x, y)
+					} else {
+						pix[y*stride+x*4] = gradientAt(b, x, y)
+					}
 					d.gradientMask[y*imgW+x] = byte(b.size)
 				}
 			}
@@ -1070,7 +1088,7 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 				plane[y*imgW+x] = pix[y*stride+x*4]
 			}
 		}
-		plane = stitchLargeGradients(plane, d.gradientMask, imgW, imgH)
+		plane = stitchLargeGradients(plane, d.gradientMask, imgW, imgH, !d.sharedGradient)
 		for y := 0; y < imgH; y++ {
 			for x := 0; x < imgW; x++ {
 				pix[y*stride+x*4] = plane[y*imgW+x]

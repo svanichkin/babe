@@ -65,10 +65,10 @@ func TestLargeGradientEncodeDecode(t *testing.T) {
 		t.Fatal(err)
 	}
 	data = bytes.Clone(data)
-	if string(data[:4]) != gradientMagic {
+	if string(data[:4]) != sharedGradientMagic {
 		t.Fatal("expected encoded gradients")
 	}
-	_, blocks, err := unpackLargeGradients(data)
+	_, blocks, _, err := unpackSharedGradients(data)
 	if err != nil || len(blocks) == 0 {
 		t.Fatalf("invalid gradient stream: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestStitchLargeGradientBoundaries(t *testing.T) {
 			}
 		}
 	}
-	out := stitchLargeGradients(plane, sizes, w, h)
+	out := stitchLargeGradients(plane, sizes, w, h, true)
 	if got := int(out[8*w+16]) - int(out[8*w+15]); got >= 16 || got < 0 {
 		t.Fatalf("gradient seam not reduced: %d", got)
 	}
@@ -155,7 +155,7 @@ func TestStitchLargeGradientBoundaries(t *testing.T) {
 			plane[y*w+x] = 220
 		}
 	}
-	out = stitchLargeGradients(plane, sizes, w, h)
+	out = stitchLargeGradients(plane, sizes, w, h, true)
 	if out[8*w+15] != 100 || out[8*w+16] != 220 {
 		t.Fatal("strong edge was smoothed")
 	}

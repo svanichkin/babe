@@ -29,7 +29,7 @@ func gradientAt(b largeGradient, x, y int) byte {
 // stitchLargeGradients anchors each gradient's boundary to its reconstructed
 // neighbour and fades that correction into the gradient. Ordinary glyphs are
 // read but never changed. Strong steps are left alone as possible real edges.
-func stitchLargeGradients(plane, sizes []byte, w, h int) []byte {
+func stitchLargeGradients(plane, sizes []byte, w, h int, stitchNeighbours bool) []byte {
 	out := append([]byte(nil), plane...)
 	const radius, threshold = 4, 24
 	for y := 0; y < h; y++ {
@@ -48,6 +48,9 @@ func stitchLargeGradients(plane, sizes []byte, w, h int) []byte {
 				edge, other := int(plane[ey*w+ex]), int(plane[ny*w+nx])
 				diff := other - edge
 				if diff < -threshold || diff > threshold {
+					return
+				}
+				if sizes[ny*w+nx] != 0 && !stitchNeighbours {
 					return
 				}
 				strength := 3
