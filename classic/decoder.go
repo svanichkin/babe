@@ -1056,8 +1056,24 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 			for y := b.y; y < b.y+b.size; y++ {
 				for x := b.x; x < b.x+b.size; x++ {
 					pix[y*stride+x*4] = gradientAt(b, x, y)
-					d.gradientMask[y*imgW+x] = 1
+					d.gradientMask[y*imgW+x] = byte(b.size)
 				}
+			}
+		}
+	}
+	// When there is no corner reconstruction, stitch in the luminance plane
+	// before RGB conversion; the normal corner path does it while rendering.
+	if len(gradients) != 0 && (d.GlyphsOnly || (d.Smooth && macroBlock <= 4) || (storedCorners == nil && !d.CornerGradient)) {
+		plane := make([]byte, imgW*imgH)
+		for y := 0; y < imgH; y++ {
+			for x := 0; x < imgW; x++ {
+				plane[y*imgW+x] = pix[y*stride+x*4]
+			}
+		}
+		plane = stitchLargeGradients(plane, d.gradientMask, imgW, imgH)
+		for y := 0; y < imgH; y++ {
+			for x := 0; x < imgW; x++ {
+				pix[y*stride+x*4] = plane[y*imgW+x]
 			}
 		}
 	}

@@ -26,6 +26,46 @@ func gradientAt(b largeGradient, x, y int) byte {
 	return byte((v + n*n/2) / (n * n))
 }
 
+// stitchLargeGradients anchors each gradient's boundary to its reconstructed
+// neighbour and fades that correction into the gradient. Ordinary glyphs are
+// read but never changed. Strong steps are left alone as possible real edges.
+func stitchLargeGradients(plane, sizes []byte, w, h int) []byte {
+	out := append([]byte(nil), plane...)
+	const radius, threshold = 4, 24
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			i := y*w + x
+			size := int(sizes[i])
+			if size == 0 {
+				continue
+			}
+			lx, ly := x%size, y%size
+			correction := 0
+			adjust := func(ex, ey, nx, ny, distance int) {
+				if distance >= radius || nx < 0 || nx >= w || ny < 0 || ny >= h {
+					return
+				}
+				edge, other := int(plane[ey*w+ex]), int(plane[ny*w+nx])
+				diff := other - edge
+				if diff < -threshold || diff > threshold {
+					return
+				}
+				strength := 3
+				if sizes[ny*w+nx] == 0 {
+					strength = 6
+				}
+				correction += diff * strength * (radius - distance) / (8 * radius)
+			}
+			adjust(x-lx, y, x-lx-1, y, lx)
+			adjust(x+size-1-lx, y, x+size-lx, y, size-1-lx)
+			adjust(x, y-ly, x, y-ly-1, ly)
+			adjust(x, y+size-1-ly, x, y+size-ly, size-1-ly)
+			out[i] = byte(max(0, min(255, int(plane[i])+correction)))
+		}
+	}
+	return out
+}
+
 func selectLargeGradients(plane []byte, w, h, quality int) []largeGradient {
 	var blocks []largeGradient
 	// Conservative error limits preserve small features. Each accepted 16x16

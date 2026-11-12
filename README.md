@@ -98,7 +98,9 @@ is unchanged. In Go, set `Encoder.SparseCorners = true`,
 When encoding lossy images, `-smooth` also tries large 16×16, 32×32 and 64×64
 luminance gradients. The encoder fits each candidate to the source and splits
 areas with excessive error into smaller candidates, leaving details to normal
-glyphs. This experimental representation uses a `BGG1` wrapper and is decoded
+glyphs. During reconstruction, small boundary mismatches are faded into the
+gradient from neighbouring reconstructed pixels; ordinary glyphs and large
+brightness steps are left intact. This experimental representation uses a `BGG1` wrapper and is decoded
 automatically; existing BABE decoders cannot read it. It keeps constant base
 glyphs under the gradients, so it is a prototype rather than a fully compact
 block format, and can increase file size. Gradient selection currently uses

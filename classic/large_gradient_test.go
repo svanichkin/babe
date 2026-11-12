@@ -113,3 +113,50 @@ func TestValidateLargeGradients(t *testing.T) {
 		}
 	}
 }
+
+func TestStitchLargeGradientBoundaries(t *testing.T) {
+	const w, h = 48, 16
+	plane := make([]byte, w*h)
+	sizes := make([]byte, w*h)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			i := y*w + x
+			switch {
+			case x < 16:
+				plane[i] = 100
+				sizes[i] = 16
+			case x < 32:
+				plane[i] = 116
+				sizes[i] = 16
+			default:
+				plane[i] = 128
+			}
+		}
+	}
+	out := stitchLargeGradients(plane, sizes, w, h)
+	if got := int(out[8*w+16]) - int(out[8*w+15]); got >= 16 || got < 0 {
+		t.Fatalf("gradient seam not reduced: %d", got)
+	}
+	if out[8*w+31] <= plane[8*w+31] {
+		t.Fatal("gradient not anchored to glyph")
+	}
+	for y := 0; y < h; y++ {
+		for x := 32; x < w; x++ {
+			if out[y*w+x] != plane[y*w+x] {
+				t.Fatal("neighbouring glyph changed")
+			}
+		}
+	}
+	if out[8*w+8] != plane[8*w+8] {
+		t.Fatal("gradient middle changed")
+	}
+	for y := 0; y < h; y++ {
+		for x := 16; x < 32; x++ {
+			plane[y*w+x] = 220
+		}
+	}
+	out = stitchLargeGradients(plane, sizes, w, h)
+	if out[8*w+15] != 100 || out[8*w+16] != 220 {
+		t.Fatal("strong edge was smoothed")
+	}
+}

@@ -163,12 +163,38 @@ func spreadGlyphResidual(x, y, width, height, minSize int, sizes []byte, residua
 }
 
 func (d *Decoder) writeStoredCorners(g, baseline cornerGrid, luma func(x, y int) byte, sizes []byte, minSize int) {
+	var resolved []byte
+	if d.gradientMask != nil {
+		resolved = make([]byte, g.width*g.height)
+		for y := 0; y < g.height; y++ {
+			for x := 0; x < g.width; x++ {
+				i := y*g.width + x
+				if d.gradientMask[i] != 0 || (d.Smooth && sizes != nil && sizes[i] <= 4) {
+					resolved[i] = luma(x, y)
+					continue
+				}
+				v, old := g.at(x, y), baseline.at(x, y)
+				residual := int(luma(x, y)) - int(old[0])
+				if sizes != nil {
+					residual = blendGlyphResidual(x, y, g.width, g.height, minSize, sizes, residual, luma, baseline)
+					if d.Smooth {
+						residual = spreadGlyphResidual(x, y, g.width, g.height, minSize, sizes, residual, luma, baseline)
+					}
+				}
+				resolved[i] = byte(max(0, min(255, residual+int(v[0]))))
+			}
+		}
+		resolved = stitchLargeGradients(resolved, d.gradientMask, g.width, g.height)
+	}
 	write := func(y0, y1 int) {
 		for y := y0; y < y1; y++ {
 			for x := 0; x < g.width; x++ {
 				o := y*d.dst.Stride + x*4
 				if d.Smooth && sizes != nil && sizes[y*g.width+x] <= 4 {
 					Y := int32(luma(x, y))
+					if resolved != nil {
+						Y = int32(resolved[y*g.width+x])
+					}
 					Cb, Cr := int32(d.dst.Pix[o+1])-128, int32(d.dst.Pix[o+2])-128
 					if !d.smoothHasCb {
 						Cb = 0
@@ -180,17 +206,20 @@ func (d *Decoder) writeStoredCorners(g, baseline cornerGrid, luma func(x, y int)
 					d.dst.Pix[o], d.dst.Pix[o+1], d.dst.Pix[o+2], d.dst.Pix[o+3] = byte(max(0, min(255, R))), byte(max(0, min(255, G))), byte(max(0, min(255, B))), 255
 					continue
 				}
-				v, old := g.at(x, y), baseline.at(x, y)
-				residual := int(luma(x, y)) - int(old[0])
-				if sizes != nil {
-					residual = blendGlyphResidual(x, y, g.width, g.height, minSize, sizes, residual, luma, baseline)
-					if d.Smooth {
-						residual = spreadGlyphResidual(x, y, g.width, g.height, minSize, sizes, residual, luma, baseline)
+				v := g.at(x, y)
+				var Y int32
+				if resolved != nil {
+					Y = int32(resolved[y*g.width+x])
+				} else {
+					old := baseline.at(x, y)
+					residual := int(luma(x, y)) - int(old[0])
+					if sizes != nil {
+						residual = blendGlyphResidual(x, y, g.width, g.height, minSize, sizes, residual, luma, baseline)
+						if d.Smooth {
+							residual = spreadGlyphResidual(x, y, g.width, g.height, minSize, sizes, residual, luma, baseline)
+						}
 					}
-				}
-				Y := int32(max(0, min(255, residual+int(v[0]))))
-				if d.gradientMask != nil && d.gradientMask[y*g.width+x] != 0 {
-					Y = int32(luma(x, y))
+					Y = int32(max(0, min(255, residual+int(v[0]))))
 				}
 				Cb, Cr := int32(v[1])-128, int32(v[2])-128
 				if d.Smooth {
