@@ -848,7 +848,7 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 			return nil, fmt.Errorf("decode corners: %w", err)
 		}
 	}
-	if len(compData) >= 4 && string(compData[:4]) == sparseCornerMagic {
+	if len(compData) >= 4 && (string(compData[:4]) == sparseCornerMagic || string(compData[:4]) == splitCornerMagic) {
 		var err error
 		compData, storedCorners, err = unpackSparseCornerImage(compData)
 		if err != nil {

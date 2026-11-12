@@ -27,7 +27,7 @@ type Encoder struct {
 	// expanding 2x2 majority samples; it retains the existing stream format.
 	SimplifyPatterns bool
 
-	// SparseCorners enables experimental selective BGC2 source corner storage.
+	// SparseCorners enables experimental selective BGC2/BGC3 source corner storage.
 	// CornerMinSize sets the minimum actual side length; zero defaults to 4.
 	SparseCorners bool
 	CornerMinSize int
@@ -590,7 +590,7 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 		if minSize <= 0 {
 			minSize = 4
 		}
-		comp, err = packSparseCorners(comp, e.raw.Bytes(), sourceCorners, minSize)
+		comp, err = packSparseCorners(comp, e.raw.Bytes(), sourceCorners, minSize, gradients)
 		if err != nil {
 			return nil, err
 		}

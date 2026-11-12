@@ -91,9 +91,14 @@ It leaves luma glyphs of 4×4 and smaller unchanged during smoothing, and uses
 each color channel's block sizes when reconstructing larger glyphs. A selected
 large gradient replaces the luma representation for its entire area. It can soften real
 low-contrast details. The option must also be specified when decoding; an
-existing lossy file must contain stored corners (BGC1 or BGC2). Lossless q100
+existing lossy file must contain stored corners (BGC1, BGC2 or BGC3). Lossless q100
 is unchanged. In Go, set `Encoder.SparseCorners = true`,
 `Encoder.CornerMinSize = 5` and `Decoder.Smooth = true`.
+
+Selective corners use BGC2 or the compact BGC3 representation, whichever is
+smaller. BGC3 separates flags and per-channel residuals for range coding;
+both reconstruct the same pixels. Luma corners entirely covered by selected
+large gradients are omitted when they cannot affect neighbouring glyphs.
 
 When encoding lossy images, `-smooth` also tries large 16×16, 32×32 and 64×64
 luminance gradients. The encoder fits each candidate to the source and splits

@@ -30,7 +30,7 @@ func TestSparseCornersRoundTrip(t *testing.T) {
 					t.Fatalf("%v q%d: %v", dims, q, err)
 				}
 				data = bytes.Clone(data)
-				if q != 100 && string(data[:4]) != sparseCornerMagic {
+				if q != 100 && string(data[:4]) != sparseCornerMagic && string(data[:4]) != splitCornerMagic {
 					t.Fatal("missing sparse corner format")
 				}
 				if q == 100 {
@@ -79,7 +79,12 @@ func TestSparseCornersRejectInvalidFlags(t *testing.T) {
 	base := bytes.Clone(data[cornerHeaderSize : cornerHeaderSize+baseLen])
 	cols, rows := (16-1+7)/8+1, (16-1+7)/8+1
 	records := make([]byte, cols*rows*4)
-	if err := decodeByteRangeInto(records, data[cornerHeaderSize+baseLen:]); err != nil {
+	if string(data[:4]) == splitCornerMagic {
+		err = decodeSplitCornerRecords(records, data[cornerHeaderSize+baseLen:], cols)
+	} else {
+		err = decodeByteRangeInto(records, data[cornerHeaderSize+baseLen:])
+	}
+	if err != nil {
 		t.Fatal(err)
 	}
 	for _, mutate := range []func([]byte){func(b []byte) { b[0] = 8 }, func(b []byte) { b[0], b[1] = 0, 1 }} {
@@ -87,6 +92,7 @@ func TestSparseCornersRejectInvalidFlags(t *testing.T) {
 		mutate(altered)
 		packed := encodeByteRangeInto(nil, altered)
 		broken := append(bytes.Clone(data[:cornerHeaderSize]), base...)
+		copy(broken[:4], sparseCornerMagic)
 		binary.BigEndian.PutUint32(broken[17:], uint32(len(packed)))
 		hash := crc32.NewIEEE()
 		_, _ = hash.Write(base)

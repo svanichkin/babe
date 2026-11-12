@@ -146,6 +146,18 @@ does not need the encoder's minimum to reconstruct the file. BGC2 is separate
 from BGC1 so older decoders reject it explicitly. The encoder emits ordinary
 lossless BRC1 for q100.
 
+## Experimental BGC3 compact selective corners
+
+`BGC3` stores the same corner records as BGC2 with the same 25-byte outer
+header and checksum. Its corner payload starts with four big-endian 32-bit
+lengths, followed by four byte-range streams: the flags for all vertices and
+the selected Y, Cb and Cr residuals in vertex order. Omitted residuals consume
+no bytes. If the top bit of the flags-stream length is set, each flag is
+XOR-predicted from the previous flag in its row; the remaining 31 bits are
+the actual length. The encoder chooses between BGC2 and BGC3 based on their
+encoded sizes. When large gradients cover an entire luma corner's interpolation
+footprint, that luma value can be omitted without changing reconstructed pixels.
+
 ## Experimental BGG1 large gradients
 
 `BGG1` wraps a lossy BRC1, BGC1 or BGC2 base image with selected 16×16,
@@ -162,7 +174,7 @@ Lossless images cannot contain this wrapper.
 
 ## Experimental BGG2 shared gradient vertices
 
-`BGG2` also wraps a lossy base image, but stores each boundary vertex once on
+`BGG2` also wraps a lossy BRC1, BGC1, BGC2 or BGC3 base image, but stores each boundary vertex once on
 a 16-pixel grid. The 28-byte header contains the magic, then big-endian 32-bit
 width, height, base length, raw record length, block count and CRC32 of the
 base followed by the uncompressed record data. The base and a byte-range coded

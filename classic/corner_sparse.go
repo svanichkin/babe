@@ -8,8 +8,151 @@ import (
 
 // BGC2 stores a channel mask and only the selected source corner values.
 const sparseCornerMagic = "BGC2"
+const splitCornerMagic = "BGC3"
 
-func packSparseCorners(base, raw []byte, source cornerGrid, minSize int) ([]byte, error) {
+// Split flags and selected residuals into four independent range-coded
+// streams. This is lossless and keeps omitted residuals out of the streams.
+func encodeSplitCornerRecords(records []byte, cols int) []byte {
+	n := len(records) / 4
+	var channels [4][]byte
+	channels[0] = make([]byte, n)
+	for i := 0; i < n; i++ {
+		bits := records[i*4]
+		channels[0][i] = bits
+		for c := 0; c < 3; c++ {
+			if bits&(1<<c) != 0 {
+				channels[c+1] = append(channels[c+1], records[i*4+c+1])
+			}
+		}
+	}
+	var packed [4][]byte
+	out := make([]byte, 16)
+	flagsDelta := make([]byte, n)
+	for i, bits := range channels[0] {
+		if i%cols != 0 {
+			bits ^= channels[0][i-1]
+		}
+		flagsDelta[i] = bits
+	}
+	for i := range packed {
+		packed[i] = encodeByteRangeInto(nil, channels[i])
+	}
+	predicted := encodeByteRangeInto(nil, flagsDelta)
+	usePrediction := len(predicted) < len(packed[0])
+	if usePrediction {
+		packed[0] = predicted
+	}
+	for i := range packed {
+		length := uint32(len(packed[i]))
+		if i == 0 && usePrediction {
+			length |= 1 << 31
+		}
+		binary.BigEndian.PutUint32(out[i*4:], length)
+	}
+	for _, stream := range packed {
+		out = append(out, stream...)
+	}
+	return out
+}
+
+func decodeSplitCornerRecords(records, data []byte, cols int) error {
+	if len(data) < 16 {
+		return fmt.Errorf("truncated split corner header")
+	}
+	var streams [4][]byte
+	pos := 16
+	usePrediction := binary.BigEndian.Uint32(data)&(1<<31) != 0
+	for i := range streams {
+		rawLength := binary.BigEndian.Uint32(data[i*4:])
+		if i == 0 {
+			rawLength &= ^uint32(1 << 31)
+		}
+		length := uint64(rawLength)
+		if length > uint64(len(data)-pos) {
+			return fmt.Errorf("invalid split corner lengths")
+		}
+		streams[i] = data[pos : pos+int(length)]
+		pos += int(length)
+	}
+	if pos != len(data) {
+		return fmt.Errorf("trailing split corner data")
+	}
+	n := len(records) / 4
+	flags := make([]byte, n)
+	if err := decodeByteRangeInto(flags, streams[0]); err != nil {
+		return err
+	}
+	if usePrediction {
+		for i := range flags {
+			if i%cols != 0 {
+				flags[i] ^= flags[i-1]
+			}
+		}
+	}
+	var counts [3]int
+	for i, bits := range flags {
+		if bits & ^byte(7) != 0 {
+			return fmt.Errorf("invalid corner flags")
+		}
+		records[i*4] = bits
+		for c := 0; c < 3; c++ {
+			if bits&(1<<c) != 0 {
+				counts[c]++
+			}
+		}
+	}
+	for c, count := range counts {
+		values := make([]byte, count)
+		if err := decodeByteRangeInto(values, streams[c+1]); err != nil {
+			return err
+		}
+		j := 0
+		for i, bits := range flags {
+			if bits&(1<<c) != 0 {
+				records[i*4+c+1] = values[j]
+				j++
+			}
+		}
+	}
+	return nil
+}
+
+// redundantGradientCorners marks luma nodes whose entire interpolation
+// footprint is covered by gradients. Their values cannot affect any glyph.
+func redundantGradientCorners(w, h int, source cornerGrid, gradients []largeGradient) []bool {
+	if len(gradients) == 0 {
+		return nil
+	}
+	cellsW, cellsH := (w+7)/8, (h+7)/8
+	covered := make([]bool, cellsW*cellsH)
+	for _, b := range gradients {
+		for y := b.y / 8; y < (b.y+b.size)/8; y++ {
+			for x := b.x / 8; x < (b.x+b.size)/8; x++ {
+				covered[y*cellsW+x] = true
+			}
+		}
+	}
+	redundant := make([]bool, len(source.values))
+	for i := range redundant {
+		gx, gy := i%source.cols, i/source.cols
+		all, found := true, false
+		for y := gy - 1; y <= gy; y++ {
+			for x := gx - 1; x <= gx; x++ {
+				if x < 0 || y < 0 || x >= cellsW || y >= cellsH {
+					continue
+				}
+				found = true
+				if !covered[y*cellsW+x] {
+					all = false
+				}
+			}
+		}
+		redundant[i] = found && all
+	}
+	return redundant
+}
+
+func packSparseCorners(base, raw []byte, source cornerGrid, minSize int, gradients []largeGradient) ([]byte, error) {
 	w, h := source.width, source.height
 	mask := raw[9]
 	pos := payloadHeaderSize
@@ -29,6 +172,7 @@ func packSparseCorners(base, raw []byte, source cornerGrid, minSize int) ([]byte
 		baseline.values[i][1], baseline.values[i][2] = 128, 128
 	}
 	flags := make([]byte, len(source.values))
+	redundantLuma := redundantGradientCorners(w, h, source, gradients)
 	scratch := &Decoder{}
 	var channelScratch decoderChannelScratch
 	for c := range 3 {
@@ -53,6 +197,9 @@ func packSparseCorners(base, raw []byte, source cornerGrid, minSize int) ([]byte
 		}
 		sizes := scratch.glyphBlockSizes(segments[c], w, h)
 		for i, v := range source.values {
+			if c == 0 && redundantLuma != nil && redundantLuma[i] {
+				continue
+			}
 			x, y := min((i%source.cols)*source.step, w-1), min((i/source.cols)*source.step, h-1)
 			eligible := false
 			sum, count := 0, 0
@@ -84,8 +231,12 @@ func packSparseCorners(base, raw []byte, source cornerGrid, minSize int) ([]byte
 		}
 	}
 	compressed := encodeByteRangeInto(nil, records)
+	magic := sparseCornerMagic
+	if split := encodeSplitCornerRecords(records, source.cols); len(split) < len(compressed) {
+		compressed, magic = split, splitCornerMagic
+	}
 	out := make([]byte, 0, cornerHeaderSize+len(base)+len(compressed))
-	out = append(out, sparseCornerMagic...)
+	out = append(out, magic...)
 	out = append(out, byte(source.step))
 	out = binary.BigEndian.AppendUint32(out, uint32(w))
 	out = binary.BigEndian.AppendUint32(out, uint32(h))
@@ -100,7 +251,7 @@ func packSparseCorners(base, raw []byte, source cornerGrid, minSize int) ([]byte
 }
 
 func unpackSparseCornerImage(data []byte) ([]byte, *cornerGrid, error) {
-	if len(data) < cornerHeaderSize || string(data[:4]) != sparseCornerMagic {
+	if len(data) < cornerHeaderSize || (string(data[:4]) != sparseCornerMagic && string(data[:4]) != splitCornerMagic) {
 		return nil, nil, fmt.Errorf("invalid sparse corner header")
 	}
 	step := int(data[4])
@@ -121,7 +272,13 @@ func unpackSparseCornerImage(data []byte) ([]byte, *cornerGrid, error) {
 		return nil, nil, fmt.Errorf("sparse corners require BRC1 base")
 	}
 	records := make([]byte, cols*rows*4)
-	if err := decodeByteRangeInto(records, data[cornerHeaderSize+int(baseLen):]); err != nil {
+	var err error
+	if string(data[:4]) == splitCornerMagic {
+		err = decodeSplitCornerRecords(records, data[cornerHeaderSize+int(baseLen):], cols)
+	} else {
+		err = decodeByteRangeInto(records, data[cornerHeaderSize+int(baseLen):])
+	}
+	if err != nil {
 		return nil, nil, fmt.Errorf("invalid corner stream: %w", err)
 	}
 	hash := crc32.NewIEEE()
