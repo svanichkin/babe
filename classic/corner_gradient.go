@@ -136,21 +136,78 @@ func blendGlyphResidual(x, y, width, height, minSize int, sizes []byte, residual
 	return residual + delta
 }
 
+// spreadGlyphResidual extends the existing seam correction into the interior,
+// without changing the seam itself or any block smaller than minSize.
+func spreadGlyphResidual(x, y, width, height, minSize int, sizes []byte, residual int, luma func(int, int) byte, baseline cornerGrid) int {
+	step := int(sizes[y*width+x])
+	if step < minSize || step <= 1 {
+		return residual
+	}
+	lx, ly := x%step, y%step
+	if lx == 0 || ly == 0 || lx == step-1 || ly == step-1 {
+		return residual
+	}
+	apply := func(ex, ey, distance int) {
+		if distance > 3 || ex < 0 || ex >= width || ey < 0 || ey >= height {
+			return
+		}
+		edge := int(luma(ex, ey)) - int(baseline.at(ex, ey)[0])
+		corrected := blendGlyphResidual(ex, ey, width, height, minSize, sizes, edge, luma, baseline)
+		residual += (corrected - edge) * (4 - distance) / 4
+	}
+	apply(x-lx, y, lx)
+	apply(x+step-1-lx, y, step-1-lx)
+	apply(x, y-ly, ly)
+	apply(x, y+step-1-ly, step-1-ly)
+	return residual
+}
+
 func (d *Decoder) writeStoredCorners(g, baseline cornerGrid, luma func(x, y int) byte, sizes []byte, minSize int) {
 	write := func(y0, y1 int) {
 		for y := y0; y < y1; y++ {
 			for x := 0; x < g.width; x++ {
+				o := y*d.dst.Stride + x*4
+				if d.Smooth && sizes != nil && sizes[y*g.width+x] <= 4 {
+					Y := int32(luma(x, y))
+					Cb, Cr := int32(d.dst.Pix[o+1])-128, int32(d.dst.Pix[o+2])-128
+					if !d.smoothHasCb {
+						Cb = 0
+					}
+					if !d.smoothHasCr {
+						Cr = 0
+					}
+					R, G, B := Y+((91881*Cr)>>16), Y-((22554*Cb+46802*Cr)>>16), Y+((116130*Cb)>>16)
+					d.dst.Pix[o], d.dst.Pix[o+1], d.dst.Pix[o+2], d.dst.Pix[o+3] = byte(max(0, min(255, R))), byte(max(0, min(255, G))), byte(max(0, min(255, B))), 255
+					continue
+				}
 				v, old := g.at(x, y), baseline.at(x, y)
 				residual := int(luma(x, y)) - int(old[0])
 				if sizes != nil {
 					residual = blendGlyphResidual(x, y, g.width, g.height, minSize, sizes, residual, luma, baseline)
+					if d.Smooth {
+						residual = spreadGlyphResidual(x, y, g.width, g.height, minSize, sizes, residual, luma, baseline)
+					}
 				}
 				Y := int32(max(0, min(255, residual+int(v[0]))))
 				Cb, Cr := int32(v[1])-128, int32(v[2])-128
+				if d.Smooth {
+					mask := d.smoothChannels[y*g.width+x]
+					if mask&1 == 0 {
+						Cb = 0
+						if d.smoothHasCb {
+							Cb = int32(d.dst.Pix[o+1]) - 128
+						}
+					}
+					if mask&2 == 0 {
+						Cr = 0
+						if d.smoothHasCr {
+							Cr = int32(d.dst.Pix[o+2]) - 128
+						}
+					}
+				}
 				R := Y + ((91881 * Cr) >> 16)
 				G := Y - ((22554*Cb + 46802*Cr) >> 16)
 				B := Y + ((116130 * Cb) >> 16)
-				o := y*d.dst.Stride + x*4
 				d.dst.Pix[o], d.dst.Pix[o+1], d.dst.Pix[o+2], d.dst.Pix[o+3] = byte(max(0, min(255, R))), byte(max(0, min(255, G))), byte(max(0, min(255, B))), 255
 			}
 		}

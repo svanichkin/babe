@@ -78,6 +78,25 @@ go build -o Babe .
 
 This writes `1.babe` and immediately decodes it into `1.png`. Range coding is enabled by default; no compression flag is needed. Use `./Babe 1.jpg 10 bw 1.png` for grayscale.
 
+To try experimental reconstruction of larger glyphs, use one option:
+
+```sh
+./Babe 1.jpg 10 -smooth 1.png
+./Babe 1.babe -smooth
+```
+
+`-smooth` stores selective source corners and combines corner gradients,
+low-contrast glyph smoothing and a gradual correction near block boundaries.
+It leaves luma glyphs of 4×4 and smaller unchanged, and uses each color
+channel's block sizes when reconstructing larger glyphs. It can soften real
+low-contrast details. The option must also be specified when decoding; an
+existing lossy file must contain stored corners (BGC1 or BGC2). Lossless q100
+is unchanged. In Go, set `Encoder.SparseCorners = true`,
+`Encoder.CornerMinSize = 5` and `Decoder.Smooth = true`.
+
+<details>
+<summary>Earlier experimental options</summary>
+
 To experiment with gradients between source-image block corners, add `-corners`
 when encoding and requesting decoded output:
 
@@ -170,6 +189,8 @@ block may still blur. Chroma is not blurred, the encoded file is unchanged,
 and lossless q100 is unaffected. When
 combined, `-dither2` runs first and `-dither3` second. In Go use
 `Decoder.Dither3`.
+
+</details>
 
 To inspect the stored glyphs without color, render the first channel as
 grayscale:

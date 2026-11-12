@@ -48,6 +48,10 @@ type Decoder struct {
 	// reconstruction; it leaves high-contrast edges and lossless mode intact.
 	Dither3 bool
 
+	// Smooth enables experimental large-glyph reconstruction for images with
+	// stored corners. Blocks of 4x4 and smaller are preserved.
+	Smooth bool
+
 	payload []byte
 	zdec    *zstd.Decoder
 
@@ -55,12 +59,15 @@ type Decoder struct {
 	cb decoderChannelScratch
 	cr decoderChannelScratch
 
-	neutral     []uint8
-	dst         *image.RGBA
-	glyphLuma   []byte
-	glyphBlocks []byte
-	ditherInput []byte
-	ditherMap   []byte
+	neutral        []uint8
+	dst            *image.RGBA
+	glyphLuma      []byte
+	glyphBlocks    []byte
+	ditherInput    []byte
+	ditherMap      []byte
+	smoothHasCb    bool
+	smoothHasCr    bool
+	smoothChannels []byte
 }
 
 func NewDecoder() *Decoder {
@@ -891,7 +898,7 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	if channelsMask&channelFlagY == 0 {
 		return nil, fmt.Errorf("decode: Y channel missing in header")
 	}
-	if d.GlyphBlend && d.GlyphMinSize > 0 && storedCorners == nil && channelsMask&channelFlagLossless == 0 {
+	if (d.Smooth || (d.GlyphBlend && d.GlyphMinSize > 0)) && storedCorners == nil && channelsMask&channelFlagLossless == 0 {
 		return nil, fmt.Errorf("minimum glyph size requires an image encoded with -corners")
 	}
 
@@ -944,6 +951,9 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 		}
 	}
 	if smallBlock == 1 && macroBlock == 2 {
+		if d.Smooth {
+			storedCorners = nil
+		}
 		d.decodeQuadImage([3][]byte{ySeg, cbSeg, crSeg}, imgW, imgH, channelsMask&channelFlagLossless != 0, storedCorners)
 		// The existing postfilter is a no-op for 1x1 small blocks.
 		return dst, nil
@@ -994,7 +1004,7 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 		return nil, errCr
 	}
 	var originalCornerGrid *cornerGrid
-	if ((d.Dither2 && macroBlock >= 4) || (d.Dither3 && macroBlock >= 8)) && channelsMask&channelFlagLossless == 0 {
+	if ((d.Dither2 && macroBlock >= 4) || ((d.Dither3 || d.Smooth) && macroBlock >= 8)) && channelsMask&channelFlagLossless == 0 {
 		if storedCorners != nil && !d.GlyphsOnly {
 			grid := makeCornerGrid(imgW, imgH, storedCorners.step, func(x, y int) [3]byte {
 				o := y*stride + x*4
@@ -1014,7 +1024,7 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 		if d.Dither2 {
 			d.ditherLuma(ySeg, imgW, imgH, get, set)
 		}
-		if d.Dither3 && macroBlock >= 8 {
+		if (d.Dither3 || d.Smooth) && macroBlock >= 8 {
 			sizes := d.glyphBlockSizes(ySeg, imgW, imgH)
 			d.blurLuma(imgW, imgH, sizes, get, set)
 		}
@@ -1028,6 +1038,9 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 			}
 		}
 		return dst, nil
+	}
+	if d.Smooth && macroBlock <= 4 {
+		storedCorners = nil
 	}
 	if (d.CornerGradient || storedCorners != nil) && channelsMask&channelFlagLossless == 0 {
 		step := smallBlock
@@ -1056,9 +1069,33 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 		if storedCorners != nil {
 			storedCorners.fillMissing(grid)
 			readLuma := func(x, y int) byte { return pix[y*stride+x*4] }
-			blend := d.GlyphBlend && macroBlock >= max(d.GlyphMinSize, 1)
+			minSize := max(d.GlyphMinSize, 1)
+			if d.Smooth {
+				minSize = 5
+			}
+			blend := (d.GlyphBlend || d.Smooth) && macroBlock >= minSize
 			var sizes []byte
 			if blend {
+				if d.Smooth {
+					n := imgW * imgH
+					if cap(d.smoothChannels) < n {
+						d.smoothChannels = make([]byte, n)
+					} else {
+						d.smoothChannels = d.smoothChannels[:n]
+						clear(d.smoothChannels)
+					}
+					for c, segment := range [][]byte{cbSeg, crSeg} {
+						if (c == 0 && !hasCb) || (c == 1 && !hasCr) {
+							continue
+						}
+						channelSizes := d.glyphBlockSizes(segment, imgW, imgH)
+						for i, size := range channelSizes {
+							if size > 4 {
+								d.smoothChannels[i] |= 1 << c
+							}
+						}
+					}
+				}
 				sizes = d.glyphBlockSizes(ySeg, imgW, imgH)
 				n := imgW * imgH
 				if cap(d.glyphLuma) < n {
@@ -1073,7 +1110,8 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 				}
 				readLuma = func(x, y int) byte { return d.glyphLuma[y*imgW+x] }
 			}
-			d.writeStoredCorners(*storedCorners, grid, readLuma, sizes, max(d.GlyphMinSize, 1))
+			d.smoothHasCb, d.smoothHasCr = hasCb, hasCr
+			d.writeStoredCorners(*storedCorners, grid, readLuma, sizes, minSize)
 		} else {
 			d.writeCornerGradient(grid)
 		}
