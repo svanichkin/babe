@@ -18,20 +18,25 @@ func TestSparseCornersRoundTrip(t *testing.T) {
 			}
 		}
 		for _, q := range []int{0, 10, 80, 100} {
-			for _, bw := range []bool{false, true} {
+			for _, mode := range []int{0, 1, 2, 3} {
+				bw, legacy := mode&1 != 0, mode&2 != 0
 				if q == 100 && bw {
 					continue
 				}
 				e := NewEncoder()
 				e.SparseCorners = true
 				e.CornerMinSize = 4
+				e.LegacySmooth = legacy
 				data, err := e.Encode(img, q, bw)
 				if err != nil {
 					t.Fatalf("%v q%d: %v", dims, q, err)
 				}
 				data = bytes.Clone(data)
-				if q != 100 && string(data[:4]) != sparseCornerMagic && string(data[:4]) != splitCornerMagic {
+				if q != 100 && legacy && string(data[:4]) != sparseCornerMagic && string(data[:4]) != splitCornerMagic {
 					t.Fatal("missing sparse corner format")
+				}
+				if q < 80 && !legacy && string(data[:4]) != smoothMagic {
+					t.Fatalf("%v q%d: missing BSM1 format", dims, q)
 				}
 				if q == 100 {
 					standard, err := NewEncoder().Encode(img, 100, false)
@@ -71,6 +76,7 @@ func TestSparseCornersRejectInvalidFlags(t *testing.T) {
 	}
 	e := NewEncoder()
 	e.SparseCorners = true
+	e.LegacySmooth = true
 	data, err := e.Encode(img, 10, false)
 	if err != nil {
 		t.Fatal(err)
@@ -114,6 +120,7 @@ func TestSparseCornersRespectBlockSize(t *testing.T) {
 	}
 	e := NewEncoder()
 	e.SparseCorners, e.CornerMinSize = true, 9
+	e.LegacySmooth = true
 	data, err := e.Encode(img, 10, false)
 	if err != nil {
 		t.Fatal(err)

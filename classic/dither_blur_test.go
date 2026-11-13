@@ -195,6 +195,7 @@ func TestDither3PreservesBlockBoundaries(t *testing.T) {
 	}
 	e := NewEncoder()
 	e.SparseCorners = true
+	e.LegacySmooth = true
 	data, err := e.Encode(img, 10, false)
 	if err != nil {
 		t.Fatal(err)

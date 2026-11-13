@@ -1006,28 +1006,38 @@ func writePatternComposite(pw *bitWriter, bits uint64, bw, bh int) {
 }
 
 func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh, quantStep int, pw *bitWriter) (uint8, uint8, bool, error) {
+	fg, bg, pattern, bits, err := encodeBlockBits(plane, stride, height, x0, y0, bw, bh, quantStep)
+	if pattern {
+		writePatternComposite(pw, bits, bw, bh)
+	}
+	return fg, bg, pattern, err
+}
+
+// encodeBlockBits returns a block's levels and, for a two-tone block, its
+// raster-order pattern: pixel (x,y) is bit bw*bh-1-(y*bw+x).
+func encodeBlockBits(plane []uint8, stride, height, x0, y0, bw, bh, quantStep int) (uint8, uint8, bool, uint64, error) {
 	total := bw * bh
 	if total <= 0 {
-		return 0, 0, false, fmt.Errorf("invalid block size")
+		return 0, 0, false, 0, fmt.Errorf("invalid block size")
 	}
 
 	if bw == 1 && bh == 1 {
 		if x0 < 0 || y0 < 0 || x0 >= stride {
-			return 0, 0, false, fmt.Errorf("encodeBlockPlane: index out of range")
+			return 0, 0, false, 0, fmt.Errorf("encodeBlockPlane: index out of range")
 		}
 		idx := y0*stride + x0
 		if idx < 0 || idx >= len(plane) {
-			return 0, 0, false, fmt.Errorf("encodeBlockPlane: index out of range")
+			return 0, 0, false, 0, fmt.Errorf("encodeBlockPlane: index out of range")
 		}
 		v := quantizeLevel(plane[idx], quantStep)
-		return v, v, false, nil
+		return v, v, false, 0, nil
 	}
 
 	if x0 < 0 || y0 < 0 || bw <= 0 || bh <= 0 || stride <= 0 || height <= 0 || x0+bw > stride {
-		return 0, 0, false, fmt.Errorf("encodeBlockPlane: index out of range")
+		return 0, 0, false, 0, fmt.Errorf("encodeBlockPlane: index out of range")
 	}
 	if y0+bh > height {
-		return 0, 0, false, fmt.Errorf("encodeBlockPlane: index out of range")
+		return 0, 0, false, 0, fmt.Errorf("encodeBlockPlane: index out of range")
 	}
 
 	if bw == 2 && bh == 2 {
@@ -1093,21 +1103,20 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh, quantStep i
 
 		if fgCnt == 0 || bgCnt == 0 {
 			v := quantizeLevel(avg, quantStep)
-			return v, v, false, nil
+			return v, v, false, 0, nil
 		}
 		fg := quantizeLevel(uint8(fgSum/uint64(fgCnt)), quantStep)
 		bg := quantizeLevel(uint8(bgSum/uint64(bgCnt)), quantStep)
 		if fg == bg {
-			return fg, bg, false, nil
+			return fg, bg, false, 0, nil
 		}
-		writePatternComposite(pw, bits, 2, 2)
-		return fg, bg, true, nil
+		return fg, bg, true, bits, nil
 	}
 
 	// Read the block once into a small stack buffer.
 	var valsBuf [64]uint8
 	if total > len(valsBuf) {
-		return 0, 0, false, fmt.Errorf("encodeBlockPlane: block too large")
+		return 0, 0, false, 0, fmt.Errorf("encodeBlockPlane: block too large")
 	}
 	vals := valsBuf[:total]
 
@@ -1194,25 +1203,24 @@ func encodeBlockPlane(plane []uint8, stride, height, x0, y0, bw, bh, quantStep i
 	}
 	if fgCnt == 0 || bgCnt == 0 {
 		v := quantizeLevel(avg, quantStep)
-		return v, v, false, nil
+		return v, v, false, 0, nil
 	}
 	fg := quantizeLevel(uint8(fgSum/uint64(fgCnt)), quantStep)
 	bg := quantizeLevel(uint8(bgSum/uint64(bgCnt)), quantStep)
 	if fg == bg {
-		return fg, bg, false, nil
+		return fg, bg, false, 0, nil
 	}
 	if encodePattern2 && bw == bh && bw >= 4 {
 		bits = simplifyPattern2(bits, bw)
 		if bits == 0 {
-			return bg, bg, false, nil
+			return bg, bg, false, 0, nil
 		}
 		all := ^uint64(0) >> (64 - uint(bw*bh))
 		if bits == all {
-			return fg, fg, false, nil
+			return fg, fg, false, 0, nil
 		}
 	}
-	writePatternComposite(pw, bits, bw, bh)
-	return fg, bg, true, nil
+	return fg, bg, true, bits, nil
 }
 
 // simplifyPattern2 expands 2x2 majority samples when at most 1/16 of the mask
@@ -1254,11 +1262,20 @@ func simplifyPattern2(bits uint64, size int) uint64 {
 // encodeChannelBlock optionally replaces a low-contrast block with its
 // quantized average. This reduces chroma detail at the lower quality levels.
 func encodeChannelBlock(plane []uint8, stride, height, x0, y0, bw, bh, step int, solidThreshold int, pw *bitWriter) (uint8, uint8, bool, error) {
+	fg, bg, pattern, bits, err := encodeChannelBlockBits(plane, stride, height, x0, y0, bw, bh, step, solidThreshold)
+	if pattern {
+		writePatternComposite(pw, bits, bw, bh)
+	}
+	return fg, bg, pattern, err
+}
+
+// encodeChannelBlockBits is encodeChannelBlock returning raster pattern bits.
+func encodeChannelBlockBits(plane []uint8, stride, height, x0, y0, bw, bh, step int, solidThreshold int) (uint8, uint8, bool, uint64, error) {
 	if solidThreshold <= 0 {
-		return encodeBlockPlane(plane, stride, height, x0, y0, bw, bh, step, pw)
+		return encodeBlockBits(plane, stride, height, x0, y0, bw, bh, step)
 	}
 	if x0 < 0 || y0 < 0 || bw <= 0 || bh <= 0 || stride <= 0 || height <= 0 || x0+bw > stride || y0+bh > height || (y0+bh-1)*stride+x0+bw > len(plane) {
-		return 0, 0, false, fmt.Errorf("encodeChannelBlock: index out of range")
+		return 0, 0, false, 0, fmt.Errorf("encodeChannelBlock: index out of range")
 	}
 	var sum int
 	minV, maxV := byte(255), byte(0)
@@ -1281,10 +1298,10 @@ func encodeChannelBlock(plane []uint8, stride, height, x0, y0, bw, bh, step int,
 		}
 	}
 	if solidThreshold < 256 && int(maxV)-int(minV) >= solidThreshold {
-		return encodeBlockPlane(plane, stride, height, x0, y0, bw, bh, step, pw)
+		return encodeBlockBits(plane, stride, height, x0, y0, bw, bh, step)
 	}
 	v := quantizeLevel(uint8(sum/(bw*bh)), step)
-	return v, v, false, nil
+	return v, v, false, 0, nil
 }
 
 type encoderChannelScratch struct {

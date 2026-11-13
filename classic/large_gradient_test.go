@@ -60,6 +60,7 @@ func TestLargeGradientEncodeDecode(t *testing.T) {
 	e.LargeGradients = true
 	e.SparseCorners = true
 	e.CornerMinSize = 5
+	e.LegacySmooth = true
 	data, err := e.Encode(img, 10, false)
 	if err != nil {
 		t.Fatal(err)

@@ -110,6 +110,53 @@ func (g cornerGrid) lumaAt(x, y int) byte {
 	return byte((a*(dx-px)*(dy-py) + b*px*(dy-py) + c*(dx-px)*py + d*px*py + den/2) / den)
 }
 
+// cell8 evaluates at for every pixel of the complete 8x8 cell whose top-left
+// pixel is (bx, by), using the same integer formula as at's fast path. It
+// reports false when at would use its general path for this cell.
+func (g cornerGrid) cell8(bx, by int, out *[64][3]byte) bool {
+	gx, gy := bx>>3, by>>3
+	if g.step != 8 || bx&7 != 0 || by&7 != 0 || (gx+1)*8 >= g.width || (gy+1)*8 >= g.height {
+		return false
+	}
+	i := gy*g.cols + gx
+	a, b, c, d := g.values[i], g.values[i+1], g.values[i+g.cols], g.values[i+g.cols+1]
+	// a(8-px)(8-py)+b px(8-py)+c(8-px)py+d px py = 8L + (R-L)px, where L and R
+	// are the left and right column values for this row: an exact rewrite.
+	for k := range 3 {
+		ak, bk, ck, dk := int(a[k]), int(b[k]), int(c[k]), int(d[k])
+		for py := 0; py < 8; py++ {
+			l, r := ak*(8-py)+ck*py, bk*(8-py)+dk*py
+			v, step := 8*l+32, r-l
+			row := out[py*8 : py*8+8]
+			for px := range row {
+				row[px][k] = byte(v >> 6)
+				v += step
+			}
+		}
+	}
+	return true
+}
+
+// lumaCell8 is cell8 for the first channel only.
+func (g cornerGrid) lumaCell8(bx, by int, out *[64]byte) bool {
+	gx, gy := bx>>3, by>>3
+	if g.step != 8 || bx&7 != 0 || by&7 != 0 || (gx+1)*8 >= g.width || (gy+1)*8 >= g.height {
+		return false
+	}
+	i := gy*g.cols + gx
+	a, b, c, d := int(g.values[i][0]), int(g.values[i+1][0]), int(g.values[i+g.cols][0]), int(g.values[i+g.cols+1][0])
+	for py := 0; py < 8; py++ {
+		l, r := a*(8-py)+c*py, b*(8-py)+d*py
+		v, step := 8*l+32, r-l
+		row := out[py*8 : py*8+8]
+		for px := range row {
+			row[px] = byte(v >> 6)
+			v += step
+		}
+	}
+	return true
+}
+
 func (g cornerGrid) writeRGB(pix []byte, stride, y0, y1 int) {
 	for y := y0; y < y1; y++ {
 		for x := 0; x < g.width; x++ {
@@ -206,10 +253,16 @@ func spreadGlyphResidual(x, y, width, height, minSize int, sizes []byte, residua
 // their rounding would change the decoded image.
 func glyphResidual8(x0, y0, width, height, minSize int, sizes []byte, luma func(int, int) byte, baseline cornerGrid, out *[64]int16) {
 	var edges [64]int16
+	var base [64]byte
+	if !baseline.lumaCell8(x0, y0, &base) {
+		for i := range base {
+			base[i] = baseline.lumaAt(x0+i%8, y0+i/8)
+		}
+	}
 	for y := 0; y < 8; y++ {
 		for x := 0; x < 8; x++ {
 			i := y*8 + x
-			r := int(luma(x0+x, y0+y)) - int(baseline.lumaAt(x0+x, y0+y))
+			r := int(luma(x0+x, y0+y)) - int(base[i])
 			out[i] = int16(r)
 			if x == 0 || x == 7 || y == 0 || y == 7 {
 				edges[i] = int16(blendGlyphResidual(x0+x, y0+y, width, height, minSize, sizes, r, luma, baseline) - r)
@@ -238,7 +291,63 @@ func glyphResidual8(x0, y0, width, height, minSize int, sizes []byte, luma func(
 
 func (d *Decoder) writeStoredCorners(g, baseline cornerGrid, luma func(x, y int) byte, sizes []byte, minSize int) {
 	var resolved []byte
-	if d.gradientMask != nil {
+	// resolveAdjacent reconstructs an ordinary glyph pixel next to a gradient.
+	resolveAdjacent := func(x, y int) byte {
+		i := y*g.width + x
+		if d.Smooth && sizes != nil && sizes[i] <= 4 {
+			return luma(x, y)
+		}
+		v, old := g.at(x, y), baseline.lumaAt(x, y)
+		residual := int(luma(x, y)) - int(old)
+		if sizes != nil {
+			residual = blendGlyphResidual(x, y, g.width, g.height, minSize, sizes, residual, luma, baseline)
+			if d.Smooth {
+				residual = spreadGlyphResidual(x, y, g.width, g.height, minSize, sizes, residual, luma, baseline)
+			}
+		}
+		return byte(max(0, min(255, residual+int(v[0]))))
+	}
+	if d.gradientMask != nil && d.gradients != nil {
+		// The stitcher reads gradient pixels and ordinary glyphs immediately
+		// across their boundaries only. Resolve exactly those pixels.
+		n := g.width * g.height
+		if cap(d.resolvedBuf) < n {
+			d.resolvedBuf = make([]byte, n)
+			d.stitchedBuf = make([]byte, n)
+		}
+		plane, stitched := d.resolvedBuf[:n], d.stitchedBuf[:n]
+		mark := func(x, y int) {
+			if x >= 0 && y >= 0 && x < g.width && y < g.height && d.gradientMask[y*g.width+x] == 0 {
+				plane[y*g.width+x] = resolveAdjacent(x, y)
+			}
+		}
+		// Each band of rows writes only its own rows of plane, then of stitched.
+		parallelRows(d.Parallel, g.width, g.height, func(y0, y1 int) {
+			for _, b := range d.gradients {
+				if b.y+b.size < y0 || b.y-1 >= y1 {
+					continue
+				}
+				for y := max(b.y, y0); y < min(b.y+b.size, y1); y++ {
+					for x := b.x; x < b.x+b.size; x++ {
+						plane[y*g.width+x] = luma(x, y)
+					}
+					mark(b.x-1, y)
+					mark(b.x+b.size, y)
+				}
+				for _, y := range [2]int{b.y - 1, b.y + b.size} {
+					if y >= y0 && y < y1 {
+						for x := b.x; x < b.x+b.size; x++ {
+							mark(x, y)
+						}
+					}
+				}
+			}
+		})
+		parallelRows(d.Parallel, g.width, g.height, func(y0, y1 int) {
+			stitchGradientRows(stitched, plane, d.gradientMask, g.width, g.height, d.gradients, !d.sharedGradient, y0, y1)
+		})
+		resolved = stitched
+	} else if d.gradientMask != nil {
 		resolved = make([]byte, g.width*g.height)
 		for y := 0; y < g.height; y++ {
 			for x := 0; x < g.width; x++ {
@@ -247,26 +356,10 @@ func (d *Decoder) writeStoredCorners(g, baseline cornerGrid, luma func(x, y int)
 					resolved[i] = luma(x, y)
 					continue
 				}
-				// The stitcher reads ordinary glyphs only immediately across a
-				// gradient boundary. Resolve those neighbours here; all other
-				// glyphs can be reconstructed once in the parallel RGB pass.
 				adjacent := (x > 0 && d.gradientMask[i-1] != 0) || (x+1 < g.width && d.gradientMask[i+1] != 0) || (y > 0 && d.gradientMask[i-g.width] != 0) || (y+1 < g.height && d.gradientMask[i+g.width] != 0)
-				if !adjacent {
-					continue
+				if adjacent {
+					resolved[i] = resolveAdjacent(x, y)
 				}
-				if d.Smooth && sizes != nil && sizes[i] <= 4 {
-					resolved[i] = luma(x, y)
-					continue
-				}
-				v, old := g.at(x, y), baseline.lumaAt(x, y)
-				residual := int(luma(x, y)) - int(old)
-				if sizes != nil {
-					residual = blendGlyphResidual(x, y, g.width, g.height, minSize, sizes, residual, luma, baseline)
-					if d.Smooth {
-						residual = spreadGlyphResidual(x, y, g.width, g.height, minSize, sizes, residual, luma, baseline)
-					}
-				}
-				resolved[i] = byte(max(0, min(255, residual+int(v[0]))))
 			}
 		}
 		resolved = stitchLargeGradients(resolved, d.gradientMask, g.width, g.height, !d.sharedGradient)
@@ -279,6 +372,8 @@ func (d *Decoder) writeStoredCorners(g, baseline cornerGrid, luma func(x, y int)
 				if cached {
 					glyphResidual8(bx, by, g.width, g.height, minSize, sizes, luma, baseline, &residuals)
 				}
+				var cell [64][3]byte
+				hasCell, cellReady := false, false
 				for y := max(y0, by); y < min(y1, by+8); y++ {
 					for x := bx; x < min(g.width, bx+8); x++ {
 						o := y*d.dst.Stride + x*4
@@ -298,7 +393,15 @@ func (d *Decoder) writeStoredCorners(g, baseline cornerGrid, luma func(x, y int)
 							d.dst.Pix[o], d.dst.Pix[o+1], d.dst.Pix[o+2], d.dst.Pix[o+3] = byte(max(0, min(255, R))), byte(max(0, min(255, G))), byte(max(0, min(255, B))), 255
 							continue
 						}
-						v := g.at(x, y)
+						var v [3]byte
+						if !cellReady {
+							hasCell, cellReady = g.cell8(bx, by, &cell), true
+						}
+						if hasCell {
+							v = cell[(y-by)*8+x-bx]
+						} else {
+							v = g.at(x, y)
+						}
 						var Y int32
 						if resolved != nil && d.gradientMask[y*g.width+x] != 0 {
 							Y = int32(resolved[y*g.width+x])
@@ -340,9 +443,5 @@ func (d *Decoder) writeStoredCorners(g, baseline cornerGrid, luma func(x, y int)
 			}
 		}
 	}
-	if d.Parallel {
-		processStreams(4, g.width*g.height, true, func(i int) { write(g.height*i/4, g.height*(i+1)/4) })
-	} else {
-		write(0, g.height)
-	}
+	parallelRows(d.Parallel, g.width, g.height, write)
 }

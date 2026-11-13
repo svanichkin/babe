@@ -73,6 +73,7 @@ func TestGradientCornerElisionPreservesPixels(t *testing.T) {
 			e.LargeGradients = true
 			e.SparseCorners = true
 			e.CornerMinSize = 5
+			e.LegacySmooth = true
 			data, err := e.Encode(img, q, false)
 			if err != nil {
 				t.Fatal(err)
@@ -136,6 +137,7 @@ func TestSplitAndLegacyCornersDecodeIdentically(t *testing.T) {
 		e := NewEncoder()
 		e.SparseCorners = true
 		e.CornerMinSize = 5
+		e.LegacySmooth = true
 		data, err := e.Encode(img, 0, bw)
 		if err != nil {
 			t.Fatal(err)

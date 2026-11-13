@@ -112,7 +112,35 @@ func (p *sharedGradientPatch) row(m *sharedGradientMesh, b largeGradient, y int,
 }
 
 func selectSharedGradients(plane []byte, w, h, quality int, m *sharedGradientMesh) []largeGradient {
-	candidates := selectLargeGradients(plane, w, h, quality)
+	return selectSharedGradientsParallel(plane, w, h, quality, m, false)
+}
+
+// selectSharedGradientsParallel processes 256x256 tiles independently and
+// returns their blocks in tile order, the same as the serial selection.
+func selectSharedGradientsParallel(plane []byte, w, h, quality int, m *sharedGradientMesh, parallel bool) []largeGradient {
+	if w < 16 || h < 16 {
+		return nil
+	}
+	stats := makeGradientTileSums(plane, w, h, parallel)
+	var tiles [][2]int
+	for y := 0; y < h; y += 256 {
+		for x := 0; x < w; x += 256 {
+			tiles = append(tiles, [2]int{x, y})
+		}
+	}
+	results := make([][]largeGradient, len(tiles))
+	runParallel(len(tiles), parallel && w*h >= 1<<16, func(i int) {
+		candidates := selectLargeGradientTile(plane, w, h, quality, &stats, tiles[i][0], tiles[i][1])
+		results[i] = refineSharedGradients(plane, w, h, quality, m, candidates)
+	})
+	var out []largeGradient
+	for _, r := range results {
+		out = append(out, r...)
+	}
+	return out
+}
+
+func refineSharedGradients(plane []byte, w, h, quality int, m *sharedGradientMesh, candidates []largeGradient) []largeGradient {
 	limit, maxError := 5.0, 10
 	if quality <= 10 {
 		limit, maxError = 16, 18

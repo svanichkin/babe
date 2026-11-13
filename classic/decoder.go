@@ -69,7 +69,12 @@ type Decoder struct {
 	smoothHasCr    bool
 	smoothChannels []byte
 	gradientMask   []byte
+	gradientBuf    []byte
+	gradients      []largeGradient
+	resolvedBuf    []byte
+	stitchedBuf    []byte
 	sharedGradient bool
+	smooth         smoothScratch
 }
 
 func NewDecoder() *Decoder {
@@ -822,9 +827,29 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	codecStateMu.Lock()
 	defer codecStateMu.Unlock()
 	d.gradientMask = nil
+	d.gradients = nil
 	d.sharedGradient = false
 	var gradients []largeGradient
 	var sharedMesh *sharedGradientMesh
+	var storedCorners *cornerGrid
+	var payload []byte
+	var smoothPlanes *smoothDecoded
+	if len(compData) >= 4 && string(compData[:4]) == smoothMagic {
+		res, err := unpackSmooth(&d.smooth, compData, d.payload[:0], d.Dither2, d.Parallel)
+		if err != nil {
+			return nil, err
+		}
+		if res.raw != nil {
+			payload = res.raw
+			d.payload = payload
+		} else {
+			// Channels are already reconstructed; only the header is parsed.
+			payload = res.header
+			smoothPlanes = &res
+		}
+		gradients, sharedMesh, storedCorners = res.gradients, res.mesh, res.corners
+		d.sharedGradient = len(gradients) != 0
+	}
 	if len(compData) >= 4 && (string(compData[:4]) == sharedGradientMagic || string(compData[:4]) == compactSharedGradientMagic) {
 		var err error
 		compData, gradients, sharedMesh, err = unpackSharedGradients(compData)
@@ -840,7 +865,6 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 			return nil, fmt.Errorf("decode gradients: %w", err)
 		}
 	}
-	var storedCorners *cornerGrid
 	if len(compData) >= 4 && string(compData[:4]) == cornerMagic {
 		var err error
 		compData, storedCorners, err = unpackCornerImage(compData)
@@ -859,13 +883,18 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	if d.zdec == nil {
 		d.zdec = mustNewZstdDecoder()
 	}
-	payload, err := decompressPayload(compData, d.payload[:0], d.zdec, d.Parallel)
-	if err != nil {
-		return nil, fmt.Errorf("decode payload: %w", err)
+	if payload == nil {
+		var err error
+		payload, err = decompressPayload(compData, d.payload[:0], d.zdec, d.Parallel)
+		if err != nil {
+			return nil, fmt.Errorf("decode payload: %w", err)
+		}
+		d.payload = payload
 	}
-	d.payload = payload
-	if err := validatePayload(payload); err != nil {
-		return nil, err
+	if smoothPlanes == nil {
+		if err := validatePayload(payload); err != nil {
+			return nil, err
+		}
 	}
 
 	if len(payload) < len(codec) {
@@ -965,24 +994,34 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	pix := dst.Pix
 	stride := dst.Stride
 
-	ySeg, err := readChannelSegment(payload, &pos)
-	if err != nil {
-		return nil, err
-	}
+	var ySeg, cbSeg, crSeg []byte
 	hasCb := (channelsMask & channelFlagCb) != 0
 	hasCr := (channelsMask & channelFlagCr) != 0
-
-	var cbSeg, crSeg []byte
-	if hasCb {
-		cbSeg, err = readChannelSegment(payload, &pos)
+	if smoothPlanes != nil {
+		ySeg = smoothPlanes.segments[0]
+		if hasCb {
+			cbSeg = smoothPlanes.segments[1]
+		}
+		if hasCr {
+			crSeg = smoothPlanes.segments[2]
+		}
+	} else {
+		var err error
+		ySeg, err = readChannelSegment(payload, &pos)
 		if err != nil {
 			return nil, err
 		}
-	}
-	if hasCr {
-		crSeg, err = readChannelSegment(payload, &pos)
-		if err != nil {
-			return nil, err
+		if hasCb {
+			cbSeg, err = readChannelSegment(payload, &pos)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if hasCr {
+			crSeg, err = readChannelSegment(payload, &pos)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	if smallBlock == 1 && macroBlock == 2 {
@@ -1006,7 +1045,23 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	}
 
 	var errY, errCb, errCr error
-	if d.Parallel {
+	if smoothPlanes != nil {
+		planes := smoothPlanes.planes
+		parallelRows(d.Parallel, imgW, imgH, func(y0, y1 int) {
+			for y := y0; y < y1; y++ {
+				row := pix[y*stride : y*stride+imgW*4]
+				for c, plane := range planes {
+					if plane == nil {
+						continue
+					}
+					src := plane[y*imgW : (y+1)*imgW]
+					for x, v := range src {
+						row[x*4+c] = v
+					}
+				}
+			}
+		})
+	} else if d.Parallel {
 		var wg sync.WaitGroup
 		wg.Add(1)
 		go decodeChannelToPixWorker(ySeg, imgW, imgH, pix, stride, 0, &errY, &wg)
@@ -1039,6 +1094,7 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 		return nil, errCr
 	}
 	var originalCornerGrid *cornerGrid
+	var ySizes []byte
 	if ((d.Dither2 && macroBlock >= 4) || ((d.Dither3 || d.Smooth) && macroBlock >= 8)) && channelsMask&channelFlagLossless == 0 {
 		if storedCorners != nil && !d.GlyphsOnly {
 			grid := makeCornerGrid(imgW, imgH, storedCorners.step, func(x, y int) [3]byte {
@@ -1060,52 +1116,76 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 			d.ditherLuma(ySeg, imgW, imgH, get, set)
 		}
 		if (d.Dither3 || d.Smooth) && macroBlock >= 8 {
-			sizes := d.glyphBlockSizes(ySeg, imgW, imgH)
-			d.blurGlyphLuma8(imgW, imgH, sizes, get, set)
+			ySizes = d.glyphBlockSizes(ySeg, imgW, imgH)
+			d.blurGlyphLuma8Pix(pix, stride, imgW, imgH, ySizes)
 		}
 	}
+	d.gradients = gradients
 	if len(gradients) != 0 {
-		d.gradientMask = make([]byte, imgW*imgH)
-		for _, b := range gradients {
-			var patch sharedGradientPatch
-			var row [256]byte
-			if sharedMesh != nil {
-				patch = sharedMesh.preparePatch(b)
-			}
-			size := b.size
-			if size == 256 {
-				size = 255
-			}
-			for y := b.y; y < b.y+b.size; y++ {
-				if sharedMesh != nil {
-					patch.row(sharedMesh, b, y, row[:b.size])
-				}
-				for x := b.x; x < b.x+b.size; x++ {
-					if sharedMesh != nil {
-						pix[y*stride+x*4] = row[x-b.x]
-					} else {
-						pix[y*stride+x*4] = gradientAt(b, x, y)
-					}
-					d.gradientMask[y*imgW+x] = byte(size)
-				}
-			}
+		if cap(d.gradientBuf) < imgW*imgH {
+			d.gradientBuf = make([]byte, imgW*imgH)
 		}
+		d.gradientMask = d.gradientBuf[:imgW*imgH]
+		mask := d.gradientMask
+		parallelRows(d.Parallel, imgW, imgH, func(y0, y1 int) {
+			clear(mask[y0*imgW : y1*imgW])
+			for _, b := range gradients {
+				if b.y+b.size <= y0 || b.y >= y1 {
+					continue
+				}
+				var patch sharedGradientPatch
+				var row [256]byte
+				if sharedMesh != nil {
+					patch = sharedMesh.preparePatch(b)
+				}
+				size := b.size
+				if size == 256 {
+					size = 255
+				}
+				for y := max(b.y, y0); y < min(b.y+b.size, y1); y++ {
+					if sharedMesh != nil {
+						patch.row(sharedMesh, b, y, row[:b.size])
+					}
+					for x := b.x; x < b.x+b.size; x++ {
+						if sharedMesh != nil {
+							pix[y*stride+x*4] = row[x-b.x]
+						} else {
+							pix[y*stride+x*4] = gradientAt(b, x, y)
+						}
+						mask[y*imgW+x] = byte(size)
+					}
+				}
+			}
+		})
 	}
 	// When there is no corner reconstruction, stitch in the luminance plane
 	// before RGB conversion; the normal corner path does it while rendering.
 	if len(gradients) != 0 && (d.GlyphsOnly || (d.Smooth && macroBlock <= 4) || (storedCorners == nil && !d.CornerGradient)) {
-		plane := make([]byte, imgW*imgH)
-		for y := 0; y < imgH; y++ {
-			for x := 0; x < imgW; x++ {
-				plane[y*imgW+x] = pix[y*stride+x*4]
-			}
+		// Only gradient pixels change; they read themselves and direct neighbours.
+		n := imgW * imgH
+		if cap(d.resolvedBuf) < n {
+			d.resolvedBuf = make([]byte, n)
+			d.stitchedBuf = make([]byte, n)
 		}
-		plane = stitchLargeGradients(plane, d.gradientMask, imgW, imgH, !d.sharedGradient)
-		for y := 0; y < imgH; y++ {
-			for x := 0; x < imgW; x++ {
-				pix[y*stride+x*4] = plane[y*imgW+x]
+		plane, stitched := d.resolvedBuf[:n], d.stitchedBuf[:n]
+		parallelRows(d.Parallel, imgW, imgH, func(y0, y1 int) {
+			for y := y0; y < y1; y++ {
+				row, src := plane[y*imgW:(y+1)*imgW], pix[y*stride:]
+				for x := range row {
+					row[x] = src[x*4]
+				}
 			}
-		}
+		})
+		parallelRows(d.Parallel, imgW, imgH, func(y0, y1 int) {
+			stitchGradientRows(stitched, plane, d.gradientMask, imgW, imgH, gradients, !d.sharedGradient, y0, y1)
+			for _, b := range gradients {
+				for y := max(b.y, y0); y < min(b.y+b.size, y1); y++ {
+					for x := b.x; x < b.x+b.size; x++ {
+						pix[y*stride+x*4] = stitched[y*imgW+x]
+					}
+				}
+			}
+		})
 	}
 	if d.GlyphsOnly {
 		for y := 0; y < imgH; y++ {
@@ -1162,30 +1242,31 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 						d.smoothChannels = d.smoothChannels[:n]
 						clear(d.smoothChannels)
 					}
-					for c, segment := range [][]byte{cbSeg, crSeg} {
-						if (c == 0 && !hasCb) || (c == 1 && !hasCr) {
-							continue
-						}
-						channelSizes := d.glyphBlockSizes(segment, imgW, imgH)
-						for i, size := range channelSizes {
-							if size > 4 {
-								d.smoothChannels[i] |= 1 << c
-							}
-						}
+					if hasCb {
+						markLargeGlyphs(d.smoothChannels, 1, cbSeg, imgW, imgH)
+					}
+					if hasCr {
+						markLargeGlyphs(d.smoothChannels, 2, crSeg, imgW, imgH)
 					}
 				}
-				sizes = d.glyphBlockSizes(ySeg, imgW, imgH)
+				sizes = ySizes
+				if sizes == nil {
+					sizes = d.glyphBlockSizes(ySeg, imgW, imgH)
+				}
 				n := imgW * imgH
 				if cap(d.glyphLuma) < n {
 					d.glyphLuma = make([]byte, n)
 				} else {
 					d.glyphLuma = d.glyphLuma[:n]
 				}
-				for y := 0; y < imgH; y++ {
-					for x := 0; x < imgW; x++ {
-						d.glyphLuma[y*imgW+x] = pix[y*stride+x*4]
+				parallelRows(d.Parallel, imgW, imgH, func(y0, y1 int) {
+					for y := y0; y < y1; y++ {
+						row, src := d.glyphLuma[y*imgW:(y+1)*imgW], pix[y*stride:]
+						for x := range row {
+							row[x] = src[x*4]
+						}
 					}
-				}
+				})
 				readLuma = func(x, y int) byte { return d.glyphLuma[y*imgW+x] }
 			}
 			d.smoothHasCb, d.smoothHasCr = hasCb, hasCr

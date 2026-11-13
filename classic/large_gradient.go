@@ -31,45 +31,61 @@ func gradientAt(b largeGradient, x, y int) byte {
 // read but never changed. Strong steps are left alone as possible real edges.
 func stitchLargeGradients(plane, sizes []byte, w, h int, stitchNeighbours bool) []byte {
 	out := append([]byte(nil), plane...)
-	const radius, threshold = 4, 24
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
-			i := y*w + x
-			size := int(sizes[i])
-			if size == 255 {
-				size = 256
+			if sizes[y*w+x] != 0 {
+				out[y*w+x] = stitchPixel(plane, sizes, w, h, x, y, stitchNeighbours)
 			}
-			if size == 0 {
-				continue
-			}
-			lx, ly := x%size, y%size
-			correction := 0
-			adjust := func(ex, ey, nx, ny, distance int) {
-				if distance >= radius || nx < 0 || nx >= w || ny < 0 || ny >= h {
-					return
-				}
-				edge, other := int(plane[ey*w+ex]), int(plane[ny*w+nx])
-				diff := other - edge
-				if diff < -threshold || diff > threshold {
-					return
-				}
-				if sizes[ny*w+nx] != 0 && !stitchNeighbours {
-					return
-				}
-				strength := 3
-				if sizes[ny*w+nx] == 0 {
-					strength = 6
-				}
-				correction += diff * strength * (radius - distance) / (8 * radius)
-			}
-			adjust(x-lx, y, x-lx-1, y, lx)
-			adjust(x+size-1-lx, y, x+size-lx, y, size-1-lx)
-			adjust(x, y-ly, x, y-ly-1, ly)
-			adjust(x, y+size-1-ly, x, y+size-ly, size-1-ly)
-			out[i] = byte(max(0, min(255, int(plane[i])+correction)))
 		}
 	}
 	return out
+}
+
+// stitchGradientRows writes stitchLargeGradients's result for the pixels of
+// blocks in rows [y0, y1) into out. It reads plane only inside the blocks and
+// at their direct neighbours, so other entries of plane and out may be stale.
+func stitchGradientRows(out, plane, sizes []byte, w, h int, blocks []largeGradient, stitchNeighbours bool, y0, y1 int) {
+	for _, b := range blocks {
+		for y := max(b.y, y0); y < min(b.y+b.size, y1); y++ {
+			for x := b.x; x < b.x+b.size; x++ {
+				out[y*w+x] = stitchPixel(plane, sizes, w, h, x, y, stitchNeighbours)
+			}
+		}
+	}
+}
+
+func stitchPixel(plane, sizes []byte, w, h, x, y int, stitchNeighbours bool) byte {
+	const radius, threshold = 4, 24
+	i := y*w + x
+	size := int(sizes[i])
+	if size == 255 {
+		size = 256
+	}
+	lx, ly := x%size, y%size
+	correction := 0
+	adjust := func(ex, ey, nx, ny, distance int) {
+		if distance >= radius || nx < 0 || nx >= w || ny < 0 || ny >= h {
+			return
+		}
+		edge, other := int(plane[ey*w+ex]), int(plane[ny*w+nx])
+		diff := other - edge
+		if diff < -threshold || diff > threshold {
+			return
+		}
+		if sizes[ny*w+nx] != 0 && !stitchNeighbours {
+			return
+		}
+		strength := 3
+		if sizes[ny*w+nx] == 0 {
+			strength = 6
+		}
+		correction += diff * strength * (radius - distance) / (8 * radius)
+	}
+	adjust(x-lx, y, x-lx-1, y, lx)
+	adjust(x+size-1-lx, y, x+size-lx, y, size-1-lx)
+	adjust(x, y-ly, x, y-ly-1, ly)
+	adjust(x, y+size-1-ly, x, y+size-ly, size-1-ly)
+	return byte(max(0, min(255, int(plane[i])+correction)))
 }
 
 // gradientTileSums keeps integral sums at 16-pixel granularity. Every gradient
@@ -80,24 +96,34 @@ type gradientTileSums struct {
 	sum, xsum, ysum []int64
 }
 
-func makeGradientTileSums(plane []byte, w, h int) gradientTileSums {
+func makeGradientTileSums(plane []byte, w, h int, parallel bool) gradientTileSums {
 	cols, rows := w/16+1, h/16+1
 	s := gradientTileSums{cols: cols, sum: make([]int64, cols*rows), xsum: make([]int64, cols*rows), ysum: make([]int64, cols*rows)}
+	// Per-tile moments are independent; the integral is accumulated afterwards.
+	parallelRows(parallel, w, h/16, func(t0, t1 int) {
+		for ty := t0; ty < t1; ty++ {
+			for tx := 0; tx < w/16; tx++ {
+				var sum, sx, sy int64
+				for y := ty * 16; y < ty*16+16; y++ {
+					row := plane[y*w+tx*16 : y*w+tx*16+16]
+					for k, b := range row {
+						v := int64(b)
+						sum += v
+						sx += int64(tx*16+k) * v
+						sy += int64(y) * v
+					}
+				}
+				i := (ty+1)*cols + tx + 1
+				s.sum[i], s.xsum[i], s.ysum[i] = sum, sx, sy
+			}
+		}
+	})
 	for ty := 0; ty < h/16; ty++ {
 		for tx := 0; tx < w/16; tx++ {
-			var sum, sx, sy int64
-			for y := ty * 16; y < ty*16+16; y++ {
-				for x := tx * 16; x < tx*16+16; x++ {
-					v := int64(plane[y*w+x])
-					sum += v
-					sx += int64(x) * v
-					sy += int64(y) * v
-				}
-			}
 			i := (ty+1)*cols + tx + 1
-			s.sum[i] = sum + s.sum[i-1] + s.sum[i-cols] - s.sum[i-cols-1]
-			s.xsum[i] = sx + s.xsum[i-1] + s.xsum[i-cols] - s.xsum[i-cols-1]
-			s.ysum[i] = sy + s.ysum[i-1] + s.ysum[i-cols] - s.ysum[i-cols-1]
+			s.sum[i] += s.sum[i-1] + s.sum[i-cols] - s.sum[i-cols-1]
+			s.xsum[i] += s.xsum[i-1] + s.xsum[i-cols] - s.xsum[i-cols-1]
+			s.ysum[i] += s.ysum[i-1] + s.ysum[i-cols] - s.ysum[i-cols-1]
 		}
 	}
 	return s
@@ -115,7 +141,18 @@ func selectLargeGradients(plane []byte, w, h, quality int) []largeGradient {
 	if w < 16 || h < 16 {
 		return blocks
 	}
-	stats := makeGradientTileSums(plane, w, h)
+	stats := makeGradientTileSums(plane, w, h, false)
+	for y := 0; y < h; y += 256 {
+		for x := 0; x < w; x += 256 {
+			blocks = append(blocks, selectLargeGradientTile(plane, w, h, quality, &stats, x, y)...)
+		}
+	}
+	return blocks
+}
+
+// selectLargeGradientTile fits the quadtree of one 256x256 tile.
+func selectLargeGradientTile(plane []byte, w, h, quality int, stats *gradientTileSums, tx, ty int) []largeGradient {
+	var blocks []largeGradient
 	// Conservative error limits preserve small features. Each accepted 16x16
 	// block replaces at least four 8x8 glyphs, offsetting its metadata.
 	limit, maxError := 5.0, 10
@@ -179,11 +216,7 @@ func selectLargeGradients(plane []byte, w, h, quality int) []largeGradient {
 			}
 		}
 	}
-	for y := 0; y < h; y += 256 {
-		for x := 0; x < w; x += 256 {
-			visit(x, y, 256)
-		}
-	}
+	visit(tx, ty, 256)
 	return blocks
 }
 
@@ -232,7 +265,9 @@ func unpackLargeGradients(data []byte) ([]byte, []largeGradient, error) {
 		p := raw[i*gradientRecordSize:]
 		b := &blocks[i]
 		x, y := binary.BigEndian.Uint32(p), binary.BigEndian.Uint32(p[4:])
-		if uint64(x) > maxImagePixels || uint64(y) > maxImagePixels { return nil,nil,fmt.Errorf("invalid gradient coordinates") }
+		if uint64(x) > maxImagePixels || uint64(y) > maxImagePixels {
+			return nil, nil, fmt.Errorf("invalid gradient coordinates")
+		}
 		b.x = int(x)
 		b.y = int(y)
 		b.size = int(p[8])

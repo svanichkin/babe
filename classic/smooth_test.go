@@ -53,6 +53,7 @@ func TestSmoothDecode(t *testing.T) {
 			}
 			e := NewEncoder()
 			e.SparseCorners, e.CornerMinSize = true, 5
+			e.LegacySmooth = true
 			data, err := e.Encode(img, q, bw)
 			if err != nil {
 				t.Fatal(err)
@@ -97,6 +98,7 @@ func TestSmoothPreservesSmallGlyphPixels(t *testing.T) {
 	}
 	e := NewEncoder()
 	e.SparseCorners, e.CornerMinSize = true, 5
+	e.LegacySmooth = true
 	data, err := e.Encode(img, 10, false)
 	if err != nil {
 		t.Fatal(err)

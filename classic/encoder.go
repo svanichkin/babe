@@ -36,6 +36,12 @@ type Encoder struct {
 	// gradient patches that share boundary vertices.
 	LargeGradients bool
 
+	// Lossy SparseCorners and LargeGradients images with 4x4 or larger
+	// macroblocks are stored as BSM1, which context-codes the same data.
+	// LegacySmooth writes the earlier BGG3/BGC2/BGC3 wrappers instead; both
+	// decode to identical pixels.
+	LegacySmooth bool
+
 	yPlane      []uint8
 	cbPlane     []uint8
 	crPlane     []uint8
@@ -48,6 +54,7 @@ type Encoder struct {
 	ch [3]encoderChannelScratch
 
 	packer payloadPacker
+	smooth smoothScratch
 }
 
 func NewEncoder() *Encoder {
@@ -151,17 +158,7 @@ func (e *Encoder) encodeChannelReuse(plane []uint8, stride, w4, h4, fullW, fullH
 
 	var blockCount uint32
 	height := h4
-	spread := allowedMacroSpreadForQuality(encQuality)
-	if encQuality != 100 && smallBlock == 1 && macroBlock == 8 && (stride%4 != 0 || height%4 != 0) {
-		// The fallback geometry is constant across qualities, so its threshold
-		// must vary continuously rather than reset at the usual block bands.
-		rem := 100*256 - qualityProfileFP
-		spread = 256 + int32(int64(rem)*int64(rem)*255/(100*100*256))
-	}
-	if encQuality == 0 {
-		// Every possible 8-bit spread fits; q0 uses the existing 8x8 blocks.
-		spread = 256 * 256
-	}
+	spread := channelMacroSpread(stride, height)
 
 	if useMacro && smallBlock == 1 && macroBlock == 2 {
 		// Specialized hot path for the most common setting (quality >= 80):
@@ -343,6 +340,22 @@ func (e *Encoder) encodeChannelReuse(plane []uint8, stride, w4, h4, fullW, fullH
 	return blockCount, scratch.sizeBuf.Bytes(), scratch.typeBuf.Bytes(), scratch.patternBuf.Bytes(), scratch.fgVals, scratch.bgVals, nil
 }
 
+// channelMacroSpread is the level spread below which a macroblock is coded whole.
+func channelMacroSpread(stride, height int) int32 {
+	spread := allowedMacroSpreadForQuality(encQuality)
+	if encQuality != 100 && smallBlock == 1 && macroBlock == 8 && (stride%4 != 0 || height%4 != 0) {
+		// The fallback geometry is constant across qualities, so its threshold
+		// must vary continuously rather than reset at the usual block bands.
+		rem := 100*256 - qualityProfileFP
+		spread = 256 + int32(int64(rem)*int64(rem)*255/(100*100*256))
+	}
+	if encQuality == 0 {
+		// Every possible 8-bit spread fits; q0 uses the existing 8x8 blocks.
+		spread = 256 * 256
+	}
+	return spread
+}
+
 func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, error) {
 	codecStateMu.Lock()
 	defer codecStateMu.Unlock()
@@ -399,7 +412,7 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 	var sharedMesh *sharedGradientMesh
 	if e.LargeGradients && qualityProfileFP < 75*256 && encQuality != 100 {
 		sharedMesh = makeSharedGradientMesh(e.yPlane, w, h)
-		gradients = selectSharedGradients(e.yPlane, w, h, encQuality, sharedMesh)
+		gradients = selectSharedGradientsParallel(e.yPlane, w, h, encQuality, sharedMesh, e.Parallel)
 	}
 	if qualityProfileFP < 35*256 {
 		remaining := 35*256 - qualityProfileFP
@@ -425,6 +438,10 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 		channelsMask |= channelFlagCb | channelFlagCr
 	}
 
+	// BSM1 pays off for 4x4 and larger macroblocks. The 2x2 geometry of high
+	// qualities has so many blocks that context modelling would slow decoding
+	// severalfold; it keeps the BRC1 wrappers.
+	smooth := (e.SparseCorners || e.LargeGradients) && encQuality != 100 && !e.LegacySmooth && macroBlock >= 4
 	e.raw.Reset()
 	e.bw.Reset(&e.raw)
 
@@ -470,6 +487,20 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 		channels[1] = encodeChannelSpec{id: chCb, plane: e.cbPlane}
 		channels[2] = encodeChannelSpec{id: chCr, plane: e.crPlane}
 		chCount = 3
+	}
+
+	// The -smooth encoder builds blocks directly unless an experimental
+	// pattern option or the 2x2 fast path requires the serialized streams.
+	if smooth && useMacro && smallBlock <= 4 && !encodeDither && !encodePattern2 {
+		if err := e.bw.Flush(); err != nil {
+			return nil, err
+		}
+		header := append([]byte(nil), e.raw.Bytes()...)
+		geo := newSmoothGeometry(w, h, smallBlock, macroBlock)
+		if comp, err := e.encodeSmoothDirect(header, channels[:chCount], w, geo, &sourceCorners, gradients, sharedMesh); err == nil {
+			e.comp = comp
+			return e.comp, nil
+		}
 	}
 
 	if e.Parallel {
@@ -581,6 +612,12 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 		return nil, err
 	}
 
+	if smooth {
+		if comp, err := e.packSmoothRaw(e.raw.Bytes(), &sourceCorners, gradients, sharedMesh); err == nil {
+			e.comp = comp
+			return e.comp, nil
+		}
+	}
 	comp, err := e.packer.compress(e.raw.Bytes(), e.comp[:0], e.Parallel)
 	if err != nil {
 		return nil, err
@@ -602,6 +639,85 @@ func (e *Encoder) Encode(img image.Image, quality int, bwmode bool) ([]byte, err
 	}
 	e.comp = comp
 	return e.comp, nil
+}
+
+// packSmooth stores the encoded image as BSM1. An error means the data does not
+// fit its model, and the caller falls back to the BGG/BGC wrappers.
+func (e *Encoder) packSmooth(header []byte, blocks [][]smoothBlock, sourceCorners *cornerGrid, gradients []largeGradient, mesh *sharedGradientMesh) ([]byte, error) {
+	img := smoothImage{header: header, blocks: blocks, gradients: gradients, mesh: mesh}
+	if e.SparseCorners {
+		img.source = sourceCorners
+		img.minSize = e.CornerMinSize
+		if img.minSize <= 0 {
+			img.minSize = 4
+		}
+	}
+	steps := [3]int{e.ch[chY].quantStep, e.ch[chCb].quantStep, e.ch[chCr].quantStep}
+	out, err := packSmooth(&e.smooth, img, steps, e.Parallel)
+	if err != nil {
+		out, err = packSmooth(&e.smooth, img, [3]int{1, 1, 1}, e.Parallel)
+	}
+	return out, err
+}
+
+// encodeSmoothDirect encodes all channels' blocks in parallel bands, without
+// the intermediate BRC1 streams, and stores them as BSM1.
+func (e *Encoder) encodeSmoothDirect(header []byte, channels []encodeChannelSpec, w int, geo smoothGeometry, sourceCorners *cornerGrid, gradients []largeGradient, mesh *sharedGradientMesh) ([]byte, error) {
+	type job struct {
+		c       int
+		rows    [2]int
+		stripes bool
+		blocks  []smoothBlock
+		err     error
+	}
+	var jobs []*job
+	for c := range channels {
+		for _, rows := range geo.bandRows {
+			jobs = append(jobs, &job{c: c, rows: rows})
+		}
+		if geo.hasStripes {
+			jobs = append(jobs, &job{c: c, stripes: true})
+		}
+	}
+	spread := channelMacroSpread(w, geo.h4)
+	runParallel(len(jobs), e.Parallel, func(i int) {
+		j := jobs[i]
+		ch := channels[j.c]
+		scratch := &e.ch[ch.id]
+		j.blocks, j.err = encodeSmoothBlocks(ch.plane, w, geo, j.rows, j.stripes, scratch.quantStep, scratch.solidThreshold, spread, nil)
+	})
+	blocks := make([][]smoothBlock, len(channels))
+	for _, j := range jobs {
+		if j.err != nil {
+			return nil, j.err
+		}
+		blocks[j.c] = append(blocks[j.c], j.blocks...)
+	}
+	return e.packSmooth(header, blocks, sourceCorners, gradients, mesh)
+}
+
+// packSmoothRaw stores an already serialized BRC1 payload as BSM1.
+func (e *Encoder) packSmoothRaw(raw []byte, sourceCorners *cornerGrid, gradients []largeGradient, mesh *sharedGradientMesh) ([]byte, error) {
+	h, err := parsePayloadHeader(raw)
+	if err != nil {
+		return nil, err
+	}
+	segs, err := smoothChannelSegments(raw, h)
+	if err != nil {
+		return nil, err
+	}
+	geo := newSmoothGeometry(h.w, h.h, h.small, h.macro)
+	blocks := make([][]smoothBlock, h.channels)
+	errs := make([]error, h.channels)
+	runParallel(h.channels, e.Parallel, func(c int) {
+		blocks[c], errs[c] = parseSmoothChannel(segs[c], geo)
+	})
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return e.packSmooth(raw[:payloadHeaderSize], blocks, sourceCorners, gradients, mesh)
 }
 
 // EncodeTo encodes the image and writes the compressed result to w.

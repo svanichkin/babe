@@ -154,6 +154,34 @@ func redundantGradientCorners(w, h int, source cornerGrid, gradients []largeGrad
 }
 
 func packSparseCorners(base, raw []byte, source cornerGrid, minSize int, gradients []largeGradient, parallel bool) ([]byte, error) {
+	records, err := sparseCornerRecords(raw, source, minSize, gradients, parallel)
+	if err != nil {
+		return nil, err
+	}
+	w, h := source.width, source.height
+	compressed := encodeByteRangeInto(nil, records)
+	magic := sparseCornerMagic
+	if split := encodeSplitCornerRecords(records, source.cols); len(split) < len(compressed) {
+		compressed, magic = split, splitCornerMagic
+	}
+	out := make([]byte, 0, cornerHeaderSize+len(base)+len(compressed))
+	out = append(out, magic...)
+	out = append(out, byte(source.step))
+	out = binary.BigEndian.AppendUint32(out, uint32(w))
+	out = binary.BigEndian.AppendUint32(out, uint32(h))
+	out = binary.BigEndian.AppendUint32(out, uint32(len(base)))
+	out = binary.BigEndian.AppendUint32(out, uint32(len(compressed)))
+	hash := crc32.NewIEEE()
+	_, _ = hash.Write(base)
+	_, _ = hash.Write(records)
+	out = binary.BigEndian.AppendUint32(out, hash.Sum32())
+	out = append(out, base...)
+	return append(out, compressed...), nil
+}
+
+// sparseCornerRecords selects stored corner channels: one flag byte and three
+// residual bytes per node, as stored by BGC2.
+func sparseCornerRecords(raw []byte, source cornerGrid, minSize int, gradients []largeGradient, parallel bool) ([]byte, error) {
 	w, h := source.width, source.height
 	mask := raw[9]
 	pos := payloadHeaderSize
@@ -264,24 +292,7 @@ func packSparseCorners(base, raw []byte, source cornerGrid, minSize int, gradien
 			}
 		}
 	}
-	compressed := encodeByteRangeInto(nil, records)
-	magic := sparseCornerMagic
-	if split := encodeSplitCornerRecords(records, source.cols); len(split) < len(compressed) {
-		compressed, magic = split, splitCornerMagic
-	}
-	out := make([]byte, 0, cornerHeaderSize+len(base)+len(compressed))
-	out = append(out, magic...)
-	out = append(out, byte(source.step))
-	out = binary.BigEndian.AppendUint32(out, uint32(w))
-	out = binary.BigEndian.AppendUint32(out, uint32(h))
-	out = binary.BigEndian.AppendUint32(out, uint32(len(base)))
-	out = binary.BigEndian.AppendUint32(out, uint32(len(compressed)))
-	hash := crc32.NewIEEE()
-	_, _ = hash.Write(base)
-	_, _ = hash.Write(records)
-	out = binary.BigEndian.AppendUint32(out, hash.Sum32())
-	out = append(out, base...)
-	return append(out, compressed...), nil
+	return records, nil
 }
 
 func unpackSparseCornerImage(data []byte) ([]byte, *cornerGrid, error) {

@@ -223,6 +223,80 @@ one-byte size code (0 through 4 for the five sizes), followed by unsigned
 varints for x/16 and y/16. Delta-coded vertex bytes follow all block records.
 BGG1 and BGG2 remain readable. Older decoders cannot read BGG3.
 
+## BSM1 smooth container
+
+`BSM1` stores a lossy `-smooth` image: BRC1 glyph channels, optional selective
+corners (the BGC2 records) and optional shared-vertex gradients (as BGG3). It
+represents exactly the same data, so a decoder reconstructs identical pixels.
+The current encoder writes it for 4×4 and 8×8 macroblocks; the format also
+allows 2×2. Multibyte integers are big-endian.
+
+| Offset | Bytes | Meaning |
+|---:|---:|---|
+| 0 | 4 | ASCII `BSM1` |
+| 4 | 18 | BRC1 payload header; the lossless flag is invalid |
+| 22 | 4 | CRC32/IEEE of every following byte |
+| 26 | 1 | Flags: bit 0 gradients, bit 1 corners; other bits invalid |
+| 27 | 1 | Corner minimum block side |
+| 28 | 3 | Level step for Y, Cb, Cr (1–128) |
+| 31 | 4 | Gradient block count |
+| 35 | 1 | Stream count, followed by a 4-byte length per stream |
+
+The streams follow the lengths without padding: the gradient stream (if
+flagged); for each stored channel its band streams and then, if the image has
+right or bottom small-block stripes, its stripe stream; and for each stored
+channel a corner stream (if flagged). Band boundaries are derived from the
+image: `n = clamp(width×height / 2^18, 1, 16)`, limited to the number of
+macroblock rows, and band `i` covers macroblock rows
+`[rows×i/n, rows×(i+1)/n)`. Every stream is independent and decoded with fresh
+models, so streams can be processed in parallel; the stripe streams follow the
+main bands and may use their reconstruction.
+
+### Binary range coding
+
+Each stream is coded with an adaptive binary range coder. The range starts at
+`0xffffffff`; for a bit with model probability `p` of a one (16 bits, 1–65535),
+`bound = (range >> 16) × p`. A one keeps `[0, bound)`, a zero the remainder.
+While the range is below `2^24` it shifts by eight, with LZMA carry handling.
+The encoder emits no initial cache byte and terminates with five shifts. A
+model starts at `p = 32768` and observation count `n = 0`; after each bit it
+moves toward 0 or 65535 by `(distance × r) >> 16`, where
+`r = floor(131072 / (2n+3))` and `n` saturates at 80. Equiprobable bits halve
+the range. A non-negative integer is coded as a class (0, 1, or `k` for
+`[2^(k-1), 2^k)`) in unary with one model per position (at most 17), then the
+bits below its leading one: the two highest with per-class models, the rest
+equiprobable. A signed value is a zero flag, a sign and the magnitude minus one.
+
+### Glyph channels
+
+Levels are coded as indices `k` of `min(255, k×step)`; a file whose levels
+are not of that form uses step 1. Blocks are visited in BRC1 order. For each
+macroblock group: its size flag (context: the left and upper groups' flags,
+or unavailable above the band), then each block: its type bit unless 1×1
+(context: block kind and the type of the cells to the left and above), its
+foreground index and, for a two-tone block, its contrast `fg - bg - 1` and its
+pattern bits in raster order. Foregrounds are predicted from the reconstructed
+pixels along the block's top and left edges (the mean, or the mean of the
+brighter half for a two-tone block), falling back to a median edge predictor
+over neighbouring block levels. Each pattern bit's context is its size class,
+position parity and the left, upper, upper-left and upper-right states, where
+a state is the decoded bit inside the block, whether the reconstructed pixel
+outside it is nearer the foreground than the background, or unavailable.
+Pattern blocks must contain both levels. The decoder rebuilds BRC1 streams
+only where needed; the reconstructed planes equal BRC1 decoding.
+
+### Corners and gradients
+
+Each corner channel is coded separately in node order. Eligible nodes follow
+BGC2 (a neighbouring block side of at least the stored minimum; luma nodes
+covered by gradients are excluded) and code a presence flag. The context is
+derived from a median prediction from the neighbouring final corner values,
+compared with the glyph baseline, and from the neighbours' flags. A stored
+value is coded as the sign and the magnitude minus one of its BGC2 residual. Gradients code the 256×256 tile
+quadtree in raster order (one leaf flag per node that fits, per level), then
+every used 16-pixel vertex in raster order as a signed difference from a
+median prediction over its decoded left and upper vertices.
+
 ## Quantization
 
 At qualities 0–99 quantization happens before entropy coding, so the decoder needs no quality or

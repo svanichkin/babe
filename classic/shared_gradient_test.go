@@ -149,6 +149,7 @@ func TestVeryLargeGradientBlocks(t *testing.T) {
 		for _, q := range []int{0, 10, 50} {
 			e := NewEncoder()
 			e.LargeGradients, e.SparseCorners, e.CornerMinSize = true, true, 5
+			e.LegacySmooth = true
 			data, err := e.Encode(img, q, false)
 			if err != nil {
 				t.Fatal(err)
@@ -220,7 +221,7 @@ func TestGradientTileMomentsExact(t *testing.T) {
 		state = state*1664525 + 1013904223
 		plane[i] = byte(state >> 24)
 	}
-	sums := makeGradientTileSums(plane, w, h)
+	sums := makeGradientTileSums(plane, w, h, false)
 	for _, b := range []largeGradient{{x: 0, y: 0, size: 256}, {x: 16, y: 16, size: 128}, {x: 240, y: 192, size: 64}, {x: 272, y: 240, size: 32}, {x: 288, y: 256, size: 16}} {
 		var want, wx, wy float64
 		for y := 0; y < b.size; y++ {
