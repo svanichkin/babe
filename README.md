@@ -92,22 +92,26 @@ It leaves luma glyphs of 4×4 and smaller unchanged during smoothing, and uses
 each color channel's block sizes when reconstructing larger glyphs. A selected
 large gradient replaces the luma representation for its entire area. It can soften real
 low-contrast details. The option must also be specified when decoding; an
-existing lossy file must contain stored corners (BSM1, BGC1, BGC2 or BGC3). Lossless q100
+existing lossy file must contain stored corners (BSM2, BSM1, BGC1, BGC2 or BGC3). Lossless q100
 is unchanged. In Go, set `Encoder.SparseCorners = true`,
 `Encoder.CornerMinSize = 5` and `Decoder.Smooth = true`.
 
-Below about quality 73 (4×4 and 8×8 macroblocks), `-smooth` images use the
-`BSM1` container. It stores the same glyphs, corners and gradients as the
+For 4×4 and 8×8 macroblocks, `-smooth` images use the
+`BSM2` container. It reconstructs the same glyphs, corners and gradients as the
 earlier wrappers, but codes them with adaptive binary range coding and
 context models: pattern bits use their neighbours and the reconstructed
 pixels across the glyph border, levels are predicted from neighbouring
 pixels, and corner flags depend on whether the decoded neighbourhood already
-predicts the corner. Decoded pixels are identical to the earlier format; files
-are typically 12–43% smaller. Channels are coded in independent horizontal
+predicts the corner. BSM2 omits luma glyphs beneath selected gradients: the
+encoder skips their analysis and the decoder derives their baseline from the
+gradient. Corner eligibility uses the block partition directly, avoiding full
+size maps and an intermediate BRC1 payload. Decoded pixels remain identical.
+Channels are coded in independent horizontal
 bands, so encoding and decoding run in parallel. Higher qualities (2×2
 macroblocks) keep the BRC1-based wrappers, which decode faster there. Set
 `Encoder.LegacySmooth` to write the earlier wrappers at every quality; all of
-them remain readable. See [the BSM1 layout](docs/BRC1.md#bsm1-smooth-container).
+them and BSM1 remain readable. See [the BSM2 layout](docs/BRC1.md#bsm2-smooth-container)
+and [measurements against BSM1](docs/performance.md#implicit-gradient-glyphs-and-direct-corner-layout).
 
 The earlier selective corners use BGC2 or the compact BGC3 representation,
 whichever is smaller. BGC3 separates flags and per-channel residuals for range
@@ -120,10 +124,10 @@ areas with excessive error into smaller candidates, leaving details to normal
 glyphs. Neighbouring gradient blocks share boundary vertices on a 16-pixel grid,
 including intermediate vertices where blocks of different sizes meet. The
 decoder interpolates each block using its boundary vertices; small mismatches
-against ordinary glyphs are faded into the gradient. This experimental representation uses `BSM1` (or a `BGG3` wrapper) and is decoded
-automatically; existing BABE decoders cannot read it. It keeps constant base
-glyphs under the gradients, so it is a prototype rather than a fully compact
-block format, and can increase file size. Gradient selection currently uses
+against ordinary glyphs are faded into the gradient. This experimental representation uses `BSM2` (or a `BGG3` wrapper) and is decoded
+automatically; older BABE decoders cannot read BSM2. The BGG3 fallback still
+stores constant base glyphs under gradients; BSM2 makes those glyphs implicit.
+Stored vertices can still increase file size relative to encoding without `-smooth`. Gradient selection currently uses
 fixed error limits, not an exact rate–distortion search. The experiment is
 disabled for lossless q100. In Go, enable it with `Encoder.LargeGradients`.
 

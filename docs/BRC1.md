@@ -3,7 +3,9 @@
 The encoder uses byte-symbol range coding for each of the five streams in each
 channel. Each block of up to 32 KiB gets a static frequency table. If the result
 is not smaller than the original stream, it stores raw bytes. Streams of five
-bytes or fewer are stored raw immediately. New files always use BRC1.
+bytes or fewer are stored raw immediately. Lossy `-smooth` images with 4×4 or
+8×8 macroblocks use the BSM2 container described below; other images use BRC1
+and its optional corner/gradient wrappers.
 
 Encoding and decoding process independent streams with up to four workers and
 reuse output buffers. Payloads smaller than 16 KiB stay serial. Setting the
@@ -223,17 +225,19 @@ one-byte size code (0 through 4 for the five sizes), followed by unsigned
 varints for x/16 and y/16. Delta-coded vertex bytes follow all block records.
 BGG1 and BGG2 remain readable. Older decoders cannot read BGG3.
 
-## BSM1 smooth container
+## BSM2 smooth container
 
-`BSM1` stores a lossy `-smooth` image: BRC1 glyph channels, optional selective
+`BSM2` stores a lossy `-smooth` image: BRC1 glyph channels, optional selective
 corners (the BGC2 records) and optional shared-vertex gradients (as BGG3). It
-represents exactly the same data, so a decoder reconstructs identical pixels.
+reconstructs identical pixels. Unlike BSM1, it omits luma glyphs beneath
+gradients; their baseline is implicit. BSM1 remains readable with explicit
+glyphs and its original context-availability rules.
 The current encoder writes it for 4×4 and 8×8 macroblocks; the format also
 allows 2×2. Multibyte integers are big-endian.
 
 | Offset | Bytes | Meaning |
 |---:|---:|---|
-| 0 | 4 | ASCII `BSM1` |
+| 0 | 4 | ASCII `BSM2` (or legacy `BSM1`) |
 | 4 | 18 | BRC1 payload header; the lossless flag is invalid |
 | 22 | 4 | CRC32/IEEE of every following byte |
 | 26 | 1 | Flags: bit 0 gradients, bit 1 corners; other bits invalid |
@@ -284,6 +288,28 @@ a state is the decoded bit inside the block, whether the reconstructed pixel
 outside it is nearer the foreground than the background, or unavailable.
 Pattern blocks must contain both levels. The decoder rebuilds BRC1 streams
 only where needed; the reconstructed planes equal BRC1 decoding.
+
+### Implicit luma glyphs in BSM2
+
+The gradient stream is decoded before the glyph channels. Each gradient leaf
+covers whole luma macroblocks. These groups have **no size, type, level, contrast
+or pattern symbols**, and do not update the corresponding entropy models.
+Chroma groups remain explicit. Gradients require a macroblock side of 4 or 8.
+
+For a leaf `(x, y, size)`, interpolate its shared mesh at
+`(x + size/2, y + size/2)` and quantize that byte with the stored Y step:
+`min(255, ((value + step/2) / step) * step)` using integer division.
+Before processing any bands, fill its reconstructed baseline with this level;
+mark all its macroblocks as large and all its cells as available solid blocks
+with that foreground index and zero contrast. Thus even a gradient cell later
+in traversal order is available to neighbouring contexts, subject to the usual
+band boundary restrictions. BSM1 does not preseed these cells.
+
+During each band traversal, skip gradient-covered groups in runs, setting the
+band's last foreground index to the implicit level. Decoders that need BRC1
+streams synthesize solid macroblocks in the original positions; other decoders
+need only the seeded plane and partition. Ordinary glyphs and corner baselines
+therefore retain the old reconstruction without redundant stored glyphs.
 
 ### Corners and gradients
 

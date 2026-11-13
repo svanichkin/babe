@@ -8,12 +8,12 @@ import (
 	"sync"
 )
 
-// BSM1 stores a complete -smooth image: the BRC1 glyph channels, the selected
+// BSM2 stores a complete -smooth image: the BRC1 glyph channels, the selected
 // corner residuals and the shared-vertex gradients, each context-modelled with
 // adaptive binary range coding. It describes exactly the same data as
 // BGG3(BGC2/BGC3(BRC1)), so decoded pixels are identical; only storage differs.
 //
-//	0  "BSM1"
+//	0  "BSM2"
 //	4  BRC1 payload header (18 bytes)
 //	22 CRC32 of every following byte (4)
 //	26 flags: bit 0 gradients, bit 1 corners (1)
@@ -23,10 +23,12 @@ import (
 //	35 stream count (1), then one 4-byte length per stream, then the streams:
 //	   gradients (if any), per channel its main bands then stripes (if any),
 //	   and per channel its corners (if any).
-const smoothMagic = "BSM1"
+const smoothMagic = "BSM2"
+const legacySmoothMagic = "BSM1"
 const smoothHeaderSize = 36
 
 type smoothImage struct {
+	skip      *smoothGradientPlan
 	header    []byte          // BRC1 payload header
 	blocks    [][]smoothBlock // per stored channel, in coding order
 	gradients []largeGradient
@@ -48,23 +50,36 @@ func smoothChannelSegments(raw []byte, h payloadHeader) ([][]byte, error) {
 	return segs, nil
 }
 
-// sizesForCorners returns per-pixel block sizes for each stored channel.
-func smoothSizeMaps(scratch *smoothScratch, segs [][]byte, w, h int) [][]byte {
-	maps := make([][]byte, len(segs))
-	for c := range maps {
-		scratch.sizes[c] = grow(scratch.sizes[c], w*h)
-		maps[c] = scratch.sizes[c]
-	}
-	processStreams(len(segs), w*h, true, func(c int) {
-		fillGlyphBlockSizes(maps[c], segs[c], w, h)
-	})
-	return maps
+// smoothSizeView reads the partition directly from its macroblock flags.
+// It replaces a full width*height size map for corner eligibility checks.
+type smoothSizeView struct {
+	geo smoothGeometry
+	big []uint8
 }
 
-func cornerEligible(sizes []byte, w, h, x, y, minSize int) bool {
+func (v smoothSizeView) at(x, y int) int {
+	g := &v.geo
+	if uint(x) >= uint(g.w4) || uint(y) >= uint(g.h4) {
+		return 0
+	}
+	if x < g.fullW && y < g.fullH && v.big[(y/g.macro)*g.groupsX+x/g.macro] != 0 {
+		return g.macro
+	}
+	return g.small
+}
+
+func smoothSizeViews(states []*smoothChannelState) []smoothSizeView {
+	views := make([]smoothSizeView, len(states))
+	for c, st := range states {
+		views[c] = smoothSizeView{geo: st.geo, big: st.groupBig}
+	}
+	return views
+}
+
+func cornerEligible(sizes smoothSizeView, w, h, x, y, minSize int) bool {
 	for yy := max(0, y-1); yy <= y; yy++ {
 		for xx := max(0, x-1); xx <= x; xx++ {
-			if int(sizes[yy*w+xx]) >= minSize {
+			if sizes.at(xx, yy) >= minSize {
 				return true
 			}
 		}
@@ -113,7 +128,7 @@ func cornerBucket(d int) int {
 // between a prediction from decoded neighbours and the glyph baseline selects
 // the contexts: it estimates whether, and in which direction, a node needs a
 // stored value.
-func codeCornerChannel(sc *symCoder, c int, records, flags []byte, w, h, minSize int, sizes, rec []byte, redundant []bool) error {
+func codeCornerChannel(sc *symCoder, c int, records, flags []byte, w, h, minSize int, sizes smoothSizeView, rec []byte, redundant []bool) error {
 	const step = 8
 	cols, rows := (w-1+step-1)/step+1, (h-1+step-1)/step+1
 	m := &cornerModels{}
@@ -210,7 +225,7 @@ func codeCornerChannel(sc *symCoder, c int, records, flags []byte, w, h, minSize
 }
 
 // codeCorners codes each stored channel's corners as an independent stream.
-func codeCorners(coders []*symCoder, records []byte, w, h, minSize int, sizes, recs [][]byte, redundant []bool, parallel bool) error {
+func codeCorners(coders []*symCoder, records []byte, w, h, minSize int, sizes []smoothSizeView, recs [][]byte, redundant []bool, parallel bool) error {
 	n := len(records) / 4
 	flags := make([][]byte, len(coders))
 	errs := make([]error, len(coders))
@@ -403,6 +418,9 @@ func packSmooth(scratch *smoothScratch, img smoothImage, steps [3]int, parallel 
 		blocks := img.blocks[c]
 		scratch.states[c] = resetSmoothChannelState(scratch.states[c], geo, steps[c])
 		states[c] = scratch.states[c]
+		if c == 0 {
+			states[c].seedGradients(img.skip)
+		}
 		k := 0
 		for b, rows := range geo.bandRows {
 			start := k
@@ -445,23 +463,9 @@ func packSmooth(scratch *smoothScratch, img smoothImage, steps [3]int, parallel 
 		streams = append(streams, j.out)
 	}
 
-	// The BRC1 payload is reconstructed for the checksum and block sizes.
-	var channelRaw [3][]byte
-	runParallel(h.channels, parallel, func(c int) {
-		channelRaw[c] = appendSmoothChannel(nil, [][]smoothBlock{img.blocks[c]}, geo)
-	})
-	raw := append([]byte(nil), img.header[:payloadHeaderSize]...)
-	for c := 0; c < h.channels; c++ {
-		raw = append(raw, channelRaw[c]...)
-	}
-
 	var records []byte
 	if img.source != nil {
-		segs, err := smoothChannelSegments(raw, h)
-		if err != nil {
-			return nil, err
-		}
-		sizes := smoothSizeMaps(scratch, segs, h.w, h.h)
+		sizes := smoothSizeViews(states)
 		redundant := redundantCornerMask(h.w, h.h, img.gradients)
 		recs := make([][]byte, h.channels)
 		coders := make([]*symCoder, h.channels)
@@ -508,7 +512,7 @@ func packSmooth(scratch *smoothScratch, img smoothImage, steps [3]int, parallel 
 
 // cornerRecordsFromPlanes selects stored corners exactly as
 // sparseCornerRecords, from already reconstructed glyph planes.
-func cornerRecordsFromPlanes(source *cornerGrid, planes, sizes [][]byte, minSize int, redundant []bool) []byte {
+func cornerRecordsFromPlanes(source *cornerGrid, planes [][]byte, sizes []smoothSizeView, minSize int, redundant []bool) []byte {
 	w, h := source.width, source.height
 	records := make([]byte, len(source.values)*4)
 	for c := range planes {
@@ -530,7 +534,7 @@ func cornerRecordsFromPlanes(source *cornerGrid, planes, sizes [][]byte, minSize
 
 // encodeSmoothBlocks encodes macro-group rows [rows[0], rows[1]), or the
 // right and bottom stripes, exactly as encodeChannelReuse serializes them.
-func encodeSmoothBlocks(plane []byte, stride int, geo smoothGeometry, rows [2]int, stripes bool, step, solidThreshold int, spread int32, out []smoothBlock) ([]smoothBlock, error) {
+func encodeSmoothBlocks(plane []byte, stride int, geo smoothGeometry, rows [2]int, stripes bool, step, solidThreshold int, spread int32, skip *smoothGradientPlan, out []smoothBlock) ([]smoothBlock, error) {
 	add := func(x, y, size int) error {
 		fg, bg, pattern, bits, err := encodeChannelBlockBits(plane, stride, geo.h4, x, y, size, size, step, solidThreshold)
 		if err != nil {
@@ -563,6 +567,13 @@ func encodeSmoothBlocks(plane []byte, stride int, geo smoothGeometry, rows [2]in
 	for gy := rows[0]; gy < rows[1]; gy++ {
 		my := gy * geo.macro
 		for mx := 0; mx < geo.fullW; mx += geo.macro {
+			if skip != nil {
+				run := skip.runs[gy*geo.groupsX+mx/geo.macro]
+				if run.length != 0 {
+					mx += (int(run.length) - 1) * geo.macro
+					continue
+				}
+			}
 			if useMacro && canUseBigBlockChannel(plane, stride, geo.h4, mx, my, blockSpread(spread, mx, my)) {
 				if err := add(mx, my, geo.macro); err != nil {
 					return nil, err
@@ -590,7 +601,7 @@ func redundantCornerMask(w, h int, gradients []largeGradient) []bool {
 	return redundantGradientCorners(w, h, cornerGrid{width: w, height: h, step: step, cols: cols, values: make([][3]byte, cols*rows)}, gradients)
 }
 
-// smoothDecoded is a decoded BSM1 image. Either raw holds the complete BRC1
+// smoothDecoded is a decoded BSM1/BSM2 image. Either raw holds the complete BRC1
 // payload, or planes hold the reconstructed channels and segments hold each
 // channel's block count and macroblock size stream, as a BRC1 segment prefix.
 type smoothDecoded struct {
@@ -603,14 +614,14 @@ type smoothDecoded struct {
 	corners   *cornerGrid
 }
 
-// unpackSmooth decodes a BSM1 image. The BRC1 payload is rebuilt (into dst)
+// unpackSmooth decodes a BSM1/BSM2 image. The BRC1 payload is rebuilt (into dst)
 // only when needRaw is set or the geometry requires it.
 func unpackSmooth(scratch *smoothScratch, data, dst []byte, needRaw, parallel bool) (smoothDecoded, error) {
 	var res smoothDecoded
 	fail := func(format string, args ...any) (smoothDecoded, error) {
 		return smoothDecoded{}, fmt.Errorf("smooth container: "+format, args...)
 	}
-	if len(data) < smoothHeaderSize || string(data[:4]) != smoothMagic {
+	if len(data) < smoothHeaderSize || (string(data[:4]) != smoothMagic && string(data[:4]) != legacySmoothMagic) {
 		return fail("invalid header")
 	}
 	header := data[4 : 4+payloadHeaderSize]
@@ -619,7 +630,7 @@ func unpackSmooth(scratch *smoothScratch, data, dst []byte, needRaw, parallel bo
 	if err != nil {
 		return fail("%v", err)
 	}
-	if h.small > 4 || h.macro > 8 || header[9]&channelFlagLossless != 0 {
+	if (h.small != 1 && h.small != 2 && h.small != 4) || (h.macro != 2 && h.macro != 4 && h.macro != 8) || header[9]&channelFlagLossless != 0 {
 		return fail("unsupported block sizes")
 	}
 	if crc32.ChecksumIEEE(data[26:]) != binary.BigEndian.Uint32(data[22:]) {
@@ -640,6 +651,9 @@ func unpackSmooth(scratch *smoothScratch, data, dst []byte, needRaw, parallel bo
 		}
 	}
 	gradientCount := int(binary.BigEndian.Uint32(data[31:]))
+	if gradientCount < 0 || gradientCount > (h.w/16)*(h.h/16) || (gradientCount == 0) != (flags&1 == 0) || (flags&1 != 0 && h.macro < 4) {
+		return fail("invalid gradient count or geometry")
+	}
 	streamCount := int(data[35])
 	geo := newSmoothGeometry(h.w, h.h, h.small, h.macro)
 	perChannel := len(geo.bandRows)
@@ -682,6 +696,11 @@ func unpackSmooth(scratch *smoothScratch, data, dst []byte, needRaw, parallel bo
 		}
 	}
 
+	var skip *smoothGradientPlan
+	if string(data[:4]) == smoothMagic && len(res.gradients) != 0 {
+		skip = makeSmoothGradientPlan(geo, res.gradients, res.mesh, steps[0])
+	}
+
 	type job struct {
 		c, band int
 		stripes bool
@@ -695,6 +714,9 @@ func unpackSmooth(scratch *smoothScratch, data, dst []byte, needRaw, parallel bo
 	for c := 0; c < h.channels; c++ {
 		scratch.states[c] = resetSmoothChannelState(scratch.states[c], geo, steps[c])
 		states[c] = scratch.states[c]
+		if c == 0 {
+			states[c].seedGradients(skip)
+		}
 		for b := range geo.bandRows {
 			jobs = append(jobs, &job{c: c, band: b, src: streams[next]})
 			next++
@@ -784,7 +806,7 @@ func unpackSmooth(scratch *smoothScratch, data, dst []byte, needRaw, parallel bo
 		const step = 8
 		cols, rows := (h.w-1+step-1)/step+1, (h.h-1+step-1)/step+1
 		records := make([]byte, cols*rows*4)
-		sizes := smoothSizeMaps(scratch, segs, h.w, h.h)
+		sizes := smoothSizeViews(states)
 		recs := make([][]byte, h.channels)
 		coders := make([]*symCoder, h.channels)
 		for c := range recs {

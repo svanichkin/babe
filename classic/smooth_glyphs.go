@@ -76,14 +76,15 @@ func newLevelMap(step int) levelMap {
 func (m *levelMap) valid(v byte) bool { return m.lvl[m.idx[v]] == v }
 
 type smoothChannelState struct {
-	geo      smoothGeometry
-	levels   levelMap
-	groupBig []uint8
-	cellType []uint8
-	cellFg   []uint8
-	cellCon  []uint8
-	cellDone []bool
-	rec      []uint8
+	gradients *smoothGradientPlan
+	geo       smoothGeometry
+	levels    levelMap
+	groupBig  []uint8
+	cellType  []uint8
+	cellFg    []uint8
+	cellCon   []uint8
+	cellDone  []bool
+	rec       []uint8
 }
 
 func grow[T any](s []T, n int) []T {
@@ -102,6 +103,7 @@ func resetSmoothChannelState(st *smoothChannelState, geo smoothGeometry, step in
 	}
 	n := geo.cellsX * geo.cellsY
 	st.geo, st.levels = geo, newLevelMap(step)
+	st.gradients = nil
 	st.groupBig = grow(st.groupBig, geo.groupsX*geo.groupsY)
 	st.cellType, st.cellFg, st.cellCon = grow(st.cellType, n), grow(st.cellFg, n), grow(st.cellCon, n)
 	st.cellDone = grow(st.cellDone, n)
@@ -110,11 +112,10 @@ func resetSmoothChannelState(st *smoothChannelState, geo smoothGeometry, step in
 	return st
 }
 
-// smoothScratch keeps BSM1 buffers between images.
+// smoothScratch keeps BSM2 buffers between images.
 type smoothScratch struct {
 	states [3]*smoothChannelState
 	blocks [][]smoothBlock
-	sizes  [3][]byte
 }
 
 type smoothGlyphModels struct {
@@ -513,6 +514,23 @@ func (st *smoothChannelState) codeMainBand(sc *symCoder, band *smoothBand, block
 	}
 	for gy := band.rows[0]; gy < band.rows[1]; gy++ {
 		for gx := 0; gx < g.groupsX; gx++ {
+			if st.gradients != nil {
+				run := st.gradients.runs[gy*g.groupsX+gx]
+				if run.length != 0 {
+					count := int(run.length)
+					band.lastIdx = int(st.levels.idx[run.level])
+					if sc.d != nil {
+						band.count += count
+						if !band.discard {
+							for k := 0; k < count; k++ {
+								blocks = append(blocks, smoothBlock{x: int32((gx + k) * g.macro), y: int32(gy * g.macro), size: uint8(g.macro), fg: run.level, bg: run.level})
+							}
+						}
+					}
+					gx += count - 1
+					continue
+				}
+			}
 			x0, y0 := gx*g.macro, gy*g.macro
 			l, t := uint32(2), uint32(2)
 			if gx > 0 {

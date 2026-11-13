@@ -28,7 +28,7 @@ func smoothTestImage(w, h int) *image.RGBA {
 	return img
 }
 
-// BSM1 must decode to exactly the pixels of the legacy BGG3/BGC wrappers.
+// BSM2 must decode to exactly the pixels of the legacy BGG3/BGC wrappers.
 func TestSmoothContainerMatchesLegacy(t *testing.T) {
 	for _, dims := range []image.Point{{1, 1}, {7, 5}, {33, 17}, {64, 64}, {130, 66}, {320, 200}} {
 		img := smoothTestImage(dims.X, dims.Y)
@@ -47,7 +47,7 @@ func TestSmoothContainerMatchesLegacy(t *testing.T) {
 					}
 					modern, legacy := encode(false), encode(true)
 					if string(modern[:4]) != smoothMagic && q < 70 {
-						t.Fatalf("%v q%d: got %q, want BSM1", dims, q, modern[:4])
+						t.Fatalf("%v q%d: got %q, want BSM2", dims, q, modern[:4])
 					}
 					for _, smooth := range []bool{false, true} {
 						if smooth && !opts[0] {

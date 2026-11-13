@@ -36,7 +36,7 @@ func TestSparseCornersRoundTrip(t *testing.T) {
 					t.Fatal("missing sparse corner format")
 				}
 				if q < 80 && !legacy && string(data[:4]) != smoothMagic {
-					t.Fatalf("%v q%d: missing BSM1 format", dims, q)
+					t.Fatalf("%v q%d: missing BSM2 format", dims, q)
 				}
 				if q == 100 {
 					standard, err := NewEncoder().Encode(img, 100, false)

@@ -773,6 +773,92 @@ be reliably compared with the current one: machine load or the measurement
 environment may have affected it, but the precise cause was not recorded. Do
 not use the ratio of those historical numbers as an optimization speedup.
 
-New files use BRC1 method 16. This decoder continues to read older binary-range,
-mixed range/Zstd and Zstd-only files. Older decoders cannot read method 16; see
+The BRC1 path uses methods 16/17; eligible smooth images now use BSM2.
+The decoder continues to read older binary-range, mixed range/Zstd and
+Zstd-only files. Older decoders cannot read the newer formats; see
 [the format specification](BRC1.md).
+
+## Implicit gradient glyphs and direct corner layout
+
+Compared with the BSM1 implementation in `6f42a5a`, BSM2
+omits Y glyphs underneath selected shared-vertex gradients. The encoder skips
+block analysis and entropy symbols for those regions; both sides derive the
+same quantized baseline from each gradient's centre. Corner eligibility reads
+the compact partition directly, removing three full-resolution size maps and
+the redundant BRC1 serialization/reparse from smooth packing. Rendering and
+quantization are unchanged, including the fallback paths.
+
+Apple M3, darwin/arm64, Go 1.27.3, default GOMAXPROCS=8. These measurements use
+`cmd/smoothbench` and `scripts/compare-smooth-speed.py`: three shuffled rounds,
+one fresh process per version/quality in each round, **100 complete cycles per
+process on the small image and 5 on the large image**. Instances/buffers are
+reused within each process, including the first cold cycle. JPEG loading,
+file output and PNG compression are outside the timers. Every cycle includes
+both BABE encoding and decoding with `-smooth`. Values below are medians of
+three process averages; cycle medians need not equal the sum of separate
+encode and decode medians. CPU is summed user/system CPU time per cycle;
+RSS is peak resident memory of the whole process, including the loaded image.
+All decoded RGBA hashes match BSM1 exactly. q100 is lossless and unchanged,
+including its bitstream; it serves as a timing control.
+
+
+### `samples/source.jpg` / `1.jpg`, 800×572
+
+| Q | Encode before → after, ms | Decode before → after, ms | Cycle before → after, ms | Bytes before → after |
+|---:|---:|---:|---:|---:|
+| 0 | 5.59 → 4.83 | 6.62 → 6.66 | 12.21 → 11.49 | 12,851 → 12,735 |
+| 10 | 8.62 → 7.68 | 8.88 → 8.81 | 17.50 → 16.59 | 38,575 → 38,091 |
+| 50 | 17.64 → 15.89 | 14.42 → 13.70 | 32.06 → 29.57 | 138,958 → 138,004 |
+| 100 | 5.65 → 5.60 | 4.25 → 4.20 | 9.90 → 9.80 | 374,884 → 374,884 |
+
+| Q | CPU/cycle before → after, ms | Peak RSS before → after, MiB |
+|---:|---:|---:|
+| 0 | 30.16 → 28.89 | 37.9 → 31.6 |
+| 10 | 34.40 → 33.15 | 37.6 → 33.2 |
+| 50 | 61.10 → 57.73 | 49.3 → 44.2 |
+| 100 | 19.22 → 19.05 | 21.0 → 20.8 |
+
+### `benchmark.jpg`, 5152×7728 (local test image)
+
+| Q | Encode before → after, ms | Decode before → after, ms | Cycle before → after, ms | Bytes before → after |
+|---:|---:|---:|---:|---:|
+| 0 | 373.41 → 350.34 | 603.43 → 513.86 | 976.85 → 860.15 | 1,248,078 → 1,248,029 |
+| 10 | 480.41 → 396.97 | 575.21 → 509.08 | 1055.61 → 906.05 | 6,569,900 → 6,569,718 |
+| 50 | 1407.31 → 1105.13 | 718.83 → 731.85 | 2126.14 → 1836.98 | 19,110,200 → 19,110,181 |
+| 100 | 550.82 → 730.82 | 453.11 → 621.27 | 1001.68 → 1352.10 | 44,085,837 → 44,085,837 |
+
+| Q | CPU/cycle before → after, ms | Peak RSS before → after, MiB |
+|---:|---:|---:|
+| 0 | 3245.14 → 2955.74 | 2141.3 → 1798.5 |
+| 10 | 4219.62 → 4159.71 | 2295.9 → 1848.6 |
+| 50 | 9178.94 → 8921.47 | 3593.9 → 3330.5 |
+| 100 | 1813.43 → 2100.59 | 1284.2 → 1283.7 |
+
+On the small image, q0/q10/q50 cycles took 5.2–7.8% less time, with 0.69–1.25%
+smaller files and 10.4–16.6% lower peak RSS. Most of the speed gain is in the
+encoder. q0 decoding is slightly slower (6.62 → 6.66 ms); this is not a uniform
+speedup of every operation. The unchanged q100 cycle differed by about 1%.
+
+The large-image timing is much less stable: the unchanged q100 control became
+35% slower in the longer run. Thus the apparent 12–14% improvement in lossy
+cycle medians is **not a reliable estimate of speedup** on this image. The
+initial shorter run even showed a q10 cycle regression (933.80 → 1066.80 ms).
+Both sets of raw rounds are retained below. Large-image size reductions are
+only 49 / 182 / 19 bytes at q0 / q10 / q50: BSM1 already compressed the implicit
+solid glyphs well, and the gains depend on gradient coverage. These changes
+are primarily an elimination of redundant work/storage, not a major new
+compression gain.
+
+Raw rounds: [small, 100 cycles](benchmarks/smooth-bsm2-source.json),
+[large, 5 cycles](benchmarks/smooth-bsm2-large.json),
+[small pilot, 10 cycles](benchmarks/smooth-bsm2-source-pilot.json), and
+[large pilot, 3 cycles](benchmarks/smooth-bsm2-large-pilot.json).
+Each file contains all three rounds, CPU/RSS and decoded/bitstream hashes.
+
+Reproduce after building `cmd/smoothbench` from `6f42a5a` and BSM2 into
+separate binaries:
+
+```sh
+python3 scripts/compare-smooth-speed.py --before /tmp/babe-bsm-before --after /tmp/babe-bsm-after --input samples/source.jpg --iterations 100 --output /tmp/source-results.json
+python3 scripts/compare-smooth-speed.py --before /tmp/babe-bsm-before --after /tmp/babe-bsm-after --input benchmark.jpg --iterations 5 --output /tmp/large-results.json
+```

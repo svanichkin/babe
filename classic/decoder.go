@@ -834,7 +834,7 @@ func (d *Decoder) Decode(compData []byte, postfilter bool) (*image.RGBA, error) 
 	var storedCorners *cornerGrid
 	var payload []byte
 	var smoothPlanes *smoothDecoded
-	if len(compData) >= 4 && string(compData[:4]) == smoothMagic {
+	if len(compData) >= 4 && (string(compData[:4]) == smoothMagic || string(compData[:4]) == legacySmoothMagic) {
 		res, err := unpackSmooth(&d.smooth, compData, d.payload[:0], d.Dither2, d.Parallel)
 		if err != nil {
 			return nil, err
